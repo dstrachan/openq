@@ -1,14 +1,16 @@
 const std = @import("std");
 
+const Compiler = @import("compiler.zig");
+
 const Self = @This();
 
 allocator: std.mem.Allocator,
-error_message: ?[]const u8 = null,
 stdout: std.fs.File.Writer,
 stderr: std.fs.File.Writer,
 
 const RuntimeError = error{
     Unknown,
+    CompilationFailed,
 };
 
 pub fn init(allocator: std.mem.Allocator) Self {
@@ -24,6 +26,6 @@ pub fn deinit(self: Self) void {
 }
 
 pub fn interpret(self: *Self, source: []const u8) RuntimeError!void {
-    _ = source;
-    self.error_message = null;
+    const compiler = Compiler.init(self.*);
+    compiler.compile(source) catch return RuntimeError.CompilationFailed;
 }

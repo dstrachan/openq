@@ -48,12 +48,8 @@ fn repl(vm: *VM) void {
             break;
         }
 
-        vm.interpret(line) catch |e| {
-            if (vm.error_message) |error_message| {
-                vm.stderr.print("ERROR: {s} - {s}\n", .{ @errorName(e), error_message }) catch std.process.exit(1);
-            } else {
-                vm.stderr.print("ERROR: {s}\n", .{@errorName(e)}) catch std.process.exit(1);
-            }
+        vm.interpret(line[0..i]) catch |e| {
+            vm.stderr.print("ERROR: {s}\n", .{@errorName(e)}) catch std.process.exit(1);
         };
     }
 }
