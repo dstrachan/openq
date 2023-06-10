@@ -1,3 +1,7 @@
+const std = @import("std");
+
+const Self = @This();
+
 token_type: TokenType,
 lexeme: []const u8,
 line: usize,
@@ -78,3 +82,12 @@ pub const TokenType = enum {
 
     eof,
 };
+
+pub fn format(value: Self, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    try writer.print(@typeName(Self) ++ "{{ .token_type = {s}, .lexeme = \"{s}\", .line = {d}, .column = {d} }}", .{
+        @tagName(value.token_type),
+        value.lexeme,
+        value.line,
+        value.column,
+    });
+}
