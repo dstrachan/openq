@@ -1,5 +1,4 @@
-const Token = @import("token.zig");
-const TokenType = @import("token.zig").TokenType;
+const Token = @import("Token.zig");
 
 const Self = @This();
 
@@ -31,12 +30,33 @@ pub fn nextToken(self: *Self) ?Token {
     self.start_column = self.end_column;
 
     const c = self.advance();
-    _ = c;
+    if (isDigit(c)) return self.number();
+    if (isAlpha(c)) return self.identifier();
+    return self.makeToken(.identifier);
+}
+
+fn number(self: *Self) Token {
+    while (!self.isAtEnd()) {
+        if (!isDigit(self.peek())) break;
+        _ = self.advance();
+    }
+    return self.makeToken(.long);
+}
+
+fn identifier(self: *Self) Token {
+    while (!self.isAtEnd()) {
+        if (!isAlphaNum(self.peek())) break;
+        _ = self.advance();
+    }
     return self.makeToken(.identifier);
 }
 
 fn isAtEnd(self: Self) bool {
     return self.current >= self.source.len;
+}
+
+fn peek(self: Self) u8 {
+    return self.source[self.current];
 }
 
 fn advance(self: *Self) u8 {
@@ -51,10 +71,14 @@ fn advance(self: *Self) u8 {
     return c;
 }
 
-fn makeToken(self: Self, token_type: TokenType) Token {
+fn makeToken(self: Self, token_type: Token.TokenType) Token {
+    return self.token(token_type, self.getSlice());
+}
+
+fn token(self: Self, token_type: Token.TokenType, lexeme: []const u8) Token {
     return .{
         .token_type = token_type,
-        .lexeme = self.getSlice(),
+        .lexeme = lexeme,
         .line = self.start_line,
         .column = self.start_column,
     };
@@ -62,4 +86,25 @@ fn makeToken(self: Self, token_type: TokenType) Token {
 
 fn getSlice(self: Self) []const u8 {
     return self.source[self.start..self.current];
+}
+
+fn isDigit(c: u8) bool {
+    return switch (c) {
+        '0'...'9' => true,
+        else => false,
+    };
+}
+
+fn isAlpha(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z' => true,
+        else => false,
+    };
+}
+
+fn isAlphaNum(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9' => true,
+        else => false,
+    };
 }
