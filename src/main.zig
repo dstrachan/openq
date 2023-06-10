@@ -53,3 +53,7 @@ fn repl(vm: *VM) void {
         };
     }
 }
+
+test "main" {
+    _ = @import("tests/scanner.zig");
+}
