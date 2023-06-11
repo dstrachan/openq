@@ -109,6 +109,10 @@ fn number(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.realOrFloat();
         },
+        'p' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.timestamp);
+        },
         else => self.makeToken(.long),
     };
 }
@@ -151,6 +155,10 @@ fn negativeNumber(self: *Self, c: u8) Token {
         '.' => blk: {
             _ = self.advance();
             break :blk self.realOrFloat();
+        },
+        'p' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.timestamp);
         },
         else => self.makeToken(.long),
     };
@@ -224,6 +232,10 @@ fn nullNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.float);
         },
+        'p' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.timestamp);
+        },
         else => self.makeToken(if (c == 'N') .long else .float),
     };
 }
@@ -250,6 +262,10 @@ fn infinity(self: *Self, c: u8) Token {
         'f' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.float);
+        },
+        'p' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.timestamp);
         },
         else => self.makeToken(if (c == 'W') .long else .float),
     };
@@ -279,8 +295,52 @@ fn nonBooleanNumber(self: *Self) Token {
             _ = self.advance();
             break :blk self.makeToken(.float);
         },
+        '.' => blk: {
+            _ = self.advance();
+            break :blk if (self.current - self.start == 5) self.maybeMonth() else self.realOrFloat();
+        },
+        'p' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.timestamp);
+        },
         else => self.makeToken(.long),
     };
+}
+
+fn maybeMonth(self: *Self) Token {
+    if (!isMonth(self.peek(), self.peekNext())) return self.realOrFloat();
+    _ = self.advance();
+    _ = self.advance();
+
+    return switch (self.peek()) {
+        'm' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.month);
+        },
+        '.' => blk: {
+            _ = self.advance();
+            break :blk self.maybeDate();
+        },
+        else => self.realOrFloat(),
+    };
+}
+
+fn maybeDate(self: *Self) Token {
+    if (!isDay(self.peek(), self.peekNext())) return self.makeToken(.invalid);
+    _ = self.advance();
+    _ = self.advance();
+
+    return switch (self.peek()) {
+        'D' => blk: {
+            _ = self.advance();
+            break :blk self.timestamp();
+        },
+        else => self.makeToken(.date),
+    };
+}
+
+fn timestamp(self: *Self) Token {
+    return self.makeToken(.timestamp);
 }
 
 fn identifier(self: *Self) Token {
@@ -455,6 +515,38 @@ fn isSymbolChar(c: u8) bool {
 fn isSymbolHandleChar(c: u8) bool {
     return switch (c) {
         'a'...'z', 'A'...'Z', '0'...'9', '.', ':', '_', '/' => true,
+        else => false,
+    };
+}
+
+fn isMonth(c1: u8, c2: u8) bool {
+    return switch (c1) {
+        '0' => switch (c2) {
+            '1'...'9' => true,
+            else => false,
+        },
+        '1' => switch (c2) {
+            '0'...'2' => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn isDay(c1: u8, c2: u8) bool {
+    return switch (c1) {
+        '0' => switch (c2) {
+            '1'...'9' => true,
+            else => false,
+        },
+        '1'...'2' => switch (c2) {
+            '0'...'9' => true,
+            else => false,
+        },
+        '3' => switch (c2) {
+            '0'...'1' => true,
+            else => false,
+        },
         else => false,
     };
 }

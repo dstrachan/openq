@@ -47,4 +47,5 @@ test "scanner" {
     _ = @import("scanner/float.zig");
     _ = @import("scanner/char.zig");
     _ = @import("scanner/symbol.zig");
+    _ = @import("scanner/timestamp.zig");
 }
