@@ -18,3 +18,15 @@ test "symbol tokens" {
     try testTokens("`_fails_with_leading_underscore", .{ .symbol, .underscore, .identifier });
     try testTokens("`no_colon_test/with_slash_fails", .{ .symbol, .forward_slash, .identifier });
 }
+
+test "symbol_list tokens" {
+    try testTokens("``", .{.symbol_list});
+    try testTokens("`a`b`c", .{.symbol_list});
+    try testTokens("``b`c", .{.symbol_list});
+    try testTokens("`a``c", .{.symbol_list});
+    try testTokens("`a`b`", .{.symbol_list});
+    try testTokens("`:a`:b`:c", .{.symbol_list});
+    try testTokens("``:b`:c", .{.symbol_list});
+    try testTokens("`:a``:c", .{.symbol_list});
+    try testTokens("`:a`:b`", .{.symbol_list});
+}

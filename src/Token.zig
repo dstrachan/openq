@@ -63,6 +63,7 @@ pub const TokenType = enum {
     char,
     char_list,
     symbol,
+    symbol_list,
     timestamp,
     month,
     date,

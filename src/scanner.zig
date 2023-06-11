@@ -387,17 +387,27 @@ fn string(self: *Self) Token {
 }
 
 fn symbol(self: *Self) Token {
-    if (self.peek() == ':') {
+    var len: usize = 1;
+    var c: u8 = self.peek();
+    while (c == '`') : (c = self.peek()) {
         _ = self.advance();
-        return self.symbolHandle();
+        len += 1;
+    }
+    while (c != 0 and !isWhitespace(c) and isSymbolStartingChar(c)) : (c = self.peek()) {
+        _ = self.advance();
+        if (c == ':') {
+            while (isSymbolHandleChar(self.peek())) _ = self.advance();
+        } else {
+            while (isSymbolChar(self.peek())) _ = self.advance();
+        }
+
+        while (self.peek() == '`') {
+            _ = self.advance();
+            len += 1;
+        }
     }
 
-    var c = self.peek();
-    if (c == 0 or isWhitespace(c) or !isSymbolStartingChar(c)) return self.makeToken(.symbol);
-
-    while (isSymbolChar(self.peek())) _ = self.advance();
-
-    return self.makeToken(.symbol);
+    return self.makeToken(if (len > 1) .symbol_list else .symbol);
 }
 
 fn symbolHandle(self: *Self) Token {
@@ -500,7 +510,7 @@ fn isWhitespace(c: u8) bool {
 
 fn isSymbolStartingChar(c: u8) bool {
     return switch (c) {
-        'a'...'z', 'A'...'Z', '0'...'9', '.' => true,
+        'a'...'z', 'A'...'Z', '0'...'9', '.', ':' => true,
         else => false,
     };
 }
