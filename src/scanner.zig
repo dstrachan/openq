@@ -44,7 +44,11 @@ pub fn nextToken(self: *Self) ?Token {
         _ = self.advance();
         return self.realOrFloat();
     }
-    return self.makeToken(.identifier);
+
+    return switch (c) {
+        '"' => self.string(),
+        else => self.makeToken(.invalid),
+    };
 }
 
 fn number(self: *Self, c: u8) Token {
@@ -275,6 +279,43 @@ fn identifier(self: *Self) Token {
     return self.makeToken(.identifier);
 }
 
+fn string(self: *Self) Token {
+    var len: usize = 0;
+    var c = self.peek();
+    while (c != 0 and c != '"') : (c = self.peek()) {
+        if (c == '\\') {
+            _ = self.advance();
+            if (isDigit(self.peek())) {
+                if (!isOctalDigit(self.advance()) or !isOctalDigit(self.advance()) or !isOctalDigit(self.advance())) {
+                    var error_c = self.peek();
+                    while (error_c != 0 and error_c != '"') : (error_c = self.peek()) {
+                        if (error_c == '\\') {
+                            _ = self.advance();
+                        }
+                        _ = self.advance();
+                    }
+
+                    _ = self.advance();
+                    return self.makeToken(.invalid);
+                }
+            } else {
+                _ = self.advance();
+            }
+        } else {
+            _ = self.advance();
+        }
+        len += 1;
+    }
+
+    if (c != '"') return self.makeToken(.invalid);
+
+    _ = self.advance();
+    return self.makeToken(switch (len) {
+        1 => .char,
+        else => .char_list,
+    });
+}
+
 fn isAtEnd(self: Self) bool {
     return self.current >= self.source.len;
 }
@@ -288,7 +329,9 @@ fn peekNext(self: Self) u8 {
 }
 
 fn advance(self: *Self) u8 {
-    const c = self.source[self.current];
+    const c = self.peek();
+    if (c == 0) return c;
+
     if (c == '\n') {
         self.end_line += 1;
         self.end_column = 0;
@@ -333,6 +376,13 @@ fn isBooleanDigit(c: u8) bool {
 fn isHexDigit(c: u8) bool {
     return switch (c) {
         '0'...'9', 'a'...'f', 'A'...'F' => true,
+        else => false,
+    };
+}
+
+fn isOctalDigit(c: u8) bool {
+    return switch (c) {
+        '0'...'7' => true,
         else => false,
     };
 }

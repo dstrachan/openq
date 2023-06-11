@@ -45,4 +45,5 @@ test "scanner" {
     _ = @import("scanner/long.zig");
     _ = @import("scanner/real.zig");
     _ = @import("scanner/float.zig");
+    _ = @import("scanner/char.zig");
 }

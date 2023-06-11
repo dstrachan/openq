@@ -53,6 +53,7 @@ pub const TokenType = enum {
     real,
     float,
     char,
+    char_list,
     symbol,
     timestamp,
     month,
