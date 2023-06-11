@@ -30,7 +30,18 @@ pub fn nextToken(self: *Self) ?Token {
     self.start_column = self.end_column;
 
     const c = self.advance();
-    if (isAlpha(c)) return self.identifier();
+    if (c == '.') {
+        if (isDigit(self.peek())) {
+            _ = self.advance();
+            return self.realOrFloat();
+        }
+
+        if (isIdentifierChar(self.peek())) {
+            _ = self.advance();
+            return self.identifier();
+        }
+    }
+    if (isIdentifierStartingChar(c)) return self.identifier();
     if (isDigit(c)) return self.number(c);
     if (c == '-') {
         if (isDigit(self.peek())) {
@@ -40,13 +51,12 @@ pub fn nextToken(self: *Self) ?Token {
             return self.realOrFloat();
         }
     }
-    if (c == '.' and isDigit(self.peek())) {
-        _ = self.advance();
-        return self.realOrFloat();
-    }
 
     return switch (c) {
+        '_' => self.makeToken(.underscore),
+        '/' => self.makeToken(.forward_slash),
         '"' => self.string(),
+        '`' => self.symbol(),
         else => self.makeToken(.invalid),
     };
 }
@@ -274,7 +284,7 @@ fn nonBooleanNumber(self: *Self) Token {
 }
 
 fn identifier(self: *Self) Token {
-    while (isAlphaNum(self.peek())) _ = self.advance();
+    while (isIdentifierChar(self.peek())) _ = self.advance();
 
     return self.makeToken(.identifier);
 }
@@ -314,6 +324,26 @@ fn string(self: *Self) Token {
         1 => .char,
         else => .char_list,
     });
+}
+
+fn symbol(self: *Self) Token {
+    if (self.peek() == ':') {
+        _ = self.advance();
+        return self.symbolHandle();
+    }
+
+    var c = self.peek();
+    if (c == 0 or isWhitespace(c) or !isSymbolStartingChar(c)) return self.makeToken(.symbol);
+
+    while (isSymbolChar(self.peek())) _ = self.advance();
+
+    return self.makeToken(.symbol);
+}
+
+fn symbolHandle(self: *Self) Token {
+    while (isSymbolHandleChar(self.peek())) _ = self.advance();
+
+    return self.makeToken(.symbol);
 }
 
 fn isAtEnd(self: Self) bool {
@@ -387,16 +417,16 @@ fn isOctalDigit(c: u8) bool {
     };
 }
 
-fn isAlpha(c: u8) bool {
+fn isIdentifierStartingChar(c: u8) bool {
     return switch (c) {
         'a'...'z', 'A'...'Z' => true,
         else => false,
     };
 }
 
-fn isAlphaNum(c: u8) bool {
+fn isIdentifierChar(c: u8) bool {
     return switch (c) {
-        'a'...'z', 'A'...'Z', '0'...'9' => true,
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_' => true,
         else => false,
     };
 }
@@ -404,6 +434,27 @@ fn isAlphaNum(c: u8) bool {
 fn isWhitespace(c: u8) bool {
     return switch (c) {
         ' ', '\n', '\r', '\t' => true,
+        else => false,
+    };
+}
+
+fn isSymbolStartingChar(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.' => true,
+        else => false,
+    };
+}
+
+fn isSymbolChar(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', ':', '_' => true,
+        else => false,
+    };
+}
+
+fn isSymbolHandleChar(c: u8) bool {
+    return switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', ':', '_', '/' => true,
         else => false,
     };
 }
