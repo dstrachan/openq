@@ -32,18 +32,27 @@ pub fn nextToken(self: *Self) ?Token {
     const c = self.advance();
     if (isAlpha(c)) return self.identifier();
     if (isDigit(c)) return self.number(c);
+    if (c == '-') return self.negativeNumber();
     return self.makeToken(.identifier);
 }
 
 fn number(self: *Self, c: u8) Token {
     if (c == '0') {
         const next_c = self.peek();
-        if (next_c == 'x') {
-            _ = self.advance();
-            return self.byte();
-        } else if (next_c == 'N' or next_c == 'n') {
-            _ = self.advance();
-            return self.nullNumber(next_c);
+        switch (next_c) {
+            'x' => {
+                _ = self.advance();
+                return self.byte();
+            },
+            'n', 'N' => {
+                _ = self.advance();
+                return self.nullNumber(next_c);
+            },
+            'w', 'W' => {
+                _ = self.advance();
+                return self.infinity(next_c);
+            },
+            else => {},
         }
     }
     if (c <= '1') return self.boolean();
@@ -51,6 +60,36 @@ fn number(self: *Self, c: u8) Token {
     while (!self.isAtEnd()) {
         if (!isDigit(self.peek())) break;
         _ = self.advance();
+    }
+
+    const next_c = self.peek();
+    if (next_c == 'h') {
+        _ = self.advance();
+        return self.makeToken(.short);
+    }
+
+    return self.makeToken(.long);
+}
+
+fn negativeNumber(self: *Self) Token {
+    while (!self.isAtEnd()) {
+        if (!isDigit(self.peek())) break;
+        _ = self.advance();
+    }
+
+    var next_c = self.peek();
+    switch (next_c) {
+        'w', 'W' => {
+            _ = self.advance();
+            return self.infinity(next_c);
+        },
+        else => {},
+    }
+
+    next_c = self.peek();
+    if (next_c == 'h') {
+        _ = self.advance();
+        return self.makeToken(.short);
     }
 
     return self.makeToken(.long);
@@ -65,6 +104,9 @@ fn boolean(self: *Self) Token {
         } else if (c == 'b') {
             _ = self.advance();
             return self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
+        } else if (c == 'h') {
+            _ = self.advance();
+            return self.makeToken(.short);
         } else {
             break;
         }
@@ -91,11 +133,29 @@ fn byte(self: *Self) Token {
 fn nullNumber(self: *Self, c: u8) Token {
     _ = c;
     const next_c = self.peek();
-    if (next_c == 'g') {
-        _ = self.advance();
-        return self.makeToken(.guid);
-    }
-    return self.makeToken(.long);
+    return switch (next_c) {
+        'g' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.guid);
+        },
+        'h' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.short);
+        },
+        else => self.makeToken(.long),
+    };
+}
+
+fn infinity(self: *Self, c: u8) Token {
+    _ = c;
+    const next_c = self.peek();
+    return switch (next_c) {
+        'h' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.short);
+        },
+        else => self.makeToken(.long),
+    };
 }
 
 fn nonBooleanNumber(self: *Self) Token {

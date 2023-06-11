@@ -40,4 +40,5 @@ test "scanner" {
     _ = @import("scanner/boolean.zig");
     _ = @import("scanner/guid.zig");
     _ = @import("scanner/byte.zig");
+    _ = @import("scanner/short.zig");
 }
