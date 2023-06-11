@@ -87,6 +87,10 @@ fn number(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.real);
         },
+        'f' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.float);
+        },
         '.' => blk: {
             _ = self.advance();
             break :blk self.realOrFloat();
@@ -126,6 +130,10 @@ fn negativeNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.real);
         },
+        'f' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.float);
+        },
         '.' => blk: {
             _ = self.advance();
             break :blk self.realOrFloat();
@@ -158,6 +166,10 @@ fn realOrFloat(self: *Self) Token {
             _ = self.advance();
             break :blk self.makeToken(.real);
         },
+        'f' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.float);
+        },
         else => self.makeToken(.float),
     };
 }
@@ -172,7 +184,6 @@ fn byte(self: *Self) Token {
 }
 
 fn nullNumber(self: *Self, c: u8) Token {
-    _ = c;
     const next_c = self.peek();
     return switch (next_c) {
         'g' => blk: {
@@ -195,12 +206,15 @@ fn nullNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.real);
         },
-        else => self.makeToken(.long),
+        'f' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.float);
+        },
+        else => self.makeToken(if (c == 'N') .long else .float),
     };
 }
 
 fn infinity(self: *Self, c: u8) Token {
-    _ = c;
     const next_c = self.peek();
     return switch (next_c) {
         'h' => blk: {
@@ -219,7 +233,11 @@ fn infinity(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.real);
         },
-        else => self.makeToken(.long),
+        'f' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.float);
+        },
+        else => self.makeToken(if (c == 'W') .long else .float),
     };
 }
 
@@ -242,6 +260,10 @@ fn nonBooleanNumber(self: *Self) Token {
         'e' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.real);
+        },
+        'f' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.float);
         },
         else => self.makeToken(.long),
     };
