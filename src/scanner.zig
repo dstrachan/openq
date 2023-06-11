@@ -32,8 +32,17 @@ pub fn nextToken(self: *Self) ?Token {
     const c = self.advance();
     if (isAlpha(c)) return self.identifier();
     if (isDigit(c)) return self.number(c);
-    if (c == '-' and isDigit(self.peek())) {
-        return self.negativeNumber(self.advance());
+    if (c == '-') {
+        if (isDigit(self.peek())) {
+            return self.negativeNumber(self.advance());
+        } else if (self.peek() == '.' and isDigit(self.peekNext())) {
+            _ = self.advance();
+            return self.realOrFloat();
+        }
+    }
+    if (c == '.' and isDigit(self.peek())) {
+        _ = self.advance();
+        return self.realOrFloat();
     }
     return self.makeToken(.identifier);
 }
@@ -74,6 +83,14 @@ fn number(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.long);
         },
+        'e' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.real);
+        },
+        '.' => blk: {
+            _ = self.advance();
+            break :blk self.realOrFloat();
+        },
         else => self.makeToken(.long),
     };
 }
@@ -105,6 +122,14 @@ fn negativeNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.long);
         },
+        'e' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.real);
+        },
+        '.' => blk: {
+            _ = self.advance();
+            break :blk self.realOrFloat();
+        },
         else => self.makeToken(.long),
     };
 }
@@ -112,12 +137,29 @@ fn negativeNumber(self: *Self, c: u8) Token {
 fn maybeBoolean(self: *Self) Token {
     while (isBooleanDigit(self.peek())) _ = self.advance();
 
-    if (self.peek() == 'b') {
-        _ = self.advance();
-        return self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
-    }
+    return switch (self.peek()) {
+        'b' => {
+            _ = self.advance();
+            return self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
+        },
+        '.' => {
+            _ = self.advance();
+            return self.realOrFloat();
+        },
+        else => self.nonBooleanNumber(),
+    };
+}
 
-    return self.nonBooleanNumber();
+fn realOrFloat(self: *Self) Token {
+    while (isDigit(self.peek())) _ = self.advance();
+
+    return switch (self.peek()) {
+        'e' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.real);
+        },
+        else => self.makeToken(.float),
+    };
 }
 
 fn byte(self: *Self) Token {
@@ -149,6 +191,10 @@ fn nullNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.long);
         },
+        'e' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.real);
+        },
         else => self.makeToken(.long),
     };
 }
@@ -168,6 +214,10 @@ fn infinity(self: *Self, c: u8) Token {
         'j' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.long);
+        },
+        'e' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.real);
         },
         else => self.makeToken(.long),
     };
@@ -189,6 +239,10 @@ fn nonBooleanNumber(self: *Self) Token {
             _ = self.advance();
             break :blk self.makeToken(.long);
         },
+        'e' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.real);
+        },
         else => self.makeToken(.long),
     };
 }
@@ -205,6 +259,10 @@ fn isAtEnd(self: Self) bool {
 
 fn peek(self: Self) u8 {
     return if (self.isAtEnd()) 0 else self.source[self.current];
+}
+
+fn peekNext(self: Self) u8 {
+    return if (self.current >= self.source.len - 1) 0 else self.source[self.current + 1];
 }
 
 fn advance(self: *Self) u8 {

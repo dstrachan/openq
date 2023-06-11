@@ -43,4 +43,5 @@ test "scanner" {
     _ = @import("scanner/short.zig");
     _ = @import("scanner/int.zig");
     _ = @import("scanner/long.zig");
+    _ = @import("scanner/real.zig");
 }
