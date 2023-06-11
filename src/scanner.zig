@@ -32,7 +32,9 @@ pub fn nextToken(self: *Self) ?Token {
     const c = self.advance();
     if (isAlpha(c)) return self.identifier();
     if (isDigit(c)) return self.number(c);
-    if (c == '-') return self.negativeNumber();
+    if (c == '-' and isDigit(self.peek())) {
+        return self.negativeNumber(self.advance());
+    }
     return self.makeToken(.identifier);
 }
 
@@ -55,76 +57,65 @@ fn number(self: *Self, c: u8) Token {
             else => {},
         }
     }
-    if (c <= '1') return self.boolean();
+    if (c <= '1') return self.maybeBoolean();
 
-    while (!self.isAtEnd()) {
-        if (!isDigit(self.peek())) break;
-        _ = self.advance();
-    }
+    while (isDigit(self.peek())) _ = self.advance();
 
-    const next_c = self.peek();
-    if (next_c == 'h') {
-        _ = self.advance();
-        return self.makeToken(.short);
-    }
-
-    return self.makeToken(.long);
-}
-
-fn negativeNumber(self: *Self) Token {
-    while (!self.isAtEnd()) {
-        if (!isDigit(self.peek())) break;
-        _ = self.advance();
-    }
-
-    var next_c = self.peek();
-    switch (next_c) {
-        'w', 'W' => {
+    return switch (self.peek()) {
+        'h' => blk: {
             _ = self.advance();
-            return self.infinity(next_c);
+            break :blk self.makeToken(.short);
         },
-        else => {},
-    }
-
-    next_c = self.peek();
-    if (next_c == 'h') {
-        _ = self.advance();
-        return self.makeToken(.short);
-    }
-
-    return self.makeToken(.long);
+        'i' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.int);
+        },
+        else => self.makeToken(.long),
+    };
 }
 
-fn boolean(self: *Self) Token {
-    while (!self.isAtEnd()) {
-        const c = self.peek();
-        if (isDigit(c)) {
-            _ = self.advance();
-            if (c > '1') return self.nonBooleanNumber();
-        } else if (c == 'b') {
-            _ = self.advance();
-            return self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
-        } else if (c == 'h') {
-            _ = self.advance();
-            return self.makeToken(.short);
-        } else {
-            break;
+fn negativeNumber(self: *Self, c: u8) Token {
+    if (c == '0') {
+        const next_c = self.peek();
+        switch (next_c) {
+            'w', 'W' => {
+                _ = self.advance();
+                return self.infinity(next_c);
+            },
+            else => {},
         }
     }
+
+    while (isDigit(self.peek())) _ = self.advance();
+
+    return switch (self.peek()) {
+        'h' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.short);
+        },
+        'i' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.int);
+        },
+        else => self.makeToken(.long),
+    };
+}
+
+fn maybeBoolean(self: *Self) Token {
+    while (isBooleanDigit(self.peek())) _ = self.advance();
+
+    if (self.peek() == 'b') {
+        _ = self.advance();
+        return self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
+    }
+
     return self.nonBooleanNumber();
 }
 
 fn byte(self: *Self) Token {
-    while (!self.isAtEnd()) {
-        const c = self.peek();
-        if (isHexDigit(c)) {
-            _ = self.advance();
-        } else {
-            break;
-        }
-    }
-    const len = self.current - self.start;
-    return self.makeToken(switch (len) {
+    while (isHexDigit(self.peek())) _ = self.advance();
+
+    return self.makeToken(switch (self.current - self.start) {
         3, 4 => .byte,
         else => .byte_list,
     });
@@ -142,6 +133,10 @@ fn nullNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.short);
         },
+        'i' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.int);
+        },
         else => self.makeToken(.long),
     };
 }
@@ -154,12 +149,28 @@ fn infinity(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.short);
         },
+        'i' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.int);
+        },
         else => self.makeToken(.long),
     };
 }
 
 fn nonBooleanNumber(self: *Self) Token {
-    return self.makeToken(.long);
+    while (isDigit(self.peek())) _ = self.advance();
+
+    return switch (self.peek()) {
+        'h' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.short);
+        },
+        'i' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.int);
+        },
+        else => self.makeToken(.long),
+    };
 }
 
 fn nonByteNumber(self: *Self) Token {
@@ -167,10 +178,8 @@ fn nonByteNumber(self: *Self) Token {
 }
 
 fn identifier(self: *Self) Token {
-    while (!self.isAtEnd()) {
-        if (!isAlphaNum(self.peek())) break;
-        _ = self.advance();
-    }
+    while (isAlphaNum(self.peek())) _ = self.advance();
+
     return self.makeToken(.identifier);
 }
 
@@ -179,7 +188,7 @@ fn isAtEnd(self: Self) bool {
 }
 
 fn peek(self: Self) u8 {
-    return self.source[self.current];
+    return if (self.isAtEnd()) 0 else self.source[self.current];
 }
 
 fn advance(self: *Self) u8 {
@@ -214,6 +223,13 @@ fn getSlice(self: Self) []const u8 {
 fn isDigit(c: u8) bool {
     return switch (c) {
         '0'...'9' => true,
+        else => false,
+    };
+}
+
+fn isBooleanDigit(c: u8) bool {
+    return switch (c) {
+        '0', '1' => true,
         else => false,
     };
 }
