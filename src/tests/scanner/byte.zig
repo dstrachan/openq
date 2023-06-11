@@ -13,6 +13,7 @@ test "byte tokens" {
     try testTokens("0x0f", .{.byte});
     try testTokens("0xFF", .{.byte});
     try testTokens("0xff", .{.byte});
+    try testTokens("0x0g", .{ .byte, .identifier });
 }
 
 test "byte_list tokens" {
@@ -26,4 +27,5 @@ test "byte_list tokens" {
     try testTokens("0x0f00", .{.byte_list});
     try testTokens("0xFF00", .{.byte_list});
     try testTokens("0xff00", .{.byte_list});
+    try testTokens("0xg", .{ .byte_list, .identifier });
 }

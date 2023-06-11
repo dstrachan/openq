@@ -30,16 +30,79 @@ pub fn nextToken(self: *Self) ?Token {
     self.start_column = self.end_column;
 
     const c = self.advance();
-    if (isDigit(c)) return self.number();
     if (isAlpha(c)) return self.identifier();
+    if (isDigit(c)) return self.number(c);
     return self.makeToken(.identifier);
 }
 
-fn number(self: *Self) Token {
+fn number(self: *Self, c: u8) Token {
+    if (c == '0') {
+        const next_c = self.peek();
+        if (next_c == 'x') {
+            _ = self.advance();
+            return self.byte();
+        } else if (next_c == 'N' or next_c == 'n') {
+            _ = self.advance();
+            return self.nullNumber(next_c);
+        }
+    }
+    if (c <= '1') return self.boolean();
+
     while (!self.isAtEnd()) {
         if (!isDigit(self.peek())) break;
         _ = self.advance();
     }
+
+    return self.makeToken(.long);
+}
+
+fn boolean(self: *Self) Token {
+    while (!self.isAtEnd()) {
+        const c = self.peek();
+        if (isDigit(c)) {
+            _ = self.advance();
+            if (c > '1') return self.nonBooleanNumber();
+        } else if (c == 'b') {
+            _ = self.advance();
+            return self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
+        } else {
+            break;
+        }
+    }
+    return self.nonBooleanNumber();
+}
+
+fn byte(self: *Self) Token {
+    while (!self.isAtEnd()) {
+        const c = self.peek();
+        if (isHexDigit(c)) {
+            _ = self.advance();
+        } else {
+            break;
+        }
+    }
+    const len = self.current - self.start;
+    return self.makeToken(switch (len) {
+        3, 4 => .byte,
+        else => .byte_list,
+    });
+}
+
+fn nullNumber(self: *Self, c: u8) Token {
+    _ = c;
+    const next_c = self.peek();
+    if (next_c == 'g') {
+        _ = self.advance();
+        return self.makeToken(.guid);
+    }
+    return self.makeToken(.long);
+}
+
+fn nonBooleanNumber(self: *Self) Token {
+    return self.makeToken(.long);
+}
+
+fn nonByteNumber(self: *Self) Token {
     return self.makeToken(.long);
 }
 
@@ -95,6 +158,13 @@ fn isDigit(c: u8) bool {
     };
 }
 
+fn isHexDigit(c: u8) bool {
+    return switch (c) {
+        '0'...'9', 'a'...'f', 'A'...'F' => true,
+        else => false,
+    };
+}
+
 fn isAlpha(c: u8) bool {
     return switch (c) {
         'a'...'z', 'A'...'Z' => true,
@@ -105,6 +175,13 @@ fn isAlpha(c: u8) bool {
 fn isAlphaNum(c: u8) bool {
     return switch (c) {
         'a'...'z', 'A'...'Z', '0'...'9' => true,
+        else => false,
+    };
+}
+
+fn isWhitespace(c: u8) bool {
+    return switch (c) {
+        ' ', '\n', '\r', '\t' => true,
         else => false,
     };
 }

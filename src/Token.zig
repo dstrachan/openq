@@ -64,6 +64,7 @@ pub const TokenType = enum {
     time,
     identifier,
 
+    invalid,
     eof,
 };
 
