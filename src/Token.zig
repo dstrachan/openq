@@ -41,6 +41,14 @@ pub const TokenType = enum {
     at,
     dot,
 
+    // Adverbs.
+    apostrophe,
+    apostrophe_colon,
+    forward_slash,
+    forward_slash_colon,
+    back_slash,
+    back_slash_colon,
+
     // Literals.
     boolean,
     boolean_list,
