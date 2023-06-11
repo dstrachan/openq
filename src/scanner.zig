@@ -70,6 +70,10 @@ fn number(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.int);
         },
+        'j' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.long);
+        },
         else => self.makeToken(.long),
     };
 }
@@ -96,6 +100,10 @@ fn negativeNumber(self: *Self, c: u8) Token {
         'i' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.int);
+        },
+        'j' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.long);
         },
         else => self.makeToken(.long),
     };
@@ -137,6 +145,10 @@ fn nullNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.int);
         },
+        'j' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.long);
+        },
         else => self.makeToken(.long),
     };
 }
@@ -152,6 +164,10 @@ fn infinity(self: *Self, c: u8) Token {
         'i' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.int);
+        },
+        'j' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.long);
         },
         else => self.makeToken(.long),
     };
@@ -169,12 +185,12 @@ fn nonBooleanNumber(self: *Self) Token {
             _ = self.advance();
             break :blk self.makeToken(.int);
         },
+        'j' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.long);
+        },
         else => self.makeToken(.long),
     };
-}
-
-fn nonByteNumber(self: *Self) Token {
-    return self.makeToken(.long);
 }
 
 fn identifier(self: *Self) Token {
