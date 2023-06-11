@@ -4,18 +4,23 @@ const testTokens = @import("../scanner.zig").testTokens;
 
 test "float tokens" {
     try testTokens("0f", .{.float});
+    try testTokens("12f", .{.float});
     try testTokens("2f", .{.float});
     try testTokens("-2f", .{.float});
 
     try testTokens("0.", .{.float});
+    try testTokens("12.", .{.float});
     try testTokens("0.f", .{.float});
+    try testTokens("12.f", .{.float});
     try testTokens("2.", .{.float});
     try testTokens("2.f", .{.float});
     try testTokens("-2.", .{.float});
     try testTokens("-2.f", .{.float});
 
     try testTokens("0.1", .{.float});
+    try testTokens("12.1", .{.float});
     try testTokens("0.1f", .{.float});
+    try testTokens("12.1f", .{.float});
     try testTokens("2.2", .{.float});
     try testTokens("2.2f", .{.float});
     try testTokens("-2.3", .{.float});
