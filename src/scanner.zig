@@ -107,7 +107,7 @@ fn number(self: *Self, c: u8) Token {
         },
         '.' => blk: {
             _ = self.advance();
-            break :blk self.realOrFloat();
+            break :blk if (self.current - self.start == 5) self.maybeMonth() else self.realOrFloat();
         },
         'p' => blk: {
             _ = self.advance();
@@ -340,6 +340,59 @@ fn maybeDate(self: *Self) Token {
 }
 
 fn timestamp(self: *Self) Token {
+    if (self.peek() == '.') {
+        _ = self.advance();
+        while (isDigit(self.peek())) _ = self.advance();
+        return self.makeToken(.timestamp);
+    }
+
+    var start = self.current;
+    while (isDigit(self.peek())) _ = self.advance();
+
+    if (self.peek() == '.') {
+        _ = self.advance();
+        while (isDigit(self.peek())) _ = self.advance();
+    } else if (self.peek() == ':') {
+        _ = self.advance();
+        if (self.current - start != 3) return self.makeToken(.invalid);
+        if (self.peek() == '.') {
+            _ = self.advance();
+            while (isDigit(self.peek())) _ = self.advance();
+            return self.makeToken(.timestamp);
+        }
+
+        start = self.current;
+        while (isDigit(self.peek())) _ = self.advance();
+
+        if (self.peek() == '.') {
+            _ = self.advance();
+            while (isDigit(self.peek())) _ = self.advance();
+        } else if (self.peek() == ':') {
+            _ = self.advance();
+            if (self.current - start != 3) return self.makeToken(.invalid);
+            if (self.peek() == '.') {
+                _ = self.advance();
+                while (isDigit(self.peek())) _ = self.advance();
+                return self.makeToken(.timestamp);
+            }
+
+            start = self.current;
+            while (isDigit(self.peek())) _ = self.advance();
+
+            if (self.peek() == '.') {
+                _ = self.advance();
+                while (isDigit(self.peek())) _ = self.advance();
+            } else if (self.peek() == ':') {
+                _ = self.advance();
+                if (self.current - start != 3) return self.makeToken(.invalid);
+                if (self.peek() == '.') {
+                    _ = self.advance();
+                    while (isDigit(self.peek())) _ = self.advance();
+                }
+            }
+        }
+    }
+
     return self.makeToken(.timestamp);
 }
 

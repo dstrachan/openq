@@ -41,10 +41,10 @@ test "timestamp tokens" {
     try testTokens("1999.01.01D12:34:56.", .{.timestamp});
     try testTokens("1999.01.01D12:34:56.123", .{.timestamp});
 
-    try testTokens("1999.01.01D", .{.timestamp});
-    try testTokens("1999.01.01D.", .{.timestamp});
-    try testTokens("1999.01.01D.123", .{.timestamp});
-    try testTokens("1999.01.01D1", .{.timestamp});
+    try testTokens("2000.01.01D", .{.timestamp});
+    try testTokens("2000.01.01D.", .{.timestamp});
+    try testTokens("2000.01.01D.123", .{.timestamp});
+    try testTokens("2000.01.01D1", .{.timestamp});
     try testTokens("2000.01.01D1.", .{.timestamp});
     try testTokens("2000.01.01D1.123", .{.timestamp});
     try testTokens("2000.01.01D12", .{.timestamp});
@@ -74,6 +74,8 @@ test "timestamp tokens" {
     try testTokens("2000.01.01D12:34:56", .{.timestamp});
     try testTokens("2000.01.01D12:34:56.", .{.timestamp});
     try testTokens("2000.01.01D12:34:56.123", .{.timestamp});
+
+    // TODO: Negative cases
 
     try testTokens("0np", .{.timestamp});
     try testTokens("0Np", .{.timestamp});
