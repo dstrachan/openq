@@ -363,6 +363,7 @@ fn timestamp(self: *Self) Token {
 
         start = self.current;
         while (isDigit(self.peek())) _ = self.advance();
+        if (self.current - start == 1) return self.makeToken(.invalid);
 
         if (self.peek() == '.') {
             _ = self.advance();
@@ -378,6 +379,7 @@ fn timestamp(self: *Self) Token {
 
             start = self.current;
             while (isDigit(self.peek())) _ = self.advance();
+            if (self.current - start == 1) return self.makeToken(.invalid);
 
             if (self.peek() == '.') {
                 _ = self.advance();

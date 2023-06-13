@@ -28,6 +28,9 @@ test "timestamp tokens" {
     try testTokens("1999.01.01D12:34", .{.timestamp});
     try testTokens("1999.01.01D12:34.", .{.timestamp});
     try testTokens("1999.01.01D12:34.123", .{.timestamp});
+    try testTokens("1999.01.01D12:34:", .{.timestamp});
+    try testTokens("1999.01.01D12:34:.", .{.timestamp});
+    try testTokens("1999.01.01D12:34:.123", .{.timestamp});
     try testTokens("1999.01.01D12345", .{.timestamp});
     try testTokens("1999.01.01D12345.", .{.timestamp});
     try testTokens("1999.01.01D12345.123", .{.timestamp});
@@ -62,6 +65,9 @@ test "timestamp tokens" {
     try testTokens("2000.01.01D12:34", .{.timestamp});
     try testTokens("2000.01.01D12:34.", .{.timestamp});
     try testTokens("2000.01.01D12:34.123", .{.timestamp});
+    try testTokens("2000.01.01D12:34:", .{.timestamp});
+    try testTokens("2000.01.01D12:34:.", .{.timestamp});
+    try testTokens("2000.01.01D12:34:.123", .{.timestamp});
     try testTokens("2000.01.01D12345", .{.timestamp});
     try testTokens("2000.01.01D12345.", .{.timestamp});
     try testTokens("2000.01.01D12345.123", .{.timestamp});
@@ -86,11 +92,9 @@ test "timestamp tokens" {
 test "invalid timestamp tokens" {
     try testTokens("1999.01.01D1:", .{.invalid});
     try testTokens("1999.01.01D12:3", .{.invalid});
-    try testTokens("1999.01.01D12:34:", .{.invalid});
     try testTokens("1999.01.01D12:34:5", .{.invalid});
 
     try testTokens("2000.01.01D1:", .{.invalid});
     try testTokens("2000.01.01D12:3", .{.invalid});
-    try testTokens("2000.01.01D12:34:", .{.invalid});
     try testTokens("2000.01.01D12:34:5", .{.invalid});
 }
