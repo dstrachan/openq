@@ -48,4 +48,5 @@ test "scanner" {
     _ = @import("scanner/char.zig");
     _ = @import("scanner/symbol.zig");
     _ = @import("scanner/timestamp.zig");
+    _ = @import("scanner/month.zig");
 }
