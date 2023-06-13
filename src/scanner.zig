@@ -116,8 +116,16 @@ fn number(self: *Self, c: u8) Token {
         'm' => blk: {
             _ = self.advance();
             break :blk self.makeToken(switch (self.current - self.start) {
-                5 => if (self.isMonthSlice(0)) .month else .invalid,
-                7 => if (self.isYearSlice(0) and self.isMonthSlice(0)) .month else .invalid,
+                5 => if (self.isMonthSlice(2)) .month else .invalid,
+                7 => if (self.isYearSlice(4) and self.isMonthSlice(2)) .month else .invalid,
+                else => .invalid,
+            });
+        },
+        'd' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(switch (self.current - self.start) {
+                7 => if (self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
+                9 => if (self.isYearSlice(6) and self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
                 else => .invalid,
             });
         },
@@ -187,8 +195,16 @@ fn maybeBoolean(self: *Self) Token {
         'm' => blk: {
             _ = self.advance();
             break :blk self.makeToken(switch (self.current - self.start) {
-                5 => if (self.isMonthSlice(0)) .month else .invalid,
-                7 => if (self.isYearSlice(0) and self.isMonthSlice(0)) .month else .invalid,
+                5 => if (self.isMonthSlice(2)) .month else .invalid,
+                7 => if (self.isYearSlice(4) and self.isMonthSlice(2)) .month else .invalid,
+                else => .invalid,
+            });
+        },
+        'd' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(switch (self.current - self.start) {
+                7 => if (self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
+                9 => if (self.isYearSlice(6) and self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
                 else => .invalid,
             });
         },
@@ -210,6 +226,11 @@ fn realOrFloat(self: *Self) Token {
         },
         'm' => blk: {
             _ = self.advance();
+            break :blk self.makeToken(.invalid);
+        },
+        '.' => blk: {
+            _ = self.advance();
+            while (isDigit(self.peek())) _ = self.advance();
             break :blk self.makeToken(.invalid);
         },
         else => self.makeToken(.float),
@@ -260,6 +281,10 @@ fn nullNumber(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.month);
         },
+        'd' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.date);
+        },
         else => self.makeToken(if (c == 'N') .long else .float),
     };
 }
@@ -294,6 +319,10 @@ fn infinity(self: *Self, c: u8) Token {
         'm' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.month);
+        },
+        'd' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.date);
         },
         else => self.makeToken(if (c == 'W') .long else .float),
     };
@@ -334,8 +363,16 @@ fn nonBooleanNumber(self: *Self) Token {
         'm' => blk: {
             _ = self.advance();
             break :blk self.makeToken(switch (self.current - self.start) {
-                5 => if (self.isMonthSlice(0)) .month else .invalid,
-                7 => if (self.isYearSlice(0) and self.isMonthSlice(0)) .month else .invalid,
+                5 => if (self.isMonthSlice(2)) .month else .invalid,
+                7 => if (self.isYearSlice(4) and self.isMonthSlice(2)) .month else .invalid,
+                else => .invalid,
+            });
+        },
+        'd' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(switch (self.current - self.start) {
+                7 => if (self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
+                9 => if (self.isYearSlice(6) and self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
                 else => .invalid,
             });
         },
@@ -344,7 +381,7 @@ fn nonBooleanNumber(self: *Self) Token {
 }
 
 fn maybeMonth(self: *Self) Token {
-    if (!isMonth(self.peek(), self.peekNext())) return self.realOrFloat();
+    if (!self.isYearSlice(2) or !isMonth(self.peek(), self.peekNext())) return self.realOrFloat();
     _ = self.advance();
     _ = self.advance();
 
@@ -362,9 +399,7 @@ fn maybeMonth(self: *Self) Token {
 }
 
 fn maybeDate(self: *Self) Token {
-    if (!isDay(self.peek(), self.peekNext())) return self.makeToken(.invalid);
-    _ = self.advance();
-    _ = self.advance();
+    if (!isDay(self.advance(), self.advance())) return self.makeToken(.invalid);
 
     return switch (self.peek()) {
         'D' => blk: {
@@ -636,8 +671,8 @@ fn isMonth(c1: u8, c2: u8) bool {
 
 fn isMonthSlice(self: Self, offset: usize) bool {
     return isMonth(
-        self.source[self.current - (3 + offset)],
-        self.source[self.current - (2 + offset)],
+        self.source[self.current - (offset + 1)],
+        self.source[self.current - (offset + 0)],
     );
 }
 
@@ -647,10 +682,10 @@ fn isYear(c1: u8, c2: u8, c3: u8, c4: u8) bool {
 
 fn isYearSlice(self: Self, offset: usize) bool {
     return isYear(
-        self.source[self.current - (7 + offset)],
-        self.source[self.current - (6 + offset)],
-        self.source[self.current - (5 + offset)],
-        self.source[self.current - (4 + offset)],
+        self.source[self.current - (offset + 3)],
+        self.source[self.current - (offset + 2)],
+        self.source[self.current - (offset + 1)],
+        self.source[self.current - (offset + 0)],
     );
 }
 
@@ -670,4 +705,11 @@ fn isDay(c1: u8, c2: u8) bool {
         },
         else => false,
     };
+}
+
+fn isDaySlice(self: Self, offset: usize) bool {
+    return isDay(
+        self.source[self.current - (offset + 1)],
+        self.source[self.current - (offset + 0)],
+    );
 }
