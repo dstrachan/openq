@@ -69,13 +69,21 @@ fn number(self: *Self, c: u8) Token {
                 _ = self.advance();
                 return self.byte();
             },
-            'n', 'N' => {
+            'N' => {
                 _ = self.advance();
-                return self.nullNumber(next_c);
+                return self.nullNumber(.long);
             },
-            'w', 'W' => {
+            'n' => {
                 _ = self.advance();
-                return self.infinity(next_c);
+                return self.nullNumber(.float);
+            },
+            'W' => {
+                _ = self.advance();
+                return self.nullOrInf(.long);
+            },
+            'w' => {
+                _ = self.advance();
+                return self.nullOrInf(.float);
             },
             else => {},
         }
@@ -135,11 +143,14 @@ fn number(self: *Self, c: u8) Token {
 
 fn negativeNumber(self: *Self, c: u8) Token {
     if (c == '0') {
-        const next_c = self.peek();
-        switch (next_c) {
-            'w', 'W' => {
+        switch (self.peek()) {
+            'W' => {
                 _ = self.advance();
-                return self.infinity(next_c);
+                return self.nullOrInf(.long);
+            },
+            'w' => {
+                _ = self.advance();
+                return self.nullOrInf(.float);
             },
             else => {},
         }
@@ -246,52 +257,17 @@ fn byte(self: *Self) Token {
     });
 }
 
-fn nullNumber(self: *Self, c: u8) Token {
-    const next_c = self.peek();
-    return switch (next_c) {
-        'g' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.guid);
-        },
-        'h' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.short);
-        },
-        'i' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.int);
-        },
-        'j' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.long);
-        },
-        'e' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.real);
-        },
-        'f' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.float);
-        },
-        'p' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.timestamp);
-        },
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.month);
-        },
-        'd' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.date);
-        },
-        else => self.makeToken(if (c == 'N') .long else .float),
-    };
+fn nullNumber(self: *Self, token_type: Token.TokenType) Token {
+    if (self.peek() == 'g') {
+        _ = self.advance();
+        return self.makeToken(.guid);
+    }
+
+    return self.nullOrInf(token_type);
 }
 
-fn infinity(self: *Self, c: u8) Token {
-    const next_c = self.peek();
-    return switch (next_c) {
+fn nullOrInf(self: *Self, token_type: Token.TokenType) Token {
+    return switch (self.peek()) {
         'h' => blk: {
             _ = self.advance();
             break :blk self.makeToken(.short);
@@ -324,7 +300,11 @@ fn infinity(self: *Self, c: u8) Token {
             _ = self.advance();
             break :blk self.makeToken(.date);
         },
-        else => self.makeToken(if (c == 'W') .long else .float),
+        'z' => blk: {
+            _ = self.advance();
+            break :blk self.makeToken(.datetime);
+        },
+        else => self.makeToken(token_type),
     };
 }
 
