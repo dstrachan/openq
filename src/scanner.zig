@@ -384,17 +384,21 @@ fn maybeDate(self: *Self) Token {
     return switch (self.peek()) {
         'D' => blk: {
             _ = self.advance();
-            break :blk self.timestamp();
+            break :blk self.timestampOrDatetime(.timestamp);
+        },
+        'T' => blk: {
+            _ = self.advance();
+            break :blk self.timestampOrDatetime(.datetime);
         },
         else => self.makeToken(.date),
     };
 }
 
-fn timestamp(self: *Self) Token {
+fn timestampOrDatetime(self: *Self, token_type: Token.TokenType) Token {
     if (self.peek() == '.') {
         _ = self.advance();
         while (isDigit(self.peek())) _ = self.advance();
-        return self.makeToken(.timestamp);
+        return self.makeToken(token_type);
     }
 
     var start = self.current;
@@ -409,7 +413,7 @@ fn timestamp(self: *Self) Token {
         if (self.peek() == '.') {
             _ = self.advance();
             while (isDigit(self.peek())) _ = self.advance();
-            return self.makeToken(.timestamp);
+            return self.makeToken(token_type);
         }
 
         start = self.current;
@@ -425,7 +429,7 @@ fn timestamp(self: *Self) Token {
             if (self.peek() == '.') {
                 _ = self.advance();
                 while (isDigit(self.peek())) _ = self.advance();
-                return self.makeToken(.timestamp);
+                return self.makeToken(token_type);
             }
 
             start = self.current;
@@ -446,7 +450,7 @@ fn timestamp(self: *Self) Token {
         }
     }
 
-    return self.makeToken(.timestamp);
+    return self.makeToken(token_type);
 }
 
 fn identifier(self: *Self) Token {

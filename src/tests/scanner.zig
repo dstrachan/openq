@@ -50,4 +50,5 @@ test "scanner" {
     _ = @import("scanner/timestamp.zig");
     _ = @import("scanner/month.zig");
     _ = @import("scanner/date.zig");
+    _ = @import("scanner/datetime.zig");
 }
