@@ -87,10 +87,28 @@ test "datetime tokens" {
 
 test "invalid datetime tokens" {
     try testTokens("1999.01.01T1:", .{.invalid});
+    try testTokens("1999.01.01T1:.", .{.invalid});
+    try testTokens("1999.01.01T1:.123", .{.invalid});
     try testTokens("1999.01.01T12:3", .{.invalid});
+    try testTokens("1999.01.01T12:3.", .{.invalid});
+    try testTokens("1999.01.01T12:3.123", .{.invalid});
+    try testTokens("1999.01.01T12:3:", .{.invalid});
+    try testTokens("1999.01.01T12:3:.", .{.invalid});
+    try testTokens("1999.01.01T12:3:.123", .{.invalid});
     try testTokens("1999.01.01T12:34:5", .{.invalid});
+    try testTokens("1999.01.01T12:34:5.", .{.invalid});
+    try testTokens("1999.01.01T12:34:5.123", .{.invalid});
 
     try testTokens("2000.01.01T1:", .{.invalid});
+    try testTokens("2000.01.01T1:.", .{.invalid});
+    try testTokens("2000.01.01T1:.123", .{.invalid});
     try testTokens("2000.01.01T12:3", .{.invalid});
+    try testTokens("2000.01.01T12:3.", .{.invalid});
+    try testTokens("2000.01.01T12:3.123", .{.invalid});
+    try testTokens("2000.01.01T12:3:", .{.invalid});
+    try testTokens("2000.01.01T12:3:.", .{.invalid});
+    try testTokens("2000.01.01T12:3:.123", .{.invalid});
     try testTokens("2000.01.01T12:34:5", .{.invalid});
+    try testTokens("2000.01.01T12:34:5.", .{.invalid});
+    try testTokens("2000.01.01T12:34:5.123", .{.invalid});
 }

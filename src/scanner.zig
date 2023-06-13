@@ -409,7 +409,11 @@ fn timestampOrDatetime(self: *Self, token_type: Token.TokenType) Token {
         while (isDigit(self.peek())) _ = self.advance();
     } else if (self.peek() == ':') {
         _ = self.advance();
-        if (self.current - start != 3) return self.makeToken(.invalid);
+        if (self.current - start != 3) {
+            if (self.peek() == '.') _ = self.advance();
+            while (isDigit(self.peek())) _ = self.advance();
+            return self.makeToken(.invalid);
+        }
         if (self.peek() == '.') {
             _ = self.advance();
             while (isDigit(self.peek())) _ = self.advance();
@@ -418,14 +422,24 @@ fn timestampOrDatetime(self: *Self, token_type: Token.TokenType) Token {
 
         start = self.current;
         while (isDigit(self.peek())) _ = self.advance();
-        if (self.current - start == 1) return self.makeToken(.invalid);
+        if (self.current - start == 1) {
+            if (self.peek() == ':') _ = self.advance();
+            while (isDigit(self.peek())) _ = self.advance();
+            if (self.peek() == '.') _ = self.advance();
+            while (isDigit(self.peek())) _ = self.advance();
+            return self.makeToken(.invalid);
+        }
 
         if (self.peek() == '.') {
             _ = self.advance();
             while (isDigit(self.peek())) _ = self.advance();
         } else if (self.peek() == ':') {
             _ = self.advance();
-            if (self.current - start != 3) return self.makeToken(.invalid);
+            if (self.current - start != 3) {
+                if (self.peek() == '.') _ = self.advance();
+                while (isDigit(self.peek())) _ = self.advance();
+                return self.makeToken(.invalid);
+            }
             if (self.peek() == '.') {
                 _ = self.advance();
                 while (isDigit(self.peek())) _ = self.advance();
@@ -434,7 +448,13 @@ fn timestampOrDatetime(self: *Self, token_type: Token.TokenType) Token {
 
             start = self.current;
             while (isDigit(self.peek())) _ = self.advance();
-            if (self.current - start == 1) return self.makeToken(.invalid);
+            if (self.current - start == 1) {
+                if (self.peek() == ':') _ = self.advance();
+                while (isDigit(self.peek())) _ = self.advance();
+                if (self.peek() == '.') _ = self.advance();
+                while (isDigit(self.peek())) _ = self.advance();
+                return self.makeToken(.invalid);
+            }
 
             if (self.peek() == '.') {
                 _ = self.advance();
