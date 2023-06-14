@@ -33,7 +33,7 @@ pub fn nextToken(self: *Self) ?Token {
     if (c == '.') {
         if (isDigit(self.peek())) {
             _ = self.advance();
-            return self.realOrFloat();
+            return self.number();
         }
 
         if (isIdentifierChar(self.peek())) {
@@ -42,435 +42,58 @@ pub fn nextToken(self: *Self) ?Token {
         }
     }
     if (isIdentifierStartingChar(c)) return self.identifier();
-    if (isDigit(c)) return self.number(c);
+    if (isDigit(c)) return self.number();
     if (c == '-') {
         if (isDigit(self.peek())) {
-            return self.negativeNumber(self.advance());
+            _ = self.advance();
+            return self.number();
         } else if (self.peek() == '.' and isDigit(self.peekNext())) {
             _ = self.advance();
-            return self.realOrFloat();
+            return self.number();
         }
     }
 
     return switch (c) {
-        '_' => self.makeToken(.underscore),
-        '/' => self.makeToken(.forward_slash),
+        '(' => self.makeToken(.left_paren), // TODO: Needs matching paren
+        ')' => self.makeToken(.right_paren),
+        '{' => self.makeToken(.left_brace),
+        '}' => self.makeToken(.right_brace),
+        '[' => self.makeToken(.left_bracket),
+        ']' => self.makeToken(.right_bracket),
+        ';' => self.makeToken(.semicolon),
+        ':' => self.makeToken(if (self.match(':')) .double_colon else .colon),
+        '+' => self.makeToken(if (self.match(':')) .plus_colon else .plus),
+        '-' => self.makeToken(if (self.match(':')) .minus_colon else .minus),
+        '*' => self.makeToken(if (self.match(':')) .star_colon else .star),
+        '%' => self.makeToken(if (self.match(':')) .percent_colon else .percent),
+        '!' => self.makeToken(if (self.match(':')) .bang_colon else .bang),
+        '&' => self.makeToken(if (self.match(':')) .ampersand_colon else .ampersand),
+        '|' => self.makeToken(if (self.match(':')) .pipe_colon else .pipe),
+        '<' => self.makeToken(if (self.match(':')) .less_colon else .less),
+        '>' => self.makeToken(if (self.match(':')) .greater_colon else .greater),
+        '=' => self.makeToken(if (self.match(':')) .equal_colon else .equal),
+        '~' => self.makeToken(if (self.match(':')) .tilde_colon else .tilde),
+        ',' => self.makeToken(if (self.match(':')) .comma_colon else .comma),
+        '^' => self.makeToken(if (self.match(':')) .caret_colon else .caret),
+        '#' => self.makeToken(if (self.match(':')) .hash_colon else .hash),
+        '_' => self.makeToken(if (self.match(':')) .underscore_colon else .underscore),
+        '$' => self.makeToken(if (self.match(':')) .dollar_colon else .dollar),
+        '?' => self.makeToken(if (self.match(':')) .question_colon else .question),
+        '@' => self.makeToken(if (self.match(':')) .at_colon else .at),
+        '.' => self.makeToken(if (self.match(':')) .dot_colon else .dot),
+        '\'' => self.makeToken(if (self.match(':')) .apostrophe_colon else .apostrophe),
+        '/' => self.makeToken(if (self.match(':')) .forward_slash_colon else .forward_slash),
+        '\\' => self.makeToken(if (self.match(':')) .back_slash_colon else .back_slash),
         '"' => self.string(),
         '`' => self.symbol(),
         else => self.makeToken(.invalid),
     };
 }
 
-fn number(self: *Self, c: u8) Token {
-    if (c == '0') {
-        const next_c = self.peek();
-        switch (next_c) {
-            'x' => {
-                _ = self.advance();
-                return self.byte();
-            },
-            'N' => {
-                _ = self.advance();
-                return self.nullNumber(.long);
-            },
-            'n' => {
-                _ = self.advance();
-                return self.nullNumber(.float);
-            },
-            'W' => {
-                _ = self.advance();
-                return self.nullOrInf(.long);
-            },
-            'w' => {
-                _ = self.advance();
-                return self.nullOrInf(.float);
-            },
-            else => {},
-        }
-    }
-    if (c <= '1') return self.maybeBoolean();
+fn number(self: *Self) Token {
+    while (isNumberChar(self.peek())) _ = self.advance();
 
-    while (isDigit(self.peek())) _ = self.advance();
-
-    return switch (self.peek()) {
-        'h' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.short);
-        },
-        'i' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.int);
-        },
-        'j' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.long);
-        },
-        'e' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.real);
-        },
-        'f' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.float);
-        },
-        '.' => blk: {
-            _ = self.advance();
-            break :blk if (self.current - self.start == 5) self.maybeMonth() else self.realOrFloat();
-        },
-        'p' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.timestamp);
-        },
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(switch (self.current - self.start) {
-                5 => if (self.isMonthSlice(2)) .month else .invalid,
-                7 => if (self.isYearSlice(4) and self.isMonthSlice(2)) .month else .invalid,
-                else => .invalid,
-            });
-        },
-        'd' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(switch (self.current - self.start) {
-                7 => if (self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
-                9 => if (self.isYearSlice(6) and self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
-                else => .invalid,
-            });
-        },
-        else => self.makeToken(.long),
-    };
-}
-
-fn negativeNumber(self: *Self, c: u8) Token {
-    if (c == '0') {
-        switch (self.peek()) {
-            'W' => {
-                _ = self.advance();
-                return self.nullOrInf(.long);
-            },
-            'w' => {
-                _ = self.advance();
-                return self.nullOrInf(.float);
-            },
-            else => {},
-        }
-    }
-
-    while (isDigit(self.peek())) _ = self.advance();
-
-    return switch (self.peek()) {
-        'h' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.short);
-        },
-        'i' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.int);
-        },
-        'j' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.long);
-        },
-        'e' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.real);
-        },
-        'f' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.float);
-        },
-        '.' => blk: {
-            _ = self.advance();
-            break :blk self.realOrFloat();
-        },
-        'p' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.timestamp);
-        },
-        else => self.makeToken(.long),
-    };
-}
-
-fn maybeBoolean(self: *Self) Token {
-    while (isBooleanDigit(self.peek())) _ = self.advance();
-
-    return switch (self.peek()) {
-        'b' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(if (self.current - self.start > 2) .boolean_list else .boolean);
-        },
-        '.' => blk: {
-            _ = self.advance();
-            break :blk if (self.current - self.start == 5) self.maybeMonth() else self.realOrFloat();
-        },
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(switch (self.current - self.start) {
-                5 => if (self.isMonthSlice(2)) .month else .invalid,
-                7 => if (self.isYearSlice(4) and self.isMonthSlice(2)) .month else .invalid,
-                else => .invalid,
-            });
-        },
-        'd' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(switch (self.current - self.start) {
-                7 => if (self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
-                9 => if (self.isYearSlice(6) and self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
-                else => .invalid,
-            });
-        },
-        else => self.nonBooleanNumber(),
-    };
-}
-
-fn realOrFloat(self: *Self) Token {
-    while (isDigit(self.peek())) _ = self.advance();
-
-    return switch (self.peek()) {
-        'e' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.real);
-        },
-        'f' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.float);
-        },
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.invalid);
-        },
-        '.' => blk: {
-            _ = self.advance();
-            while (isDigit(self.peek())) _ = self.advance();
-            break :blk self.makeToken(.invalid);
-        },
-        else => self.makeToken(.float),
-    };
-}
-
-fn byte(self: *Self) Token {
-    while (isHexDigit(self.peek())) _ = self.advance();
-
-    return self.makeToken(switch (self.current - self.start) {
-        3, 4 => .byte,
-        else => .byte_list,
-    });
-}
-
-fn nullNumber(self: *Self, token_type: Token.TokenType) Token {
-    if (self.peek() == 'g') {
-        _ = self.advance();
-        return self.makeToken(.guid);
-    }
-
-    return self.nullOrInf(token_type);
-}
-
-fn nullOrInf(self: *Self, token_type: Token.TokenType) Token {
-    return switch (self.peek()) {
-        'h' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.short);
-        },
-        'i' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.int);
-        },
-        'j' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.long);
-        },
-        'e' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.real);
-        },
-        'f' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.float);
-        },
-        'p' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.timestamp);
-        },
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.month);
-        },
-        'd' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.date);
-        },
-        'z' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.datetime);
-        },
-        else => self.makeToken(token_type),
-    };
-}
-
-fn nonBooleanNumber(self: *Self) Token {
-    while (isDigit(self.peek())) _ = self.advance();
-
-    return switch (self.peek()) {
-        'h' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.short);
-        },
-        'i' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.int);
-        },
-        'j' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.long);
-        },
-        'e' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.real);
-        },
-        'f' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.float);
-        },
-        '.' => blk: {
-            _ = self.advance();
-            break :blk if (self.current - self.start == 5) self.maybeMonth() else self.realOrFloat();
-        },
-        'p' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.timestamp);
-        },
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(switch (self.current - self.start) {
-                5 => if (self.isMonthSlice(2)) .month else .invalid,
-                7 => if (self.isYearSlice(4) and self.isMonthSlice(2)) .month else .invalid,
-                else => .invalid,
-            });
-        },
-        'd' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(switch (self.current - self.start) {
-                7 => if (self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
-                9 => if (self.isYearSlice(6) and self.isMonthSlice(4) and self.isDaySlice(2)) .date else .invalid,
-                else => .invalid,
-            });
-        },
-        else => self.makeToken(.long),
-    };
-}
-
-fn maybeMonth(self: *Self) Token {
-    if (!self.isYearSlice(2) or !isMonth(self.peek(), self.peekNext())) return self.realOrFloat();
-    _ = self.advance();
-    _ = self.advance();
-
-    return switch (self.peek()) {
-        'm' => blk: {
-            _ = self.advance();
-            break :blk self.makeToken(.month);
-        },
-        '.' => blk: {
-            _ = self.advance();
-            break :blk self.maybeDate();
-        },
-        else => self.realOrFloat(),
-    };
-}
-
-fn maybeDate(self: *Self) Token {
-    if (!isDay(self.advance(), self.advance())) return self.makeToken(.invalid);
-
-    return switch (self.peek()) {
-        'D' => blk: {
-            _ = self.advance();
-            break :blk self.timestampOrDatetime(.timestamp);
-        },
-        'T' => blk: {
-            _ = self.advance();
-            break :blk self.timestampOrDatetime(.datetime);
-        },
-        else => self.makeToken(.date),
-    };
-}
-
-fn timestampOrDatetime(self: *Self, token_type: Token.TokenType) Token {
-    if (self.peek() == '.') {
-        _ = self.advance();
-        while (isDigit(self.peek())) _ = self.advance();
-        return self.makeToken(token_type);
-    }
-
-    var start = self.current;
-    while (isDigit(self.peek())) _ = self.advance();
-
-    if (self.peek() == '.') {
-        _ = self.advance();
-        while (isDigit(self.peek())) _ = self.advance();
-    } else if (self.peek() == ':') {
-        _ = self.advance();
-        if (self.current - start != 3) {
-            if (self.peek() == '.') _ = self.advance();
-            while (isDigit(self.peek())) _ = self.advance();
-            return self.makeToken(.invalid);
-        }
-        if (self.peek() == '.') {
-            _ = self.advance();
-            while (isDigit(self.peek())) _ = self.advance();
-            return self.makeToken(token_type);
-        }
-
-        start = self.current;
-        while (isDigit(self.peek())) _ = self.advance();
-        if (self.current - start == 1) {
-            if (self.peek() == ':') _ = self.advance();
-            while (isDigit(self.peek())) _ = self.advance();
-            if (self.peek() == '.') _ = self.advance();
-            while (isDigit(self.peek())) _ = self.advance();
-            return self.makeToken(.invalid);
-        }
-
-        if (self.peek() == '.') {
-            _ = self.advance();
-            while (isDigit(self.peek())) _ = self.advance();
-        } else if (self.peek() == ':') {
-            _ = self.advance();
-            if (self.current - start != 3) {
-                if (self.peek() == '.') _ = self.advance();
-                while (isDigit(self.peek())) _ = self.advance();
-                return self.makeToken(.invalid);
-            }
-            if (self.peek() == '.') {
-                _ = self.advance();
-                while (isDigit(self.peek())) _ = self.advance();
-                return self.makeToken(token_type);
-            }
-
-            start = self.current;
-            while (isDigit(self.peek())) _ = self.advance();
-            if (self.current - start == 1) {
-                if (self.peek() == ':') _ = self.advance();
-                while (isDigit(self.peek())) _ = self.advance();
-                if (self.peek() == '.') _ = self.advance();
-                while (isDigit(self.peek())) _ = self.advance();
-                return self.makeToken(.invalid);
-            }
-
-            if (self.peek() == '.') {
-                _ = self.advance();
-                while (isDigit(self.peek())) _ = self.advance();
-            } else if (self.peek() == ':') {
-                _ = self.advance();
-                if (self.current - start != 3) return self.makeToken(.invalid);
-                if (self.peek() == '.') {
-                    _ = self.advance();
-                    while (isDigit(self.peek())) _ = self.advance();
-                }
-            }
-        }
-    }
-
-    return self.makeToken(token_type);
+    return self.makeToken(.number);
 }
 
 fn identifier(self: *Self) Token {
@@ -572,6 +195,15 @@ fn advance(self: *Self) u8 {
     return c;
 }
 
+fn match(self: *Self, c: u8) bool {
+    if (self.peek() == c) {
+        _ = self.advance();
+        while (self.peek() == c) _ = self.advance();
+        return true;
+    }
+    return false;
+}
+
 fn makeToken(self: Self, token_type: Token.TokenType) Token {
     return self.token(token_type, self.getSlice());
 }
@@ -596,16 +228,9 @@ fn isDigit(c: u8) bool {
     };
 }
 
-fn isBooleanDigit(c: u8) bool {
+fn isNumberChar(c: u8) bool {
     return switch (c) {
-        '0', '1' => true,
-        else => false,
-    };
-}
-
-fn isHexDigit(c: u8) bool {
-    return switch (c) {
-        '0'...'9', 'a'...'f', 'A'...'F' => true,
+        'a'...'z', 'A'...'Z', '0'...'9', '.', ':' => true,
         else => false,
     };
 }
@@ -657,63 +282,4 @@ fn isSymbolHandleChar(c: u8) bool {
         'a'...'z', 'A'...'Z', '0'...'9', '.', ':', '_', '/' => true,
         else => false,
     };
-}
-
-fn isMonth(c1: u8, c2: u8) bool {
-    return switch (c1) {
-        '0' => switch (c2) {
-            '1'...'9' => true,
-            else => false,
-        },
-        '1' => switch (c2) {
-            '0'...'2' => true,
-            else => false,
-        },
-        else => false,
-    };
-}
-
-fn isMonthSlice(self: Self, offset: usize) bool {
-    return isMonth(
-        self.source[self.current - (offset + 1)],
-        self.source[self.current - (offset + 0)],
-    );
-}
-
-fn isYear(c1: u8, c2: u8, c3: u8, c4: u8) bool {
-    return c1 != '0' or c2 != '0' or c3 != '0' or c4 != '0';
-}
-
-fn isYearSlice(self: Self, offset: usize) bool {
-    return isYear(
-        self.source[self.current - (offset + 3)],
-        self.source[self.current - (offset + 2)],
-        self.source[self.current - (offset + 1)],
-        self.source[self.current - (offset + 0)],
-    );
-}
-
-fn isDay(c1: u8, c2: u8) bool {
-    return switch (c1) {
-        '0' => switch (c2) {
-            '1'...'9' => true,
-            else => false,
-        },
-        '1'...'2' => switch (c2) {
-            '0'...'9' => true,
-            else => false,
-        },
-        '3' => switch (c2) {
-            '0'...'1' => true,
-            else => false,
-        },
-        else => false,
-    };
-}
-
-fn isDaySlice(self: Self, offset: usize) bool {
-    return isDay(
-        self.source[self.current - (offset + 1)],
-        self.source[self.current - (offset + 0)],
-    );
 }
