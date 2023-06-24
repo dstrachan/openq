@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const VM = @import("vm.zig");
+const VM = @import("VM.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -15,45 +15,35 @@ pub fn main() !void {
     defer vm.deinit();
 
     switch (args.len) {
-        1 => repl(&vm),
+        1 => repl(vm),
         else => {
-            try vm.stderr.print("Usage: {s} [path]\n", .{args[0]});
+            const stderr = std.io.getStdErr().writer();
+            try stderr.print("Usage: {s} [path]\n", .{args[0]});
             std.process.exit(1);
         },
     }
 }
 
-fn repl(vm: *VM) void {
+fn repl(vm: VM) void {
     const stdin = std.io.getStdIn().reader();
+    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
 
-    var buffered_reader = std.io.bufferedReader(stdin);
-    const reader = buffered_reader.reader();
-    var buf: [2048]u8 = undefined;
+    var buffer: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    const stream = fbs.writer();
+
     while (true) {
-        vm.stdout.writeAll("q)") catch std.process.exit(1);
-        const line = reader.readUntilDelimiterOrEof(&buf, '\n') catch std.process.exit(1) orelse {
-            vm.stdout.writeAll("\n") catch std.process.exit(1);
-            break;
-        };
+        stdout.writeAll(">") catch std.process.exit(1);
+        stdin.streamUntilDelimiter(stream, '\n', buffer.len) catch std.process.exit(1);
+        if (fbs.pos == 0) continue;
 
-        var i = line.len;
-        while (i > 0) {
-            switch (line[i - 1]) {
-                ' ', '\t', '\r', '\n' => i -= 1,
-                else => break,
-            }
-        }
-
-        if (std.mem.eql(u8, "\\\\", line[0..i])) {
-            break;
-        }
+        const line = fbs.getWritten();
+        if (std.mem.eql(u8, line, "\\\\")) break;
+        fbs.reset();
 
         vm.interpret(line) catch |e| {
-            if (vm.error_message) |error_message| {
-                vm.stderr.print("ERROR: {s} - {s}\n", .{ @errorName(e), error_message }) catch std.process.exit(1);
-            } else {
-                vm.stderr.print("ERROR: {s}\n", .{@errorName(e)}) catch std.process.exit(1);
-            }
+            stderr.print("ERROR: {s}\n", .{@errorName(e)}) catch std.process.exit(1);
         };
     }
 }
