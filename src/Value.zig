@@ -8,7 +8,7 @@ const Value = Self;
 reference_count: usize,
 as: ValueUnion,
 
-const ValueType = enum {
+pub const ValueType = enum {
     nil,
     boolean,
     boolean_list,
@@ -87,6 +87,30 @@ pub fn ref(self: *Self) *Self {
 pub fn deref(self: *Self, allocator: std.mem.Allocator) void {
     self.reference_count -= 1;
     if (self.reference_count == 0) {
+        switch (self.as) {
+            .nil,
+            .boolean,
+            .guid,
+            .byte,
+            .short,
+            .int,
+            .long,
+            .real,
+            .float,
+            .char,
+            .symbol,
+            .timestamp,
+            .month,
+            .date,
+            .datetime,
+            .timespan,
+            .minute,
+            .second,
+            .time,
+            => {},
+            .boolean_list => |list| allocator.free(list),
+            .byte_list => |list| allocator.free(list),
+        }
         allocator.destroy(self);
     }
 }

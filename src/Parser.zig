@@ -2,10 +2,11 @@ const std = @import("std");
 
 const Token = @import("Token.zig");
 const Value = @import("Value.zig");
+const ValueType = Value.ValueType;
 const ValueUnion = Value.ValueUnion;
 const VM = @import("VM.zig");
 
-const Self = @This();
+const Parser = @This();
 
 vm: VM,
 previous: Token = undefined,
@@ -35,13 +36,13 @@ const ParserError = error{
     ParseError,
 };
 
-pub fn init(vm: VM) Self {
+pub fn init(vm: VM) Parser {
     return .{
         .vm = vm,
     };
 }
 
-pub fn parseNumber(self: *Self, str: []const u8) !*Value {
+pub fn parseNumber(self: *Parser, str: []const u8) !*Value {
     self.str = str;
     return self.vm.initValue(switch (str[0]) {
         '0' => switch (str.len) {
@@ -76,7 +77,7 @@ pub fn parseNumber(self: *Self, str: []const u8) !*Value {
     });
 }
 
-fn maybeBoolean(self: Self, index: usize) !ValueUnion {
+fn maybeBoolean(self: Parser, index: usize) !ValueUnion {
     var i = index;
     while (i < self.str.len and isBooleanDigit(self.str[i])) : (i += 1) {}
 
@@ -87,8 +88,8 @@ fn maybeBoolean(self: Self, index: usize) !ValueUnion {
             return .{ .boolean = self.str[0] == '1' };
         } else {
             const slice = self.vm.allocator.alloc(bool, i) catch std.debug.panic("Failed to allocate memory.", .{});
-            for (self.str[0 .. i - 1], 0..) |c, idx| {
-                slice[idx] = c == '1';
+            for (self.str[0..i], slice) |c, *v| {
+                v.* = c == '1';
             }
             return .{ .boolean_list = slice };
         }
@@ -97,7 +98,7 @@ fn maybeBoolean(self: Self, index: usize) !ValueUnion {
     return self.number(i);
 }
 
-fn maybeFloat(self: Self, index: usize) !ValueUnion {
+fn maybeFloat(self: Parser, index: usize) !ValueUnion {
     var i = index;
     while (i < self.str.len and isDigit(self.str[i])) : (i += 1) {}
 
@@ -112,7 +113,7 @@ fn maybeFloat(self: Self, index: usize) !ValueUnion {
     };
 }
 
-fn maybeDate(self: Self, index: usize) ValueUnion {
+fn maybeDate(self: Parser, index: usize) ValueUnion {
     _ = index;
     _ = self;
     unreachable;
@@ -159,7 +160,7 @@ fn inf(c: u8) !ValueUnion {
     };
 }
 
-fn number(self: Self, index: usize) !ValueUnion {
+fn number(self: Parser, index: usize) !ValueUnion {
     var i = index;
     while (i < self.str.len and isDigit(self.str[i])) : (i += 1) {}
 
@@ -184,82 +185,82 @@ fn number(self: Self, index: usize) !ValueUnion {
     };
 }
 
-fn unclear(self: Self) ValueUnion {
+fn unclear(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn byte(self: Self) ValueUnion {
+fn byte(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn short(self: Self) ValueUnion {
+fn short(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn int(self: Self) ValueUnion {
+fn int(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn long(self: Self) ValueUnion {
+fn long(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn real(self: Self) ValueUnion {
+fn real(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn float(self: Self) ValueUnion {
+fn float(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn char(self: Self) ValueUnion {
+fn char(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn timestamp(self: Self) ValueUnion {
+fn timestamp(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn month(self: Self) ValueUnion {
+fn month(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn date(self: Self) ValueUnion {
+fn date(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn datetime(self: Self) ValueUnion {
+fn datetime(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn timespan(self: Self) ValueUnion {
+fn timespan(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn minute(self: Self) ValueUnion {
+fn minute(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn second(self: Self) ValueUnion {
+fn second(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
 
-fn time(self: Self) ValueUnion {
+fn time(self: Parser) ValueUnion {
     _ = self;
     unreachable;
 }
@@ -276,4 +277,51 @@ fn isDigit(c: u8) bool {
         '0'...'9' => true,
         else => false,
     };
+}
+
+fn testParser(input: []const u8, comptime expected_type: ValueType, expected_value: anytype) !void {
+    const vm = VM.init(std.testing.allocator);
+    defer vm.deinit();
+
+    var parser = Parser.init(vm);
+    const value = try parser.parseNumber(input);
+    defer value.deref(vm.allocator);
+
+    try std.testing.expectEqual(expected_type, value.as);
+
+    const value_type_info = @typeInfo(@TypeOf(expected_value));
+    if (value_type_info == .Struct) {
+        const fields_info = value_type_info.Struct.fields;
+        const values = try std.testing.allocator.alloc(fields_info[0].type, fields_info.len);
+        defer std.testing.allocator.free(values);
+        inline for (fields_info, 0..) |field, i| {
+            values[i] = @field(expected_value, field.name);
+        }
+        try std.testing.expectEqualSlices(fields_info[0].type, values, @field(value.as, @tagName(expected_type)));
+    } else {
+        try std.testing.expectEqual(expected_value, @field(value.as, @tagName(expected_type)));
+    }
+}
+
+test "valid boolean strings" {
+    try testParser("0b", .boolean, false);
+    try testParser("1b", .boolean, true);
+
+    try testParser("00b", .boolean_list, .{ false, false });
+    try testParser("01b", .boolean_list, .{ false, true });
+    try testParser("10b", .boolean_list, .{ true, false });
+    try testParser("11b", .boolean_list, .{ true, true });
+
+    try testParser("000b", .boolean_list, .{ false, false, false });
+    try testParser("001b", .boolean_list, .{ false, false, true });
+    try testParser("010b", .boolean_list, .{ false, true, false });
+    try testParser("011b", .boolean_list, .{ false, true, true });
+    try testParser("100b", .boolean_list, .{ true, false, false });
+    try testParser("101b", .boolean_list, .{ true, false, true });
+    try testParser("110b", .boolean_list, .{ true, true, false });
+    try testParser("111b", .boolean_list, .{ true, true, true });
+}
+
+test "invalid boolean strings" {
+    return error.SkipZigTest;
 }
