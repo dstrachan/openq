@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const Node = @import("Node.zig");
-const Number = @import("Number.zig");
+const Parser = @import("Parser.zig");
 const Scanner = @import("Scanner.zig");
 const Token = @import("Token.zig");
 const TokenType = Token.TokenType;
@@ -17,7 +17,7 @@ current: *Self = undefined,
 
 vm: VM,
 scanner: Scanner,
-parser: Parser = .{},
+parser: Parser,
 enclosing: ?*Self,
 func: *ValueFunction,
 function_type: FunctionType,
@@ -38,13 +38,6 @@ const Precedence = enum {
     None,
     Secondary,
     Primary,
-};
-
-const Parser = struct {
-    previous: Token = undefined,
-    current: Token = undefined,
-    had_error: bool = false,
-    panic_mode: bool = false,
 };
 
 const PrefixParseFn = *const fn (*Self) CompilerError!Node;
@@ -77,6 +70,7 @@ fn init(enclosing: ?*Self, function_type: FunctionType, vm: VM, scanner: Scanner
     return .{
         .vm = vm,
         .scanner = scanner,
+        .parser = Parser.init(vm),
         .enclosing = enclosing,
         .func = ValueFunction.init(vm.allocator),
         .function_type = function_type,
@@ -213,9 +207,10 @@ fn getRule(token_type: TokenType) ParseRule {
 }
 
 fn number(self: *Self) CompilerError!Node {
-    const value = Number.fromString(self.parser.previous.lexeme) catch {
+    const value = self.parser.parseNumber(self.parser.previous.lexeme) catch {
         return CompilerError.ParseError;
     };
+    defer value.deref(self.vm.allocator);
     std.debug.print("number: {}\n", .{value});
     return CompilerError.CompileError;
 }

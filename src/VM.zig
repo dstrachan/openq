@@ -1,6 +1,8 @@
 const std = @import("std");
 
 const Compiler = @import("Compiler.zig");
+const Value = @import("Value.zig");
+const ValueUnion = Value.ValueUnion;
 
 const Self = @This();
 
@@ -26,4 +28,8 @@ pub fn interpret(self: Self, source: []const u8) VMError!void {
     _ = value;
 
     return VMError.RuntimeError;
+}
+
+pub fn initValue(self: Self, data: ValueUnion) *Value {
+    return Value.init(.{ .data = data }, self.allocator);
 }

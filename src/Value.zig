@@ -11,8 +11,10 @@ as: ValueUnion,
 const ValueType = enum {
     nil,
     boolean,
+    boolean_list,
     guid,
     byte,
+    byte_list,
     short,
     int,
     long,
@@ -30,14 +32,16 @@ const ValueType = enum {
     time,
 };
 
-const ValueUnion = union(ValueType) {
+pub const ValueUnion = union(ValueType) {
     nil,
 
     boolean: bool,
+    boolean_list: []bool,
 
     guid: [16]u8,
 
     byte: u8,
+    byte_list: []u8,
     char: u8,
 
     short: i16,
