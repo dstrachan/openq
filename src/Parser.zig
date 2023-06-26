@@ -59,13 +59,13 @@ pub fn parseNumber(self: *Parser, str: []const u8) !*Value {
             3 => switch (str[1]) {
                 'N', 'n' => try @"null"(str[2]),
                 'W', 'w' => try inf(str[2]),
-                'x' => self.byte(),
+                'x' => try self.byte(),
                 '0', '1' => try self.maybeBoolean(2),
                 else => try self.number(2),
             },
             else => switch (str[1]) {
                 'N', 'n', 'W', 'w' => return ParserError.ParseError,
-                'x' => self.byte(),
+                'x' => try self.byte(),
                 '0', '1' => try self.maybeBoolean(2),
                 else => try self.number(2),
             },
@@ -181,18 +181,39 @@ fn number(self: Parser, index: usize) !ValueUnion {
         'u' => self.minute(),
         'v' => self.second(),
         '.' => self.maybeFloat(i + 1),
-        else => self.unclear(),
+        else => try self.unclear(),
     };
 }
 
-fn unclear(self: Parser) ValueUnion {
+fn unclear(self: Parser) !ValueUnion {
     _ = self;
-    unreachable;
+    return ParserError.ParseError;
 }
 
-fn byte(self: Parser) ValueUnion {
-    _ = self;
-    unreachable;
+fn byte(self: Parser) !ValueUnion {
+    if (self.str.len < 5) {
+        const c1 = try std.fmt.charToDigit(self.str[2], 16);
+        if (self.str.len == 4) {
+            const c2 = try std.fmt.charToDigit(self.str[3], 16);
+            return .{ .byte = c1 * 16 + c2 };
+        }
+        return .{ .byte = c1 };
+    }
+
+    var i: usize = 2;
+    var list = std.ArrayList(u8).init(self.vm.allocator);
+    defer list.deinit();
+    while (i < self.str.len) : (i += 2) {
+        const c1 = try std.fmt.charToDigit(self.str[i], 16);
+        if (i + 1 < self.str.len) {
+            const c2 = try std.fmt.charToDigit(self.str[i + 1], 16);
+            try list.append(c1 * 16 + c2);
+        } else {
+            try list.append(c1);
+        }
+    }
+
+    return .{ .byte_list = try list.toOwnedSlice() };
 }
 
 fn short(self: Parser) ValueUnion {
@@ -279,7 +300,7 @@ fn isDigit(c: u8) bool {
     };
 }
 
-fn testParser(input: []const u8, comptime expected_type: ValueType, expected_value: anytype) !void {
+fn testParser(input: []const u8, comptime expected_type: ValueType, comptime expected_value: anytype) !void {
     const vm = VM.init(std.testing.allocator);
     defer vm.deinit();
 
@@ -289,21 +310,46 @@ fn testParser(input: []const u8, comptime expected_type: ValueType, expected_val
 
     try std.testing.expectEqual(expected_type, value.as);
 
-    const value_type_info = @typeInfo(@TypeOf(expected_value));
-    if (value_type_info == .Struct) {
-        const fields_info = value_type_info.Struct.fields;
-        const values = try std.testing.allocator.alloc(fields_info[0].type, fields_info.len);
-        defer std.testing.allocator.free(values);
-        inline for (fields_info, 0..) |field, i| {
-            values[i] = @field(expected_value, field.name);
-        }
-        try std.testing.expectEqualSlices(fields_info[0].type, values, @field(value.as, @tagName(expected_type)));
-    } else {
-        try std.testing.expectEqual(expected_value, @field(value.as, @tagName(expected_type)));
+    const actual_value = @field(value.as, @tagName(expected_type));
+    const actual = if (@typeInfo(@TypeOf(actual_value)) == .Array) &actual_value else actual_value;
+    switch (@typeInfo(@TypeOf(expected_value))) {
+        .Array => |type_info| {
+            try std.testing.expectEqualSlices(type_info.child, &expected_value, actual);
+        },
+        .Pointer => |type_info| {
+            try std.testing.expectEqualSlices(@typeInfo(type_info.child).Array.child, expected_value, actual);
+        },
+        .Struct => |type_info| {
+            const fields_info = type_info.fields;
+            const T = if (fields_info.len > 0) fields_info[0].type else @typeInfo(@TypeOf(actual)).Pointer.child;
+            const expected = try std.testing.allocator.alloc(T, fields_info.len);
+            defer std.testing.allocator.free(expected);
+            inline for (fields_info, 0..) |field, i| {
+                expected[i] = @field(expected_value, field.name);
+            }
+            try std.testing.expectEqualSlices(T, expected, actual);
+        },
+        else => {
+            try std.testing.expectEqual(expected_value, actual);
+        },
     }
 }
 
-test "valid boolean strings" {
+fn testParserError(input: []const u8, expected: anyerror) !void {
+    const vm = VM.init(std.testing.allocator);
+    defer vm.deinit();
+
+    var parser = Parser.init(vm);
+    const value = parser.parseNumber(input) catch |e| {
+        try std.testing.expectEqual(expected, e);
+        return;
+    };
+    defer value.deref(vm.allocator);
+
+    return error.UnexpectedResult;
+}
+
+test "valid boolean inputs" {
     try testParser("0b", .boolean, false);
     try testParser("1b", .boolean, true);
 
@@ -322,6 +368,47 @@ test "valid boolean strings" {
     try testParser("111b", .boolean_list, .{ true, true, true });
 }
 
-test "invalid boolean strings" {
-    return error.SkipZigTest;
+test "invalid boolean inputs" {
+    try testParserError("2b", ParserError.ParseError);
+    try testParserError(".b", ParserError.ParseError);
+    try testParserError(".1b", ParserError.ParseError);
+    try testParserError("1.b", ParserError.ParseError);
+    try testParserError("1.1b", ParserError.ParseError);
+    try testParserError("1b0", ParserError.ParseError);
+    try testParserError("10b0", ParserError.ParseError);
+}
+
+test "valid guid inputs" {
+    try testParser("0ng", .guid, null_guid);
+    try testParser("0Ng", .guid, null_guid);
+}
+
+test "invalid guid inputs" {
+    try testParserError("00000000-0000-0000-0000-000000000000", ParserError.ParseError);
+}
+
+test "valid byte inputs" {
+    try testParser("0x0", .byte, @as(u8, 0));
+    try testParser("0x00", .byte, @as(u8, 0));
+    try testParser("0x1", .byte, @as(u8, 1));
+    try testParser("0x01", .byte, @as(u8, 1));
+    try testParser("0xf", .byte, @as(u8, 15));
+    try testParser("0x0f", .byte, @as(u8, 15));
+    try testParser("0xF", .byte, @as(u8, 15));
+    try testParser("0x0F", .byte, @as(u8, 15));
+    try testParser("0x10", .byte, @as(u8, 16));
+    try testParser("0xf0", .byte, @as(u8, 240));
+    try testParser("0xF0", .byte, @as(u8, 240));
+    try testParser("0xff", .byte, @as(u8, 255));
+    try testParser("0xFF", .byte, @as(u8, 255));
+
+    try testParser("0x", .byte_list, .{});
+}
+
+test "invalid byte inputs" {
+    try testParserError("0X", error.InvalidCharacter);
+    try testParserError("0xg", error.InvalidCharacter);
+    try testParserError("0xG", error.InvalidCharacter);
+    try testParserError("0xgg", error.InvalidCharacter);
+    try testParserError("0xGG", error.InvalidCharacter);
 }
