@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Compiler = @import("Compiler.zig");
+const Debug = @import("Debug.zig");
 const Value = @import("Value.zig");
 const ValueUnion = Value.ValueUnion;
 
@@ -27,6 +28,8 @@ pub fn interpret(self: Self, source: []const u8) VMError!void {
     const value = Compiler.compile(source, self) catch return VMError.CompileError;
     defer value.deref(self.allocator);
     std.debug.print("{}\n", .{value});
+
+    Debug.disassembleChunk(value.as.function.chunk, "script");
 
     return VMError.RuntimeError;
 }

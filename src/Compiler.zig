@@ -1,8 +1,9 @@
 const std = @import("std");
 
 const Chunk = @import("Chunk.zig");
-const OpCode = Chunk.OpCode;
+const Debug = @import("Debug.zig");
 const Node = @import("Node.zig");
+const OpCode = Chunk.OpCode;
 const Parser = @import("Parser.zig");
 const Scanner = @import("Scanner.zig");
 const Token = @import("Token.zig");
@@ -126,7 +127,6 @@ fn advance(self: *Self) void {
 
     while (true) {
         self.parser.current = self.scanner.scanToken();
-        std.debug.print("{}\n", .{self.parser.current});
         if (self.parser.current.token_type != .Error) break;
 
         self.errorAtCurrent(self.parser.current.lexeme);
@@ -169,16 +169,18 @@ fn errorAtPrevious(self: *Self, message: []const u8) void {
 fn errorAt(self: *Self, token: Token, message: []const u8) void {
     if (self.parser.panic_mode) return;
     self.parser.panic_mode = true;
-    std.debug.print("[line {d}] Error", .{token.line});
+
+    const stderr = std.io.getStdErr().writer();
+    stderr.print("[line {d}] Error", .{token.line}) catch {};
 
     if (token.token_type == .Eof) {
-        std.debug.print(" at end", .{});
+        stderr.print(" at end", .{}) catch {};
     } else if (token.token_type != .Error) {
-        std.debug.print(" at '{s}'", .{token.lexeme});
+        stderr.print(" at '{s}'", .{token.lexeme}) catch {};
     }
 
-    std.debug.print(": {s}\n", .{message});
-    std.debug.print("{}\n", .{token});
+    stderr.print(": {s}\n", .{message}) catch {};
+    Debug.print("{}\n", .{token});
     self.parser.had_error = true;
 }
 
@@ -290,7 +292,6 @@ fn number(self: *Self) CompilerError!*Node {
     const value = self.parser.parseNumber(self.parser.previous.lexeme) catch {
         return CompilerError.ParseError;
     };
-    std.debug.print("number: {}\n", .{value});
     return Node.init(.{
         .op_code = .Constant,
         .byte = self.makeConstant(value),
