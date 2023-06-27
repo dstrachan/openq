@@ -28,7 +28,7 @@ pub fn disassembleChunk(chunk: *Chunk, name: []const u8) void {
     }
 }
 
-fn disassembleInstruction(chunk: *Chunk, offset: usize) usize {
+pub fn disassembleInstruction(chunk: *Chunk, offset: usize) usize {
     print("{d:0>4} ", .{offset});
     if (offset > 0 and chunk.tokens.items[offset].line == chunk.tokens.items[offset - 1].line) {
         print("   | ", .{});

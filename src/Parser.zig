@@ -8,7 +8,7 @@ const VM = @import("VM.zig");
 
 const Parser = @This();
 
-vm: VM,
+vm: *VM,
 previous: Token = undefined,
 current: Token = undefined,
 had_error: bool = false,
@@ -36,7 +36,7 @@ const ParserError = error{
     ParseError,
 };
 
-pub fn init(vm: VM) Parser {
+pub fn init(vm: *VM) Parser {
     return .{
         .vm = vm,
     };

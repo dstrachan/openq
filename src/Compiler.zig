@@ -18,7 +18,7 @@ const u8_count = std.math.maxInt(u8) + 1;
 
 current: *Self = undefined,
 
-vm: VM,
+vm: *VM,
 scanner: Scanner,
 parser: Parser,
 enclosing: ?*Self,
@@ -52,7 +52,7 @@ const ParseRule = struct {
     precedence: Precedence,
 };
 
-pub fn compile(source: []const u8, vm: VM) CompilerError!*Value {
+pub fn compile(source: []const u8, vm: *VM) CompilerError!*Value {
     const scanner = Scanner.init(source);
     var compiler = Self.init(null, .Script, vm, scanner);
     errdefer compiler.func.deinit(vm.allocator);
@@ -83,7 +83,7 @@ pub fn compile(source: []const u8, vm: VM) CompilerError!*Value {
     return if (compiler.parser.had_error) CompilerError.CompileError else compiler.current.vm.initValue(.{ .function = func });
 }
 
-fn init(enclosing: ?*Self, function_type: FunctionType, vm: VM, scanner: Scanner) Self {
+fn init(enclosing: ?*Self, function_type: FunctionType, vm: *VM, scanner: Scanner) Self {
     return .{
         .vm = vm,
         .scanner = scanner,

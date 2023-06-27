@@ -15,7 +15,7 @@ pub fn main() !void {
     defer vm.deinit();
 
     switch (args.len) {
-        1 => repl(vm),
+        1 => repl(&vm),
         else => {
             const stderr = std.io.getStdErr().writer();
             try stderr.print("Usage: {s} [path]\n", .{args[0]});
@@ -24,7 +24,7 @@ pub fn main() !void {
     }
 }
 
-fn repl(vm: VM) void {
+fn repl(vm: *VM) void {
     const stdin = std.io.getStdIn().reader();
     const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
@@ -42,8 +42,11 @@ fn repl(vm: VM) void {
         if (std.mem.eql(u8, line, "\\\\")) break;
         fbs.reset();
 
-        vm.interpret(line) catch |e| {
+        const value = vm.interpret(line) catch |e| {
             stderr.print("ERROR: {s}\n", .{@errorName(e)}) catch std.process.exit(1);
+            continue;
         };
+        defer value.deref(vm.allocator);
+        stdout.print("{}\n", .{value}) catch std.process.exit(1);
     }
 }
