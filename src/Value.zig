@@ -30,6 +30,8 @@ pub const ValueType = enum {
     minute,
     second,
     time,
+
+    function,
 };
 
 pub const ValueUnion = union(ValueType) {
@@ -63,6 +65,8 @@ pub const ValueUnion = union(ValueType) {
     datetime: f64,
 
     symbol: []const u8,
+
+    function: *ValueFunction,
 };
 
 const Config = struct {
@@ -110,6 +114,7 @@ pub fn deref(self: *Self, allocator: std.mem.Allocator) void {
             => {},
             .boolean_list => |list| allocator.free(list),
             .byte_list => |list| allocator.free(list),
+            .function => |function| function.deinit(allocator),
         }
         allocator.destroy(self);
     }

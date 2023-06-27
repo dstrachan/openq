@@ -25,7 +25,8 @@ pub fn deinit(self: Self) void {
 
 pub fn interpret(self: Self, source: []const u8) VMError!void {
     const value = Compiler.compile(source, self) catch return VMError.CompileError;
-    _ = value;
+    defer value.deref(self.allocator);
+    std.debug.print("{}\n", .{value});
 
     return VMError.RuntimeError;
 }

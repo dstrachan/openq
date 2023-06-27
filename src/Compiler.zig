@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Chunk = @import("Chunk.zig");
+const OpCode = Chunk.OpCode;
 const Node = @import("Node.zig");
 const Parser = @import("Parser.zig");
 const Scanner = @import("Scanner.zig");
@@ -40,8 +42,8 @@ const Precedence = enum {
     Primary,
 };
 
-const PrefixParseFn = *const fn (*Self) CompilerError!Node;
-const InfixParseFn = *const fn (*Self, Node) CompilerError!Node;
+const PrefixParseFn = *const fn (*Self) CompilerError!*Node;
+const InfixParseFn = *const fn (*Self, *Node) CompilerError!*Node;
 
 const ParseRule = struct {
     prefix: ?PrefixParseFn,
@@ -61,9 +63,23 @@ pub fn compile(source: []const u8, vm: VM) CompilerError!*Value {
     compiler.advance();
 
     var top_node = try compiler.expression();
-    _ = top_node;
+    {
+        errdefer top_node.deinit(vm.allocator);
+        while (!compiler.check(.Eof)) {
+            const node = try compiler.expression();
+            var rhs = &node.rhs;
+            while (rhs.* != null) {
+                rhs = &rhs.*.?.rhs;
+            }
+            rhs.* = top_node;
+            top_node = node;
+        }
+    }
 
-    unreachable;
+    compiler.consume(.Eof, "Expect eof.");
+
+    const func = compiler.endCompiler(top_node);
+    return if (compiler.parser.had_error) CompilerError.CompileError else compiler.current.vm.initValue(.{ .function = func });
 }
 
 fn init(enclosing: ?*Self, function_type: FunctionType, vm: VM, scanner: Scanner) Self {
@@ -77,6 +93,34 @@ fn init(enclosing: ?*Self, function_type: FunctionType, vm: VM, scanner: Scanner
     };
 }
 
+fn endCompiler(self: *Self, node: *Node) *ValueFunction {
+    const top_node: Node = .{
+        .op_code = .Return,
+        .lhs = if (node.op_code == .Pop) Node.init(.{ .op_code = .Nil }, self.vm.allocator) else null,
+        .rhs = node,
+    };
+    self.traverse(top_node);
+    node.deinit(self.vm.allocator);
+
+    const func = self.current.func;
+    func.local_count = self.current.local_count;
+    if (self.current.enclosing) |enclosing| {
+        self.current = enclosing;
+    }
+
+    return func;
+}
+
+fn traverse(self: *Self, node: Node) void {
+    if (node.rhs) |rhs| self.traverse(rhs.*);
+    if (node.lhs) |lhs| self.traverse(lhs.*);
+    if (node.name) |name| {
+        _ = name; // TODO: Variable resolution
+    }
+    self.emitInstruction(node.op_code);
+    if (node.byte) |byte| self.emitByte(byte);
+}
+
 fn advance(self: *Self) void {
     self.parser.previous = self.parser.current;
 
@@ -87,6 +131,31 @@ fn advance(self: *Self) void {
 
         self.errorAtCurrent(self.parser.current.lexeme);
     }
+}
+
+fn currentChunk(self: *Self) *Chunk {
+    return self.current.func.chunk;
+}
+
+fn emitByte(self: *Self, byte: u8) void {
+    self.currentChunk().write(byte, self.parser.previous);
+}
+
+fn emitInstruction(self: *Self, instruction: OpCode) void {
+    self.emitByte(@intFromEnum(instruction));
+}
+
+fn consume(self: *Self, token_type: TokenType, message: []const u8) void {
+    if (self.parser.current.token_type == token_type) {
+        self.advance();
+        return;
+    }
+
+    self.errorAtCurrent(message);
+}
+
+fn check(self: *Self, token_type: TokenType) bool {
+    return self.parser.current.token_type == token_type;
 }
 
 fn errorAtCurrent(self: *Self, message: []const u8) void {
@@ -113,17 +182,28 @@ fn errorAt(self: *Self, token: Token, message: []const u8) void {
     self.parser.had_error = true;
 }
 
-fn expression(self: *Self) CompilerError!Node {
+fn makeConstant(self: *Self, value: *Value) u8 {
+    const constant = self.currentChunk().addConstant(value);
+    if (constant > std.math.maxInt(u8)) {
+        self.errorAtPrevious("Too many constants in one chunk.");
+        return 0;
+    }
+
+    return @intCast(constant);
+}
+
+fn expression(self: *Self) CompilerError!*Node {
     return try self.parsePrecedence(.Secondary, true);
 }
 
-fn parsePrecedence(self: *Self, precedence: Precedence, should_advance: bool) CompilerError!Node {
+fn parsePrecedence(self: *Self, precedence: Precedence, should_advance: bool) CompilerError!*Node {
     if (should_advance) self.advance();
     const prefixRule = getRule(self.parser.previous.token_type).prefix orelse {
         self.errorAtPrevious("Expect prefix expression.");
         return CompilerError.CompileError;
     };
     var node = try prefixRule(self);
+    errdefer node.deinit(self.vm.allocator);
 
     while (@intFromEnum(precedence) <= @intFromEnum(getRule(self.parser.current.token_type).precedence)) {
         self.advance();
@@ -150,7 +230,7 @@ fn getRule(token_type: TokenType) ParseRule {
         .Colon           => .{ .prefix = null,   .infix = null, .precedence = .None },
         .DoubleColon     => .{ .prefix = null,   .infix = null, .precedence = .None },
         .Whitespace      => .{ .prefix = null,   .infix = null, .precedence = .None },
-        .Plus            => .{ .prefix = null,   .infix = null, .precedence = .None },
+        .Plus            => .{ .prefix = null,   .infix = add,  .precedence = .Secondary },
         .PlusColon       => .{ .prefix = null,   .infix = null, .precedence = .None },
         .Minus           => .{ .prefix = null,   .infix = null, .precedence = .None },
         .MinusColon      => .{ .prefix = null,   .infix = null, .precedence = .None },
@@ -206,11 +286,21 @@ fn getRule(token_type: TokenType) ParseRule {
     };
 }
 
-fn number(self: *Self) CompilerError!Node {
+fn number(self: *Self) CompilerError!*Node {
     const value = self.parser.parseNumber(self.parser.previous.lexeme) catch {
         return CompilerError.ParseError;
     };
-    defer value.deref(self.vm.allocator);
     std.debug.print("number: {}\n", .{value});
-    return CompilerError.CompileError;
+    return Node.init(.{
+        .op_code = .Constant,
+        .byte = self.makeConstant(value),
+    }, self.vm.allocator);
+}
+
+fn add(self: *Self, node: *Node) CompilerError!*Node {
+    return Node.init(.{
+        .op_code = .Add,
+        .lhs = node,
+        .rhs = try self.parsePrecedence(getRule(self.parser.previous.token_type).precedence, true),
+    }, self.vm.allocator);
 }
