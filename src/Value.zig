@@ -2,8 +2,7 @@ const std = @import("std");
 
 const Chunk = @import("Chunk.zig");
 
-const Self = @This();
-const Value = Self;
+const Value = @This();
 
 reference_count: usize,
 as: ValueUnion,
@@ -74,8 +73,8 @@ const Config = struct {
     data: ValueUnion,
 };
 
-pub fn init(config: Config, allocator: std.mem.Allocator) *Self {
-    const self = allocator.create(Self) catch std.debug.panic("Failed to create value.", .{});
+pub fn init(config: Config, allocator: std.mem.Allocator) *Value {
+    const self = allocator.create(Value) catch std.debug.panic("Failed to create value.", .{});
     self.* = .{
         .reference_count = config.reference_count,
         .as = config.data,
@@ -83,12 +82,12 @@ pub fn init(config: Config, allocator: std.mem.Allocator) *Self {
     return self;
 }
 
-pub fn ref(self: *Self) *Self {
+pub fn ref(self: *Value) *Value {
     self.reference_count += 1;
     return self;
 }
 
-pub fn deref(self: *Self, allocator: std.mem.Allocator) void {
+pub fn deref(self: *Value, allocator: std.mem.Allocator) void {
     self.reference_count -= 1;
     if (self.reference_count == 0) {
         switch (self.as) {

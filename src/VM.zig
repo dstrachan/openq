@@ -7,7 +7,7 @@ const OpCode = Chunk.OpCode;
 const Value = @import("Value.zig");
 const ValueUnion = Value.ValueUnion;
 
-const Self = @This();
+const VM = @This();
 
 allocator: std.mem.Allocator,
 frame: *CallFrame = undefined,
@@ -30,17 +30,17 @@ const CallFrame = struct {
     slots: []*Value,
 };
 
-pub fn init(allocator: std.mem.Allocator) Self {
+pub fn init(allocator: std.mem.Allocator) VM {
     return .{
         .allocator = allocator,
     };
 }
 
-pub fn deinit(self: Self) void {
+pub fn deinit(self: VM) void {
     _ = self;
 }
 
-pub fn interpret(self: *Self, source: []const u8) VMError!*Value {
+pub fn interpret(self: *VM, source: []const u8) VMError!*Value {
     const value = Compiler.compile(source, self) catch return VMError.CompileError;
     defer value.deref(self.allocator);
     std.debug.print("{}\n", .{value});
@@ -54,11 +54,11 @@ pub fn interpret(self: *Self, source: []const u8) VMError!*Value {
     };
 }
 
-pub fn initValue(self: Self, data: ValueUnion) *Value {
+pub fn initValue(self: VM, data: ValueUnion) *Value {
     return Value.init(.{ .data = data }, self.allocator);
 }
 
-fn reset(self: *Self) void {
+fn reset(self: *VM) void {
     while (self.stack_top > 0) {
         self.pop().deref(self.allocator);
     }
@@ -68,19 +68,19 @@ fn reset(self: *Self) void {
     }
 }
 
-fn push(self: *Self, value: *Value) VMError!void {
+fn push(self: *VM, value: *Value) VMError!void {
     if (self.stack_top == stack_max) return self.runtimeError("Stack overflow.", .{});
 
     self.stack[self.stack_top] = value;
     self.stack_top += 1;
 }
 
-fn pop(self: *Self) *Value {
+fn pop(self: *VM) *Value {
     self.stack_top -= 1;
     return self.stack[self.stack_top];
 }
 
-fn call(self: *Self, value: *Value, arg_indices: std.bit_set.IntegerBitSet(8)) !void {
+fn call(self: *VM, value: *Value, arg_indices: std.bit_set.IntegerBitSet(8)) !void {
     const function = value.as.function;
     const arg_count = arg_indices.count();
     if (arg_count < function.arity) {
@@ -104,7 +104,7 @@ fn call(self: *Self, value: *Value, arg_indices: std.bit_set.IntegerBitSet(8)) !
     self.frame_count += 1;
 }
 
-fn runtimeError(self: *Self, comptime fmt: []const u8, args: anytype) VMError {
+fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) VMError {
     const stderr = std.io.getStdErr().writer();
     stderr.print(fmt ++ "\n", args) catch {};
 
@@ -122,7 +122,7 @@ fn runtimeError(self: *Self, comptime fmt: []const u8, args: anytype) VMError {
     return VMError.RuntimeError;
 }
 
-fn printStack(self: *Self) void {
+fn printStack(self: *VM) void {
     Debug.print("          ", .{});
     for (self.stack[0..self.stack_top]) |slot| {
         Debug.print("[ {} ]", .{slot});
@@ -130,16 +130,16 @@ fn printStack(self: *Self) void {
     Debug.print("\n", .{});
 }
 
-fn readByte(self: *Self) u8 {
+fn readByte(self: *VM) u8 {
     defer self.frame.ip += 1;
     return self.frame.value.as.function.chunk.code.items[self.frame.ip];
 }
 
-fn readConstant(self: *Self) *Value {
+fn readConstant(self: *VM) *Value {
     return self.frame.value.as.function.chunk.constants.items[self.readByte()];
 }
 
-fn run(self: *Self) VMError!*Value {
+fn run(self: *VM) VMError!*Value {
     while (true) {
         self.frame = &self.frames[self.frame_count - 1];
         if (comptime Debug.trace_execution) {
@@ -166,21 +166,21 @@ fn run(self: *Self) VMError!*Value {
     }
 }
 
-fn opNil(self: *Self) VMError!void {
+fn opNil(self: *VM) VMError!void {
     const value = self.initValue(.nil);
     try self.push(value);
 }
 
-fn opConstant(self: *Self) VMError!void {
+fn opConstant(self: *VM) VMError!void {
     const constant = self.readConstant();
     try self.push(constant.ref());
 }
 
-fn opPop(self: *Self) VMError!void {
+fn opPop(self: *VM) VMError!void {
     self.pop().deref(self.allocator);
 }
 
-fn opAdd(self: *Self) VMError!void {
+fn opAdd(self: *VM) VMError!void {
     const x = self.pop();
     defer x.deref(self.allocator);
     const y = self.pop();
@@ -196,7 +196,7 @@ fn opAdd(self: *Self) VMError!void {
     try self.push(value);
 }
 
-fn opReturn(self: *Self) VMError!?*Value {
+fn opReturn(self: *VM) VMError!?*Value {
     const result = self.pop();
 
     self.frame.value.deref(self.allocator);
