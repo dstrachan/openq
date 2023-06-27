@@ -3,7 +3,7 @@ const std = @import("std");
 const Value = @import("Value.zig");
 const Token = @import("Token.zig");
 
-const Self = @This();
+const Chunk = @This();
 
 allocator: std.mem.Allocator,
 constants: std.ArrayList(*Value),
@@ -26,8 +26,8 @@ pub const OpCode = enum {
     Return,
 };
 
-pub fn init(allocator: std.mem.Allocator) *Self {
-    const self = allocator.create(Self) catch std.debug.panic("Failed to create chunk.", .{});
+pub fn init(allocator: std.mem.Allocator) *Chunk {
+    const self = allocator.create(Chunk) catch std.debug.panic("Failed to create chunk.", .{});
     self.* = .{
         .allocator = allocator,
         .constants = std.ArrayList(*Value).init(allocator),
@@ -37,7 +37,7 @@ pub fn init(allocator: std.mem.Allocator) *Self {
     return self;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Chunk) void {
     for (self.constants.items) |constant| constant.deref(self.allocator);
     self.constants.deinit();
     self.code.deinit();
@@ -45,12 +45,12 @@ pub fn deinit(self: *Self) void {
     self.allocator.destroy(self);
 }
 
-pub fn addConstant(self: *Self, value: *Value) usize {
+pub fn addConstant(self: *Chunk, value: *Value) usize {
     self.constants.append(value) catch std.debug.panic("Failed to add constant.", .{});
     return self.constants.items.len - 1;
 }
 
-pub fn write(self: *Self, byte: u8, token: Token) void {
+pub fn write(self: *Chunk, byte: u8, token: Token) void {
     self.code.append(byte) catch std.debug.panic("Failed to write byte.", .{});
     self.tokens.append(token) catch std.debug.panic("Failed to write token.", .{});
 }

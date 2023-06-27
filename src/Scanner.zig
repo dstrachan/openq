@@ -3,7 +3,7 @@ const std = @import("std");
 const Token = @import("Token.zig");
 const TokenType = Token.TokenType;
 
-const Self = @This();
+const Scanner = @This();
 
 source: []const u8,
 current: usize = 0,
@@ -13,13 +13,13 @@ start_column: usize = 0,
 end_line: usize = 0,
 end_column: usize = 0,
 
-pub fn init(source: []const u8) Self {
+pub fn init(source: []const u8) Scanner {
     return .{
         .source = source,
     };
 }
 
-pub fn scanToken(self: *Self) Token {
+pub fn scanToken(self: *Scanner) Token {
     self.start = self.current;
     self.start_line = self.end_line;
     self.start_column = self.end_column;
@@ -83,25 +83,25 @@ pub fn scanToken(self: *Self) Token {
     };
 }
 
-fn whitespace(self: *Self) Token {
+fn whitespace(self: *Scanner) Token {
     while (isWhitespace(self.peek())) _ = self.advance();
 
     return self.makeToken(.Whitespace);
 }
 
-fn number(self: *Self) Token {
+fn number(self: *Scanner) Token {
     while (isNumberChar(self.peek())) _ = self.advance();
 
     return self.makeToken(.Number);
 }
 
-fn identifier(self: *Self) Token {
+fn identifier(self: *Scanner) Token {
     while (isIdentifierChar(self.peek())) _ = self.advance();
 
     return self.makeToken(.Identifier);
 }
 
-fn string(self: *Self) Token {
+fn string(self: *Scanner) Token {
     var len: usize = 0;
     var c = self.peek();
     while (c != 0 and c != '"') : (c = self.peek()) {
@@ -116,7 +116,7 @@ fn string(self: *Self) Token {
     return self.makeToken(if (len == 1) .Char else .CharList);
 }
 
-fn symbol(self: *Self) Token {
+fn symbol(self: *Scanner) Token {
     var len: usize = 1;
     while (self.match('`')) len += 1;
     var c = self.peek();
@@ -134,11 +134,11 @@ fn symbol(self: *Self) Token {
     return self.makeToken(if (len == 1) .Symbol else .SymbolList);
 }
 
-fn isAtEnd(self: *Self) bool {
+fn isAtEnd(self: *Scanner) bool {
     return self.current >= self.source.len;
 }
 
-fn makeToken(self: *Self, token_type: TokenType) Token {
+fn makeToken(self: *Scanner, token_type: TokenType) Token {
     return .{
         .token_type = token_type,
         .lexeme = self.source[self.start..self.current],
@@ -147,7 +147,7 @@ fn makeToken(self: *Self, token_type: TokenType) Token {
     };
 }
 
-fn advance(self: *Self) u8 {
+fn advance(self: *Scanner) u8 {
     if (self.isAtEnd()) return 0;
 
     const c = self.source[self.current];
@@ -161,15 +161,15 @@ fn advance(self: *Self) u8 {
     return c;
 }
 
-fn peek(self: *Self) u8 {
+fn peek(self: *Scanner) u8 {
     return if (self.isAtEnd()) 0 else self.source[self.current];
 }
 
-fn peekNext(self: *Self) u8 {
+fn peekNext(self: *Scanner) u8 {
     return if (self.current >= self.source.len - 1) 0 else self.source[self.current + 1];
 }
 
-fn match(self: *Self, c: u8) bool {
+fn match(self: *Scanner, c: u8) bool {
     if (self.peek() == c) {
         _ = self.advance();
         return true;

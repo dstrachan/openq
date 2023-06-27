@@ -12,16 +12,16 @@ const Value = @import("Value.zig");
 const ValueFunction = Value.ValueFunction;
 const VM = @import("VM.zig");
 
-const Self = @This();
+const Compiler = @This();
 
 const u8_count = std.math.maxInt(u8) + 1;
 
-current: *Self = undefined,
+current: *Compiler = undefined,
 
 vm: *VM,
 scanner: Scanner,
 parser: Parser,
-enclosing: ?*Self,
+enclosing: ?*Compiler,
 func: *ValueFunction,
 function_type: FunctionType,
 locals: [u8_count]Token = undefined,
@@ -43,8 +43,8 @@ const Precedence = enum {
     Primary,
 };
 
-const PrefixParseFn = *const fn (*Self) CompilerError!*Node;
-const InfixParseFn = *const fn (*Self, *Node) CompilerError!*Node;
+const PrefixParseFn = *const fn (*Compiler) CompilerError!*Node;
+const InfixParseFn = *const fn (*Compiler, *Node) CompilerError!*Node;
 
 const ParseRule = struct {
     prefix: ?PrefixParseFn,
@@ -54,7 +54,7 @@ const ParseRule = struct {
 
 pub fn compile(source: []const u8, vm: *VM) CompilerError!*Value {
     const scanner = Scanner.init(source);
-    var compiler = Self.init(null, .Script, vm, scanner);
+    var compiler = Compiler.init(null, .Script, vm, scanner);
     errdefer compiler.func.deinit(vm.allocator);
     compiler.current = &compiler;
 
@@ -83,7 +83,7 @@ pub fn compile(source: []const u8, vm: *VM) CompilerError!*Value {
     return if (compiler.parser.had_error) CompilerError.CompileError else compiler.current.vm.initValue(.{ .function = func });
 }
 
-fn init(enclosing: ?*Self, function_type: FunctionType, vm: *VM, scanner: Scanner) Self {
+fn init(enclosing: ?*Compiler, function_type: FunctionType, vm: *VM, scanner: Scanner) Compiler {
     return .{
         .vm = vm,
         .scanner = scanner,
@@ -94,7 +94,7 @@ fn init(enclosing: ?*Self, function_type: FunctionType, vm: *VM, scanner: Scanne
     };
 }
 
-fn endCompiler(self: *Self, node: *Node) *ValueFunction {
+fn endCompiler(self: *Compiler, node: *Node) *ValueFunction {
     const top_node: Node = .{
         .op_code = .Return,
         .lhs = if (node.op_code == .Pop) Node.init(.{ .op_code = .Nil }, self.vm.allocator) else null,
@@ -112,7 +112,7 @@ fn endCompiler(self: *Self, node: *Node) *ValueFunction {
     return func;
 }
 
-fn traverse(self: *Self, node: Node) void {
+fn traverse(self: *Compiler, node: Node) void {
     if (node.rhs) |rhs| self.traverse(rhs.*);
     if (node.lhs) |lhs| self.traverse(lhs.*);
     if (node.name) |name| {
@@ -122,7 +122,7 @@ fn traverse(self: *Self, node: Node) void {
     if (node.byte) |byte| self.emitByte(byte);
 }
 
-fn advance(self: *Self) void {
+fn advance(self: *Compiler) void {
     self.parser.previous = self.parser.current;
 
     while (true) {
@@ -133,19 +133,19 @@ fn advance(self: *Self) void {
     }
 }
 
-fn currentChunk(self: *Self) *Chunk {
+fn currentChunk(self: *Compiler) *Chunk {
     return self.current.func.chunk;
 }
 
-fn emitByte(self: *Self, byte: u8) void {
+fn emitByte(self: *Compiler, byte: u8) void {
     self.currentChunk().write(byte, self.parser.previous);
 }
 
-fn emitInstruction(self: *Self, instruction: OpCode) void {
+fn emitInstruction(self: *Compiler, instruction: OpCode) void {
     self.emitByte(@intFromEnum(instruction));
 }
 
-fn consume(self: *Self, token_type: TokenType, message: []const u8) void {
+fn consume(self: *Compiler, token_type: TokenType, message: []const u8) void {
     if (self.parser.current.token_type == token_type) {
         self.advance();
         return;
@@ -154,19 +154,19 @@ fn consume(self: *Self, token_type: TokenType, message: []const u8) void {
     self.errorAtCurrent(message);
 }
 
-fn check(self: *Self, token_type: TokenType) bool {
+fn check(self: *Compiler, token_type: TokenType) bool {
     return self.parser.current.token_type == token_type;
 }
 
-fn errorAtCurrent(self: *Self, message: []const u8) void {
+fn errorAtCurrent(self: *Compiler, message: []const u8) void {
     self.errorAt(self.parser.current, message);
 }
 
-fn errorAtPrevious(self: *Self, message: []const u8) void {
+fn errorAtPrevious(self: *Compiler, message: []const u8) void {
     self.errorAt(self.parser.previous, message);
 }
 
-fn errorAt(self: *Self, token: Token, message: []const u8) void {
+fn errorAt(self: *Compiler, token: Token, message: []const u8) void {
     if (self.parser.panic_mode) return;
     self.parser.panic_mode = true;
 
@@ -184,7 +184,7 @@ fn errorAt(self: *Self, token: Token, message: []const u8) void {
     self.parser.had_error = true;
 }
 
-fn makeConstant(self: *Self, value: *Value) u8 {
+fn makeConstant(self: *Compiler, value: *Value) u8 {
     const constant = self.currentChunk().addConstant(value);
     if (constant > std.math.maxInt(u8)) {
         self.errorAtPrevious("Too many constants in one chunk.");
@@ -194,11 +194,11 @@ fn makeConstant(self: *Self, value: *Value) u8 {
     return @intCast(constant);
 }
 
-fn expression(self: *Self) CompilerError!*Node {
+fn expression(self: *Compiler) CompilerError!*Node {
     return try self.parsePrecedence(.Secondary, true);
 }
 
-fn parsePrecedence(self: *Self, precedence: Precedence, should_advance: bool) CompilerError!*Node {
+fn parsePrecedence(self: *Compiler, precedence: Precedence, should_advance: bool) CompilerError!*Node {
     if (should_advance) self.advance();
     const prefixRule = getRule(self.parser.previous.token_type).prefix orelse {
         self.errorAtPrevious("Expect prefix expression.");
@@ -288,7 +288,7 @@ fn getRule(token_type: TokenType) ParseRule {
     };
 }
 
-fn number(self: *Self) CompilerError!*Node {
+fn number(self: *Compiler) CompilerError!*Node {
     const value = self.parser.parseNumber(self.parser.previous.lexeme) catch {
         return CompilerError.ParseError;
     };
@@ -298,7 +298,7 @@ fn number(self: *Self) CompilerError!*Node {
     }, self.vm.allocator);
 }
 
-fn add(self: *Self, node: *Node) CompilerError!*Node {
+fn add(self: *Compiler, node: *Node) CompilerError!*Node {
     return Node.init(.{
         .op_code = .Add,
         .lhs = node,
