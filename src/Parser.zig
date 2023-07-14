@@ -32,10 +32,6 @@ pub const inf_real = std.math.inf(f32);
 pub const null_float = std.math.nan(f64);
 pub const inf_float = std.math.inf(f64);
 
-const ParserError = error{
-    ParseError,
-};
-
 pub fn init(vm: VM) Parser {
     return .{
         .vm = vm,
@@ -54,17 +50,17 @@ pub fn parseNumber(self: *Parser, str: []const u8) !*Value {
                 'w' => .{ .float = inf_float },
                 'x' => .{ .byte_list = &[0]u8{} },
                 'b' => .{ .boolean = false },
-                else => try self.number(2),
+                else => try self.number(1),
             },
             3 => switch (str[1]) {
                 'N', 'n' => try @"null"(str[2]),
-                'W', 'w' => try inf(str[2]),
+                'W', 'w' => try inf(str[2], .Positive),
                 'x' => try self.byte(),
                 '0', '1' => try self.maybeBoolean(2),
                 else => try self.number(2),
             },
             else => switch (str[1]) {
-                'N', 'n', 'W', 'w' => return ParserError.ParseError,
+                'N', 'n', 'W', 'w' => return error.InvalidCharacter,
                 'x' => try self.byte(),
                 '0', '1' => try self.maybeBoolean(2),
                 else => try self.number(2),
@@ -72,7 +68,23 @@ pub fn parseNumber(self: *Parser, str: []const u8) !*Value {
         },
         '1' => try self.maybeBoolean(1),
         '.' => try self.maybeFloat(1),
-        '-' => try if (str[1] == '.') self.maybeFloat(2) else self.number(1),
+        '-' => switch (str[1]) {
+            '0' => switch (str.len) {
+                2 => .{ .long = 0 },
+                3 => switch (str[2]) {
+                    'W' => .{ .long = -inf_long },
+                    'w' => .{ .float = -inf_float },
+                    else => try self.number(2),
+                },
+                4 => switch (str[2]) {
+                    'W', 'w' => try inf(str[3], .Negative),
+                    else => try self.number(2),
+                },
+                else => try self.number(2),
+            },
+            '.' => try self.maybeFloat(2),
+            else => try self.number(1),
+        },
         else => try self.number(0),
     });
 }
@@ -109,7 +121,7 @@ fn maybeFloat(self: Parser, index: usize) !ValueUnion {
         'f' => .{ .float = try std.fmt.parseFloat(f64, self.str[0 .. i - 1]) },
         'm' => self.month(),
         '.' => self.maybeDate(i + 1),
-        else => ParserError.ParseError,
+        else => error.InvalidCharacter,
     };
 }
 
@@ -136,27 +148,27 @@ fn @"null"(c: u8) !ValueUnion {
         'u' => .{ .minute = null_int },
         'v' => .{ .second = null_int },
         'z' => .{ .datetime = null_float },
-        else => ParserError.ParseError,
+        else => error.InvalidCharacter,
     };
 }
 
-fn inf(c: u8) !ValueUnion {
+fn inf(c: u8, comptime sign: enum { Positive, Negative }) !ValueUnion {
     return switch (c) {
         'c' => .{ .char = ' ' },
-        'd' => .{ .date = inf_int },
-        'e' => .{ .real = inf_real },
-        'f' => .{ .float = inf_float },
-        'h' => .{ .short = inf_short },
-        'i' => .{ .int = inf_int },
-        'j' => .{ .long = inf_long },
-        'm' => .{ .month = inf_int },
-        'n' => .{ .timespan = inf_long },
-        'p' => .{ .timestamp = inf_long },
-        't' => .{ .time = inf_int },
-        'u' => .{ .minute = inf_int },
-        'v' => .{ .second = inf_int },
-        'z' => .{ .datetime = inf_float },
-        else => ParserError.ParseError,
+        'd' => .{ .date = if (sign == .Positive) inf_int else -inf_int },
+        'e' => .{ .real = if (sign == .Positive) inf_real else -inf_real },
+        'f' => .{ .float = if (sign == .Positive) inf_float else -inf_float },
+        'h' => .{ .short = if (sign == .Positive) inf_short else -inf_short },
+        'i' => .{ .int = if (sign == .Positive) inf_int else -inf_int },
+        'j' => .{ .long = if (sign == .Positive) inf_long else -inf_long },
+        'm' => .{ .month = if (sign == .Positive) inf_int else -inf_int },
+        'n' => .{ .timespan = if (sign == .Positive) inf_long else -inf_long },
+        'p' => .{ .timestamp = if (sign == .Positive) inf_long else -inf_long },
+        't' => .{ .time = if (sign == .Positive) inf_int else -inf_int },
+        'u' => .{ .minute = if (sign == .Positive) inf_int else -inf_int },
+        'v' => .{ .second = if (sign == .Positive) inf_int else -inf_int },
+        'z' => .{ .datetime = if (sign == .Positive) inf_float else -inf_float },
+        else => error.InvalidCharacter,
     };
 }
 
@@ -167,7 +179,7 @@ fn number(self: Parser, index: usize) !ValueUnion {
     if (i == self.str.len) return .{ .long = try std.fmt.parseInt(i64, self.str, 10) };
 
     return switch (self.str[i]) {
-        'h' => self.short(),
+        'h' => try self.short(i),
         'i' => self.int(),
         'j' => self.long(),
         'e' => self.real(),
@@ -181,13 +193,8 @@ fn number(self: Parser, index: usize) !ValueUnion {
         'u' => self.minute(),
         'v' => self.second(),
         '.' => self.maybeFloat(i + 1),
-        else => try self.unclear(),
+        else => error.InvalidCharacter,
     };
-}
-
-fn unclear(self: Parser) !ValueUnion {
-    _ = self;
-    return ParserError.ParseError;
 }
 
 fn byte(self: Parser) !ValueUnion {
@@ -216,9 +223,9 @@ fn byte(self: Parser) !ValueUnion {
     return .{ .byte_list = try list.toOwnedSlice() };
 }
 
-fn short(self: Parser) ValueUnion {
-    _ = self;
-    unreachable;
+fn short(self: Parser, index: usize) !ValueUnion {
+    if (std.mem.eql(u8, "-32768", self.str[0..index])) return error.Overflow;
+    return .{ .short = try std.fmt.parseInt(i16, self.str[0..index], 10) };
 }
 
 fn int(self: Parser) ValueUnion {
@@ -369,13 +376,13 @@ test "valid boolean inputs" {
 }
 
 test "invalid boolean inputs" {
-    try testParserError("2b", ParserError.ParseError);
-    try testParserError(".b", ParserError.ParseError);
-    try testParserError(".1b", ParserError.ParseError);
-    try testParserError("1.b", ParserError.ParseError);
-    try testParserError("1.1b", ParserError.ParseError);
-    try testParserError("1b0", ParserError.ParseError);
-    try testParserError("10b0", ParserError.ParseError);
+    try testParserError("2b", error.InvalidCharacter);
+    try testParserError(".b", error.InvalidCharacter);
+    try testParserError(".1b", error.InvalidCharacter);
+    try testParserError("1.b", error.InvalidCharacter);
+    try testParserError("1.1b", error.InvalidCharacter);
+    try testParserError("1b0", error.InvalidCharacter);
+    try testParserError("10b0", error.InvalidCharacter);
 }
 
 test "valid guid inputs" {
@@ -384,7 +391,7 @@ test "valid guid inputs" {
 }
 
 test "invalid guid inputs" {
-    try testParserError("00000000-0000-0000-0000-000000000000", ParserError.ParseError);
+    try testParserError("00000000-0000-0000-0000-000000000000", error.InvalidCharacter);
 }
 
 test "valid byte inputs" {
@@ -411,4 +418,26 @@ test "invalid byte inputs" {
     try testParserError("0xG", error.InvalidCharacter);
     try testParserError("0xgg", error.InvalidCharacter);
     try testParserError("0xGG", error.InvalidCharacter);
+}
+
+test "valid short inputs" {
+    try testParser("0h", .short, @as(i16, 0));
+    try testParser("1h", .short, @as(i16, 1));
+    try testParser("-1h", .short, @as(i16, -1));
+    try testParser("32766h", .short, @as(i16, 32766));
+    try testParser("-32766h", .short, @as(i16, -32766));
+    try testParser("0Nh", .short, @as(i16, null_short));
+    try testParser("0nh", .short, @as(i16, null_short));
+    try testParser("0Wh", .short, @as(i16, inf_short));
+    try testParser("0wh", .short, @as(i16, inf_short));
+    try testParser("32767h", .short, @as(i16, inf_short));
+    try testParser("-0Wh", .short, @as(i16, -inf_short));
+    try testParser("-0wh", .short, @as(i16, -inf_short));
+    try testParser("-32767h", .short, @as(i16, -inf_short));
+}
+
+test "invalid short inputs" {
+    try testParserError("32768h", error.Overflow);
+    try testParserError("-32768h", error.Overflow);
+    try testParserError("-32769h", error.Overflow);
 }
