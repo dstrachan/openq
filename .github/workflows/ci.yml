@@ -1,0 +1,22 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - uses: mlugg/setup-zig@v2
+              with:
+                  version: master
+            - name: Build
+              run: zig build --summary all
+            - name: Test
+              run: zig build test --summary all
