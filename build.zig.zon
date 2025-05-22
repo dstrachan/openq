@@ -1,0 +1,12 @@
+.{
+    .name = .openq,
+    .version = "0.0.0",
+    .fingerprint = 0x241fb9550b2a324f,
+    .minimum_zig_version = "0.15.0-dev.621+a63f7875f",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
