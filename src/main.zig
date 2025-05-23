@@ -11,6 +11,7 @@ const build_options = @import("build_options");
 const q = @import("q");
 const Token = q.Token;
 const Tokenizer = q.Tokenizer;
+const Ast = q.Ast;
 
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
@@ -31,6 +32,7 @@ const usage =
     \\Commands:
     \\
     \\  tokenize    Tokenize input
+    \\  parse       Parse input
     \\
     \\  help        Print this help and exit
     \\  version     Print version number and exit
@@ -78,6 +80,8 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     const cmd_args = args[2..];
     if (mem.eql(u8, cmd, "tokenize")) {
         try cmdTokenize(arena, cmd_args);
+    } else if (mem.eql(u8, cmd, "parse")) {
+        try cmdParse(arena, cmd_args);
     } else if (mem.eql(u8, cmd, "version")) {
         try io.getStdOut().writeAll(build_options.version ++ "\n");
     } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
@@ -147,6 +151,7 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
 
     var tokens: std.ArrayListUnmanaged(Token) = .empty;
     var tokenizer: Tokenizer = .init(source);
+    if (q_source_path != null) tokenizer.skipComments();
     while (true) {
         const token = tokenizer.next();
         try tokens.append(arena, token);
@@ -162,6 +167,80 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
         if (index < tokens.items.len - 1) try writer.writeByte(',');
     }
     try writer.writeByte(']');
+
+    return cleanExit();
+}
+
+const usage_parse =
+    \\Usage: openq parse [file]
+    \\
+    \\  Given a .q source file, parses the input.
+    \\
+    \\  If [file] is omitted, stdin is used.
+    \\
+    \\Options:
+    \\
+    \\  -h, --help             Print this help and exit
+    \\  --color [auto|off|on]  Enable or disable colored error messages
+    \\
+;
+
+fn cmdParse(arena: Allocator, args: []const []const u8) !void {
+    var color: std.zig.Color = .auto;
+    var q_source_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (mem.startsWith(u8, arg, "-")) {
+            if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+                try io.getStdOut().writeAll(usage_parse);
+                return cleanExit();
+            } else if (mem.eql(u8, arg, "--color")) {
+                if (i + 1 >= args.len) {
+                    fatal("expected [auto|on|off] after --color", .{});
+                }
+                i += 1;
+                const next_arg = args[i];
+                color = std.meta.stringToEnum(std.zig.Color, next_arg) orelse {
+                    fatal("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
+                };
+            } else {
+                fatal("unrecognized parameter: '{s}'", .{arg});
+            }
+        } else if (q_source_path == null) {
+            q_source_path = arg;
+        } else {
+            fatal("extra positional parameter: '{s}'", .{arg});
+        }
+    }
+
+    const display_path = q_source_path orelse "<stdin>";
+    const source: [:0]const u8 = s: {
+        var f = if (q_source_path) |p| file: {
+            break :file fs.cwd().openFile(p, .{}) catch |err| {
+                fatal("unable to open file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
+            };
+        } else io.getStdIn();
+        defer if (q_source_path != null) f.close();
+        break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
+            fatal("unable to load file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
+        };
+    };
+
+    const tree: Ast = try .parse(arena, source);
+
+    const writer = io.getStdOut().writer();
+    try writer.writeAll(
+        \\{"tokens":[
+    );
+    for (0..tree.tokens.len) |index| {
+        try writer.print(
+            \\{{"{s}":"{}"}}
+        , .{ @tagName(tree.tokenTag(@enumFromInt(index))), std.zig.fmtEscapes(tree.tokenSlice(@enumFromInt(index))) });
+        if (index < tree.tokens.len - 1) try writer.writeByte(',');
+    }
+    try writer.writeAll("]}");
 
     return cleanExit();
 }
