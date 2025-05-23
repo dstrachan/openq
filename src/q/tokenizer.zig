@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const assert = std.debug.assert;
 
 pub const Token = struct {
     tag: Tag,
@@ -17,13 +18,47 @@ pub const Token = struct {
         none = std.math.maxInt(u32),
         _,
 
-        pub fn unwrap(oi: OptionalIndex) ?Index {
-            if (oi == .none) return null;
-            return @enumFromInt(@intFromEnum(oi));
+        pub fn unwrap(opt_index: OptionalIndex) ?Index {
+            if (opt_index == .none) return null;
+            return @enumFromInt(@intFromEnum(opt_index));
         }
 
-        pub fn fromIndex(i: Index) OptionalIndex {
-            return @enumFromInt(@intFromEnum(i));
+        pub fn fromIndex(index: Index) OptionalIndex {
+            return @enumFromInt(@intFromEnum(index));
+        }
+
+        pub fn fromOptional(opt_index: ?Index) OptionalIndex {
+            return if (opt_index) |index| @enumFromInt(index) else .none;
+        }
+    };
+
+    pub const Offset = enum(i32) {
+        zero = 0,
+        _,
+
+        pub fn init(base: Index, destination: Index) Offset {
+            const base_i64: i64 = @intFromEnum(base);
+            const destination_i64: i64 = @intFromEnum(destination);
+            return @enumFromInt(destination_i64 - base_i64);
+        }
+
+        pub fn toOptional(offset: Offset) OptionalOffset {
+            const result: OptionalOffset = @enumFromInt(@intFromEnum(offset));
+            assert(result != .none);
+            return result;
+        }
+
+        pub fn toAbsolute(offset: Offset, base: Index) Index {
+            return @enumFromInt(@intFromEnum(base) + @intFromEnum(offset));
+        }
+    };
+
+    pub const OptionalOffset = enum(i32) {
+        none = std.math.maxInt(i32),
+        _,
+
+        pub fn unwrap(opt_offset: OptionalOffset) ?Offset {
+            return if (opt_offset == .none) null else @enumFromInt(@intFromEnum(opt_offset));
         }
     };
 
@@ -71,6 +106,50 @@ pub const Token = struct {
         system,
         invalid,
         eof,
+
+        pub fn lexeme(tag: Tag) ?[]const u8 {
+            return switch (tag) {
+                .bang => "!",
+                .hash => "#",
+                .dollar => "$",
+                .percent => "%",
+                .ampersand => "&",
+                .apostrophe => "'",
+                .l_paren => "(",
+                .r_paren => ")",
+                .asterisk => "*",
+                .plus => "+",
+                .comma => ",",
+                .minus => "-",
+                .dot => ".",
+                .slash => "/",
+                .colon => ":",
+                .semicolon => ";",
+                .l_angle_bracket => "<",
+                .equal => "=",
+                .r_angle_bracket => ">",
+                .question_mark => "?",
+                .at => "@",
+                .l_bracket => "[",
+                .backslash => "\\",
+                .r_bracket => "]",
+                .caret => "^",
+                .underscore => "_",
+                .l_brace => "{",
+                .pipe => "|",
+                .r_brace => "}",
+                .tilde => "~",
+
+                .string_literal,
+                .symbol_literal,
+                .number_literal,
+                .identifier,
+                .system,
+                .invalid,
+                .eof,
+                => null,
+            };
+        }
     };
 
     pub const keywords = std.StaticStringMap(Tag).initComptime(.{});
