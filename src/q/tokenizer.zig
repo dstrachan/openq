@@ -7,6 +7,7 @@ pub const Token = struct {
     loc: Loc,
 
     pub const Index = enum(u32) {
+        zero = 0,
         _,
 
         pub fn toOptional(i: Index) OptionalIndex {
@@ -1659,4 +1660,56 @@ test "tokenize punctuation/operators/iterators" {
         .{ .slash_colon, "/:" },
         .{ .backslash_colon, "\\:" },
     });
+}
+
+test "fuzz" {
+    const gpa = std.testing.allocator;
+    const Context = struct {
+        fn testOne(context: @This(), input: []const u8) anyerror!void {
+            _ = context; // autofix
+            const source0 = try gpa.dupeZ(u8, input);
+            defer gpa.free(source0);
+            var tokenizer: Tokenizer = .init(source0);
+            var tokenizer_failed = false;
+            while (true) {
+                const token = tokenizer.next();
+
+                try std.testing.expect(token.loc.end >= token.loc.start);
+
+                switch (token.tag) {
+                    .invalid => {
+                        tokenizer_failed = true;
+
+                        // Invalid token ends with newline or null byte.
+                        try std.testing.expect(source0[token.loc.end] == '\n' or source0[token.loc.end] == 0);
+                    },
+                    .eof => {
+                        // EOF token is always 0 length and at end of source.
+                        try std.testing.expectEqual(source0.len, token.loc.start);
+                        try std.testing.expectEqual(source0.len, token.loc.end);
+                        break;
+                    },
+                    else => {
+                        try std.testing.expect(source0[token.loc.end] != '\n');
+                    },
+                }
+            }
+
+            if (source0.len != 0) for (source0, source0[1..][0..source0.len]) |cur, next| {
+                // No null byte allowed except at end.
+                if (cur == 0) {
+                    try std.testing.expect(tokenizer_failed);
+                }
+                // No ASCII control characters other than '\n' and '\t' are allowed.
+                if (std.ascii.isControl(cur) and cur != '\n' and cur != '\t') {
+                    try std.testing.expect(tokenizer_failed);
+                }
+                // All '\r' must be followed by '\n'.
+                if (cur == '\r' and next != '\n') {
+                    try std.testing.expect(tokenizer_failed);
+                }
+            };
+        }
+    };
+    try std.testing.fuzz(Context{}, Context.testOne, .{});
 }
