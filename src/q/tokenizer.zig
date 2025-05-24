@@ -7,6 +7,7 @@ pub const Token = struct {
     loc: Loc,
 
     pub const Index = enum(u32) {
+        zero = 0,
         _,
 
         pub fn toOptional(i: Index) OptionalIndex {
