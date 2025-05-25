@@ -68,36 +68,69 @@ pub const Token = struct {
     };
 
     pub const Tag = enum {
-        bang,
-        hash,
-        dollar,
-        percent,
-        ampersand,
-        apostrophe,
+        // Punctuation
         l_paren,
         r_paren,
-        asterisk,
-        plus,
-        comma,
-        minus,
-        dot,
-        slash,
-        colon,
-        semicolon,
-        l_angle_bracket,
-        equal,
-        r_angle_bracket,
-        question_mark,
-        at,
         l_bracket,
-        backslash,
         r_bracket,
-        caret,
-        underscore,
         l_brace,
-        pipe,
         r_brace,
+        semicolon,
+
+        // Operators
+        bang,
+        bang_colon,
+        hash,
+        hash_colon,
+        dollar,
+        dollar_colon,
+        percent,
+        percent_colon,
+        ampersand,
+        ampersand_colon,
+        asterisk,
+        asterisk_colon,
+        plus,
+        plus_colon,
+        comma,
+        comma_colon,
+        minus,
+        minus_colon,
+        dot,
+        dot_colon,
+        colon,
+        colon_colon,
+        l_angle_bracket,
+        l_angle_bracket_colon,
+        equal,
+        equal_colon,
+        r_angle_bracket,
+        r_angle_bracket_colon,
+        question_mark,
+        question_mark_colon,
+        at,
+        at_colon,
+        caret,
+        caret_colon,
+        underscore,
+        underscore_colon,
+        pipe,
+        pipe_colon,
         tilde,
+        tilde_colon,
+        zero_colon,
+        zero_colon_colon,
+        one_colon,
+        one_colon_colon,
+        two_colon,
+
+        // Iterators
+        apostrophe,
+        apostrophe_colon,
+        slash,
+        slash_colon,
+        backslash,
+        backslash_colon,
 
         string_literal,
         symbol_literal,
@@ -109,36 +142,66 @@ pub const Token = struct {
 
         pub fn lexeme(tag: Tag) ?[]const u8 {
             return switch (tag) {
-                .bang => "!",
-                .hash => "#",
-                .dollar => "$",
-                .percent => "%",
-                .ampersand => "&",
-                .apostrophe => "'",
                 .l_paren => "(",
                 .r_paren => ")",
-                .asterisk => "*",
-                .plus => "+",
-                .comma => ",",
-                .minus => "-",
-                .dot => ".",
-                .slash => "/",
-                .colon => ":",
-                .semicolon => ";",
-                .l_angle_bracket => "<",
-                .equal => "=",
-                .r_angle_bracket => ">",
-                .question_mark => "?",
-                .at => "@",
                 .l_bracket => "[",
-                .backslash => "\\",
                 .r_bracket => "]",
-                .caret => "^",
-                .underscore => "_",
                 .l_brace => "{",
-                .pipe => "|",
                 .r_brace => "}",
+                .semicolon => ";",
+
+                .bang => "!",
+                .bang_colon => "!:",
+                .hash => "#",
+                .hash_colon => "#:",
+                .dollar => "$",
+                .dollar_colon => "$:",
+                .percent => "%",
+                .percent_colon => "%:",
+                .ampersand => "&",
+                .ampersand_colon => "&:",
+                .asterisk => "*",
+                .asterisk_colon => "*:",
+                .plus => "+",
+                .plus_colon => "+:",
+                .comma => ",",
+                .comma_colon => ",:",
+                .minus => "-",
+                .minus_colon => "-:",
+                .dot => ".",
+                .dot_colon => ".:",
+                .colon => ":",
+                .colon_colon => "::",
+                .l_angle_bracket => "<",
+                .l_angle_bracket_colon => "<:",
+                .equal => "=",
+                .equal_colon => "=:",
+                .r_angle_bracket => ">",
+                .r_angle_bracket_colon => ">:",
+                .question_mark => "?",
+                .question_mark_colon => "?:",
+                .at => "@",
+                .at_colon => "@:",
+                .caret => "^",
+                .caret_colon => "^:",
+                .underscore => "_",
+                .underscore_colon => "_:",
+                .pipe => "|",
+                .pipe_colon => "|:",
                 .tilde => "~",
+                .tilde_colon => "~:",
+                .zero_colon => "0:",
+                .zero_colon_colon => "0::",
+                .one_colon => "1:",
+                .one_colon_colon => "1::",
+                .two_colon => "2:",
+
+                .apostrophe => "'",
+                .apostrophe_colon => "':",
+                .slash => "/",
+                .slash_colon => "/:",
+                .backslash => "\\",
+                .backslash_colon => "\\:",
 
                 .string_literal,
                 .symbol_literal,
@@ -287,7 +350,6 @@ pub const Tokenizer = struct {
 
     const State = enum {
         start,
-        invalid,
         string_literal,
         string_literal_newline,
         string_literal_backslash,
@@ -296,18 +358,43 @@ pub const Tokenizer = struct {
         symbol_literal_start,
         symbol_literal,
         file_handle,
+        zero,
+        one,
+        two,
         number_literal,
         identifier,
+        bang,
+        hash,
+        dollar,
+        percent,
+        ampersand,
+        apostrophe,
+        asterisk,
+        plus,
+        comma,
+        minus,
         dot,
         slash,
+        colon,
+        l_angle_bracket,
+        equal,
+        r_angle_bracket,
+        question_mark,
+        at,
+        backslash,
         block_comment_start,
         block_comment,
         maybe_block_comment_end,
         block_comment_end,
         trailing_comment,
         maybe_system,
-        skip_line,
         system,
+        caret,
+        underscore,
+        pipe,
+        tilde,
+        skip_line,
+        invalid,
     };
 
     pub fn next(self: *Tokenizer) Token {
@@ -333,6 +420,34 @@ pub const Tokenizer = struct {
                     result.loc.start = self.index;
                     continue :state .start;
                 },
+                '(' => {
+                    result.tag = .l_paren;
+                    self.index += 1;
+                },
+                ')' => {
+                    result.tag = .r_paren;
+                    self.index += 1;
+                },
+                '[' => {
+                    result.tag = .l_bracket;
+                    self.index += 1;
+                },
+                ']' => {
+                    result.tag = .r_bracket;
+                    self.index += 1;
+                },
+                '{' => {
+                    result.tag = .l_brace;
+                    self.index += 1;
+                },
+                '}' => {
+                    result.tag = .r_brace;
+                    self.index += 1;
+                },
+                ';' => {
+                    result.tag = .semicolon;
+                    self.index += 1;
+                },
                 '"' => {
                     result.tag = .string_literal;
                     continue :state .string_literal;
@@ -341,7 +456,19 @@ pub const Tokenizer = struct {
                     result.tag = .symbol_literal;
                     continue :state .symbol_literal;
                 },
-                '0'...'9' => {
+                '0' => {
+                    result.tag = .number_literal;
+                    continue :state .zero;
+                },
+                '1' => {
+                    result.tag = .number_literal;
+                    continue :state .one;
+                },
+                '2' => {
+                    result.tag = .number_literal;
+                    continue :state .two;
+                },
+                '3'...'9' => {
                     result.tag = .number_literal;
                     continue :state .number_literal;
                 },
@@ -351,122 +478,101 @@ pub const Tokenizer = struct {
                 },
                 '!' => {
                     result.tag = .bang;
-                    self.index += 1;
+                    continue :state .bang;
                 },
                 '#' => {
                     result.tag = .hash;
-                    self.index += 1;
+                    continue :state .hash;
                 },
                 '$' => {
                     result.tag = .dollar;
-                    self.index += 1;
+                    continue :state .dollar;
                 },
                 '%' => {
                     result.tag = .percent;
-                    self.index += 1;
+                    continue :state .percent;
                 },
                 '&' => {
                     result.tag = .ampersand;
-                    self.index += 1;
+                    continue :state .ampersand;
                 },
                 '\'' => {
                     result.tag = .apostrophe;
-                    self.index += 1;
-                },
-                '(' => {
-                    result.tag = .l_paren;
-                    self.index += 1;
-                },
-                ')' => {
-                    result.tag = .r_paren;
-                    self.index += 1;
+                    continue :state .apostrophe;
                 },
                 '*' => {
                     result.tag = .asterisk;
-                    self.index += 1;
+                    continue :state .asterisk;
                 },
                 '+' => {
                     result.tag = .plus;
-                    self.index += 1;
+                    continue :state .plus;
                 },
                 ',' => {
                     result.tag = .comma;
-                    self.index += 1;
+                    continue :state .comma;
                 },
                 '-' => {
                     result.tag = .minus;
-                    self.index += 1;
+                    continue :state .minus;
                 },
                 '.' => {
                     result.tag = .dot;
                     continue :state .dot;
                 },
-                '/' => continue :state .slash,
+                '/' => if (self.index != 0) switch (self.buffer[self.index - 1]) {
+                    '\n' => continue :state .block_comment_start,
+                    ' ', '\t' => continue :state .skip_line,
+                    else => {
+                        result.tag = .slash;
+                        continue :state .slash;
+                    },
+                } else continue :state .block_comment_start,
                 ':' => {
                     result.tag = .colon;
-                    self.index += 1;
-                },
-                ';' => {
-                    result.tag = .semicolon;
-                    self.index += 1;
+                    continue :state .colon;
                 },
                 '<' => {
                     result.tag = .l_angle_bracket;
-                    self.index += 1;
+                    continue :state .l_angle_bracket;
                 },
                 '=' => {
                     result.tag = .equal;
-                    self.index += 1;
+                    continue :state .equal;
                 },
                 '>' => {
                     result.tag = .r_angle_bracket;
-                    self.index += 1;
+                    continue :state .r_angle_bracket;
                 },
                 '?' => {
                     result.tag = .question_mark;
-                    self.index += 1;
+                    continue :state .question_mark;
                 },
                 '@' => {
                     result.tag = .at;
-                    self.index += 1;
-                },
-                '[' => {
-                    result.tag = .l_bracket;
-                    self.index += 1;
+                    continue :state .at;
                 },
                 '\\' => if (self.index == 0 or self.buffer[self.index - 1] == '\n')
                     continue :state .maybe_system
                 else {
                     result.tag = .backslash;
-                    self.index += 1;
-                },
-                ']' => {
-                    result.tag = .r_bracket;
-                    self.index += 1;
+                    continue :state .backslash;
                 },
                 '^' => {
                     result.tag = .caret;
-                    self.index += 1;
+                    continue :state .caret;
                 },
                 '_' => {
                     result.tag = .underscore;
-                    self.index += 1;
-                },
-                '{' => {
-                    result.tag = .l_brace;
-                    self.index += 1;
+                    continue :state .underscore;
                 },
                 '|' => {
                     result.tag = .pipe;
-                    self.index += 1;
-                },
-                '}' => {
-                    result.tag = .r_brace;
-                    self.index += 1;
+                    continue :state .pipe;
                 },
                 '~' => {
                     result.tag = .tilde;
-                    self.index += 1;
+                    continue :state .tilde;
                 },
                 else => continue :state .invalid,
             },
@@ -568,6 +674,39 @@ pub const Tokenizer = struct {
                 }
             },
 
+            .zero => switch (self.buffer[self.index + 1]) {
+                ':' => switch (self.buffer[self.index + 2]) {
+                    ':' => {
+                        result.tag = .zero_colon_colon;
+                        self.index += 3;
+                    },
+                    else => {
+                        result.tag = .zero_colon;
+                        self.index += 2;
+                    },
+                },
+                else => continue :state .number_literal,
+            },
+            .one => switch (self.buffer[self.index + 1]) {
+                ':' => switch (self.buffer[self.index + 2]) {
+                    ':' => {
+                        result.tag = .one_colon_colon;
+                        self.index += 3;
+                    },
+                    else => {
+                        result.tag = .one_colon;
+                        self.index += 2;
+                    },
+                },
+                else => continue :state .number_literal,
+            },
+            .two => switch (self.buffer[self.index + 1]) {
+                ':' => {
+                    result.tag = .two_colon;
+                    self.index += 2;
+                },
+                else => continue :state .number_literal,
+            },
             .number_literal => {
                 self.index += 1;
                 switch (self.buffer[self.index]) {
@@ -589,6 +728,116 @@ pub const Tokenizer = struct {
                 }
             },
 
+            .bang => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .bang_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .hash => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .hash_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .dollar => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .dollar_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .percent => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .percent_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .ampersand => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .ampersand_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .apostrophe => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .apostrophe_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .asterisk => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .asterisk_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .plus => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .plus_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .comma => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .comma_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .minus => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .minus_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
             .dot => {
                 self.index += 1;
                 switch (self.buffer[self.index]) {
@@ -600,18 +849,101 @@ pub const Tokenizer = struct {
                         result.tag = .number_literal;
                         continue :state .number_literal;
                     },
+                    ':' => {
+                        result.tag = .dot_colon;
+                        self.index += 1;
+                    },
                     else => {},
                 }
             },
 
-            .slash => if (self.index != 0) switch (self.buffer[self.index - 1]) {
-                '\n' => continue :state .block_comment_start,
-                ' ', '\t' => continue :state .skip_line,
-                else => {
-                    result.tag = .slash;
-                    self.index += 1;
-                },
-            } else continue :state .block_comment_start,
+            .slash => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .slash_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .colon => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .colon_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .l_angle_bracket => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .l_angle_bracket_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .equal => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .equal_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .r_angle_bracket => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .r_angle_bracket_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .question_mark => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .question_mark_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .at => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .at_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .backslash => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .backslash_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
 
             .block_comment_start => {
                 self.index += 1;
@@ -727,6 +1059,50 @@ pub const Tokenizer = struct {
                 }
             },
 
+            .caret => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .caret_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .underscore => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .underscore_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .pipe => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .pipe_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
+            .tilde => {
+                self.index += 1;
+                switch (self.buffer[self.index]) {
+                    ':' => {
+                        result.tag = .tilde_colon;
+                        self.index += 1;
+                    },
+                    else => {},
+                }
+            },
+
             .skip_line => {
                 self.index += 1;
                 switch (self.buffer[self.index]) {
@@ -783,7 +1159,10 @@ fn testTokenize(source: [:0]const u8, expected_values: []const struct { Token.Ta
     var expected: std.MultiArrayList(T) = .empty;
     defer expected.deinit(gpa);
     try expected.ensureUnusedCapacity(gpa, expected_values.len + 1);
-    for (expected_values) |e| expected.appendAssumeCapacity(e);
+    for (expected_values) |e| {
+        if (e[0].lexeme()) |lexeme| try std.testing.expectEqualStrings(lexeme, e[1]);
+        expected.appendAssumeCapacity(e);
+    }
     expected.appendAssumeCapacity(.{ .eof, "" });
 
     inline for (@typeInfo(std.meta.FieldEnum(T)).@"enum".fields) |field| {
@@ -792,16 +1171,6 @@ fn testTokenize(source: [:0]const u8, expected_values: []const struct { Token.Ta
             actual.items(@enumFromInt(field.value)),
         );
     }
-}
-
-// TODO: Unit tests
-test {
-    try testTokenize("this is a test", &.{
-        .{ .identifier, "this" },
-        .{ .identifier, "is" },
-        .{ .identifier, "a" },
-        .{ .identifier, "test" },
-    });
 }
 
 test "tokenize symbols" {
@@ -863,8 +1232,6 @@ test "tokenize strings" {
         .invalid,
         \\"this is \a string with bad ch\ars"
     }});
-    const a = 'ü';
-    _ = a; // autofix
     try testTokenize("\"\\012\"", &.{.{ .string_literal, "\"\\012\"" }});
     try testTokenize("\"\t\"", &.{.{ .string_literal, "\"\t\"" }});
     try testTokenize("\"\n \"", &.{.{ .string_literal, "\"\n \"" }});
@@ -1108,5 +1475,78 @@ test "tokenize trailing comment" {
         .{ .number_literal, "1" },
         .{ .invalid, "\\ this is not a trailing comment" },
         .{ .number_literal, "2" },
+    });
+}
+
+test "tokenize punctuation/operators/iterators" {
+    try testTokenize("()[]{};", &.{
+        .{ .l_paren, "(" },
+        .{ .r_paren, ")" },
+        .{ .l_bracket, "[" },
+        .{ .r_bracket, "]" },
+        .{ .l_brace, "{" },
+        .{ .r_brace, "}" },
+        .{ .semicolon, ";" },
+    });
+
+    try testTokenize("!#$%&*+,-. :<=>?@^_|~0:1:2:", &.{
+        .{ .bang, "!" },
+        .{ .hash, "#" },
+        .{ .dollar, "$" },
+        .{ .percent, "%" },
+        .{ .ampersand, "&" },
+        .{ .asterisk, "*" },
+        .{ .plus, "+" },
+        .{ .comma, "," },
+        .{ .minus, "-" },
+        .{ .dot, "." },
+        .{ .colon, ":" },
+        .{ .l_angle_bracket, "<" },
+        .{ .equal, "=" },
+        .{ .r_angle_bracket, ">" },
+        .{ .question_mark, "?" },
+        .{ .at, "@" },
+        .{ .caret, "^" },
+        .{ .underscore, "_" },
+        .{ .pipe, "|" },
+        .{ .tilde, "~" },
+        .{ .zero_colon, "0:" },
+        .{ .one_colon, "1:" },
+        .{ .two_colon, "2:" },
+    });
+    try testTokenize("!:#:$:%:&:*:+:,:-:.:::<:=:>:?:@:^:_:|:~:0::1::", &.{
+        .{ .bang_colon, "!:" },
+        .{ .hash_colon, "#:" },
+        .{ .dollar_colon, "$:" },
+        .{ .percent_colon, "%:" },
+        .{ .ampersand_colon, "&:" },
+        .{ .asterisk_colon, "*:" },
+        .{ .plus_colon, "+:" },
+        .{ .comma_colon, ",:" },
+        .{ .minus_colon, "-:" },
+        .{ .dot_colon, ".:" },
+        .{ .colon_colon, "::" },
+        .{ .l_angle_bracket_colon, "<:" },
+        .{ .equal_colon, "=:" },
+        .{ .r_angle_bracket_colon, ">:" },
+        .{ .question_mark_colon, "?:" },
+        .{ .at_colon, "@:" },
+        .{ .caret_colon, "^:" },
+        .{ .underscore_colon, "_:" },
+        .{ .pipe_colon, "|:" },
+        .{ .tilde_colon, "~:" },
+        .{ .zero_colon_colon, "0::" },
+        .{ .one_colon_colon, "1::" },
+    });
+
+    try testTokenize("'/\\", &.{
+        .{ .apostrophe, "'" },
+        .{ .slash, "/" },
+        .{ .backslash, "\\" },
+    });
+    try testTokenize("':/:\\:", &.{
+        .{ .apostrophe_colon, "':" },
+        .{ .slash_colon, "/:" },
+        .{ .backslash_colon, "\\:" },
     });
 }
