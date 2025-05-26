@@ -99,6 +99,7 @@ pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
     var tokenizer: Tokenizer = .{
         .buffer = tree.source,
         .index = tree.tokenStart(token_index),
+        .next_is_minus = @intFromEnum(token_index) != 0 and tree.tokenTag(token_index.offset(-1)).isNextMinus(),
     };
     const token = tokenizer.next();
     assert(token.tag == token_tag);

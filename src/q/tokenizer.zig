@@ -12,6 +12,11 @@ pub const Token = struct {
         pub fn toOptional(i: Index) OptionalIndex {
             return @enumFromInt(@intFromEnum(i));
         }
+
+        pub fn offset(i: Index, o: i32) Index {
+            const base_i64: i64 = @intFromEnum(i);
+            return @enumFromInt(base_i64 + o);
+        }
     };
 
     pub const OptionalIndex = enum(u32) {
@@ -213,6 +218,20 @@ pub const Token = struct {
                 => null,
             };
         }
+
+        pub fn isNextMinus(tag: Tag) bool {
+            return switch (tag) {
+                .r_paren,
+                .r_bracket,
+                .r_brace,
+                .string_literal,
+                .symbol_literal,
+                .number_literal,
+                .identifier,
+                => true,
+                else => false,
+            };
+        }
     };
 
     pub const keywords = std.StaticStringMap(Tag).initComptime(.{});
@@ -235,12 +254,14 @@ pub const Token = struct {
 pub const Tokenizer = struct {
     buffer: [:0]const u8,
     index: usize,
+    next_is_minus: bool,
 
     pub fn init(buffer: [:0]const u8) Tokenizer {
         // Skip the UTF-8 BOM if present.
         return .{
             .buffer = buffer,
             .index = if (mem.startsWith(u8, buffer, "\xEF\xBB\xBF")) 3 else 0,
+            .next_is_minus = false,
         };
     }
 
@@ -834,6 +855,20 @@ pub const Tokenizer = struct {
                         result.tag = .minus_colon;
                         self.index += 1;
                     },
+                    '.' => if (!self.next_is_minus or std.ascii.isWhitespace(self.buffer[self.index - 2])) {
+                        switch (self.buffer[self.index + 1]) {
+                            '0'...'9' => {
+                                self.index += 1;
+                                result.tag = .number_literal;
+                                continue :state .number_literal;
+                            },
+                            else => {},
+                        }
+                    },
+                    '0'...'9' => if (!self.next_is_minus or std.ascii.isWhitespace(self.buffer[self.index - 2])) {
+                        result.tag = .number_literal;
+                        continue :state .number_literal;
+                    },
                     else => {},
                 }
             },
@@ -1136,6 +1171,8 @@ pub const Tokenizer = struct {
             },
         }
 
+        self.next_is_minus = result.tag.isNextMinus();
+
         result.loc.end = self.index;
         return result;
     }
@@ -1255,15 +1292,59 @@ test "tokenize numbers" {
     try testTokenize("0D123:456:789.1234abc", &.{.{ .number_literal, "0D123:456:789.1234abc" }});
     try testTokenize("0.1", &.{.{ .number_literal, "0.1" }});
     try testTokenize(".1", &.{.{ .number_literal, ".1" }});
-    try testTokenize("-1", &.{ .{ .minus, "-" }, .{ .number_literal, "1" } });
-    try testTokenize("-1i", &.{ .{ .minus, "-" }, .{ .number_literal, "1i" } });
-    try testTokenize("-1abc", &.{ .{ .minus, "-" }, .{ .number_literal, "1abc" } });
-    try testTokenize("-123", &.{ .{ .minus, "-" }, .{ .number_literal, "123" } });
-    try testTokenize("-123i", &.{ .{ .minus, "-" }, .{ .number_literal, "123i" } });
-    try testTokenize("-123abc", &.{ .{ .minus, "-" }, .{ .number_literal, "123abc" } });
-    try testTokenize("-0D123:456:789.1234abc", &.{ .{ .minus, "-" }, .{ .number_literal, "0D123:456:789.1234abc" } });
-    try testTokenize("-0.1", &.{ .{ .minus, "-" }, .{ .number_literal, "0.1" } });
-    try testTokenize("-.1", &.{ .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("-1", &.{.{ .number_literal, "-1" }});
+    try testTokenize("-1i", &.{.{ .number_literal, "-1i" }});
+    try testTokenize("-1abc", &.{.{ .number_literal, "-1abc" }});
+    try testTokenize("-123", &.{.{ .number_literal, "-123" }});
+    try testTokenize("-123i", &.{.{ .number_literal, "-123i" }});
+    try testTokenize("-123abc", &.{.{ .number_literal, "-123abc" }});
+    try testTokenize("-0D123:456:789.1234abc", &.{.{ .number_literal, "-0D123:456:789.1234abc" }});
+    try testTokenize("-0.1", &.{.{ .number_literal, "-0.1" }});
+    try testTokenize("-.1", &.{.{ .number_literal, "-.1" }});
+}
+
+test "tokenize negative numbers/minus" {
+    try testTokenize("x-1", &.{ .{ .identifier, "x" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("x-.1", &.{ .{ .identifier, "x" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("x- 1", &.{ .{ .identifier, "x" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("x- .1", &.{ .{ .identifier, "x" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("x -1", &.{ .{ .identifier, "x" }, .{ .number_literal, "-1" } });
+    try testTokenize("x -.1", &.{ .{ .identifier, "x" }, .{ .number_literal, "-.1" } });
+    try testTokenize("x - 1", &.{ .{ .identifier, "x" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("x - .1", &.{ .{ .identifier, "x" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("1-2", &.{ .{ .number_literal, "1" }, .{ .minus, "-" }, .{ .number_literal, "2" } });
+    try testTokenize("1-.2", &.{ .{ .number_literal, "1" }, .{ .minus, "-" }, .{ .number_literal, ".2" } });
+    try testTokenize("1- 2", &.{ .{ .number_literal, "1" }, .{ .minus, "-" }, .{ .number_literal, "2" } });
+    try testTokenize("1- .2", &.{ .{ .number_literal, "1" }, .{ .minus, "-" }, .{ .number_literal, ".2" } });
+    try testTokenize("1 -2", &.{ .{ .number_literal, "1" }, .{ .number_literal, "-2" } });
+    try testTokenize("1 -.2", &.{ .{ .number_literal, "1" }, .{ .number_literal, "-.2" } });
+    try testTokenize("1 - 2", &.{ .{ .number_literal, "1" }, .{ .minus, "-" }, .{ .number_literal, "2" } });
+    try testTokenize("1 - .2", &.{ .{ .number_literal, "1" }, .{ .minus, "-" }, .{ .number_literal, ".2" } });
+    try testTokenize("]-1", &.{ .{ .r_bracket, "]" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("]-.1", &.{ .{ .r_bracket, "]" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("]- 1", &.{ .{ .r_bracket, "]" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("]- .1", &.{ .{ .r_bracket, "]" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("] -1", &.{ .{ .r_bracket, "]" }, .{ .number_literal, "-1" } });
+    try testTokenize("] -.1", &.{ .{ .r_bracket, "]" }, .{ .number_literal, "-.1" } });
+    try testTokenize("] - 1", &.{ .{ .r_bracket, "]" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("] - .1", &.{ .{ .r_bracket, "]" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize(")-1", &.{ .{ .r_paren, ")" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize(")-.1", &.{ .{ .r_paren, ")" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize(")- 1", &.{ .{ .r_paren, ")" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize(")- .1", &.{ .{ .r_paren, ")" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize(") -1", &.{ .{ .r_paren, ")" }, .{ .number_literal, "-1" } });
+    try testTokenize(") -.1", &.{ .{ .r_paren, ")" }, .{ .number_literal, "-.1" } });
+    try testTokenize(") - 1", &.{ .{ .r_paren, ")" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize(") - .1", &.{ .{ .r_paren, ")" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("}-1", &.{ .{ .r_brace, "}" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("}-.1", &.{ .{ .r_brace, "}" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("}- 1", &.{ .{ .r_brace, "}" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("}- .1", &.{ .{ .r_brace, "}" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("} -1", &.{ .{ .r_brace, "}" }, .{ .number_literal, "-1" } });
+    try testTokenize("} -.1", &.{ .{ .r_brace, "}" }, .{ .number_literal, "-.1" } });
+    try testTokenize("} - 1", &.{ .{ .r_brace, "}" }, .{ .minus, "-" }, .{ .number_literal, "1" } });
+    try testTokenize("} - .1", &.{ .{ .r_brace, "}" }, .{ .minus, "-" }, .{ .number_literal, ".1" } });
+    try testTokenize("-.(", &.{ .{ .minus, "-" }, .{ .dot, "." }, .{ .l_paren, "(" } });
 }
 
 test "tokenize starting comment" {
