@@ -237,8 +237,17 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
     for (0..tree.tokens.len) |index| {
         try writer.print(
             \\{{"{s}":"{}"}}
-        , .{ @tagName(tree.tokenTag(@enumFromInt(index))), std.zig.fmtEscapes(tree.tokenSlice(@enumFromInt(index))) });
+        , .{ @tagName(tree.tokenTag(@intCast(index))), std.zig.fmtEscapes(tree.tokenSlice(@intCast(index))) });
         if (index < tree.tokens.len - 1) try writer.writeByte(',');
+    }
+    try writer.writeAll(
+        \\],"nodes":[
+    );
+    for (tree.nodes.items(.tag), 0..) |tag, index| {
+        try writer.print(
+            \\{{"{s}":"{}"}}
+        , .{ @tagName(tag), std.zig.fmtEscapes("") });
+        if (index < tree.nodes.len - 1) try writer.writeByte(',');
     }
     try writer.writeAll("]}");
 

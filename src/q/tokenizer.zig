@@ -6,72 +6,21 @@ pub const Token = struct {
     tag: Tag,
     loc: Loc,
 
-    pub const Index = enum(u32) {
-        zero = 0,
-        _,
-
-        pub fn toOptional(i: Index) OptionalIndex {
-            return @enumFromInt(@intFromEnum(i));
-        }
-
-        pub fn offset(i: Index, o: i32) Index {
-            const base_i64: i64 = @intFromEnum(i);
-            return @enumFromInt(base_i64 + o);
-        }
-    };
-
-    pub const OptionalIndex = enum(u32) {
-        none = std.math.maxInt(u32),
-        _,
-
-        pub fn unwrap(opt_index: OptionalIndex) ?Index {
-            if (opt_index == .none) return null;
-            return @enumFromInt(@intFromEnum(opt_index));
-        }
-
-        pub fn fromIndex(index: Index) OptionalIndex {
-            return @enumFromInt(@intFromEnum(index));
-        }
-
-        pub fn fromOptional(opt_index: ?Index) OptionalIndex {
-            return if (opt_index) |index| @enumFromInt(index) else .none;
-        }
-    };
-
-    pub const Offset = enum(i32) {
-        zero = 0,
-        _,
-
-        pub fn init(base: Index, destination: Index) Offset {
-            const base_i64: i64 = @intFromEnum(base);
-            const destination_i64: i64 = @intFromEnum(destination);
-            return @enumFromInt(destination_i64 - base_i64);
-        }
-
-        pub fn toOptional(offset: Offset) OptionalOffset {
-            const result: OptionalOffset = @enumFromInt(@intFromEnum(offset));
-            assert(result != .none);
-            return result;
-        }
-
-        pub fn toAbsolute(offset: Offset, base: Index) Index {
-            return @enumFromInt(@intFromEnum(base) + @intFromEnum(offset));
-        }
-    };
-
-    pub const OptionalOffset = enum(i32) {
-        none = std.math.maxInt(i32),
-        _,
-
-        pub fn unwrap(opt_offset: OptionalOffset) ?Offset {
-            return if (opt_offset == .none) null else @enumFromInt(@intFromEnum(opt_offset));
-        }
-    };
-
     pub const Loc = struct {
         start: usize,
         end: usize,
     };
+
+    pub const keywords = std.StaticStringMap(Tag).initComptime(.{
+        .{ "select", .keyword_select },
+        .{ "exec", .keyword_exec },
+        .{ "update", .keyword_update },
+        .{ "delete", .keyword_delete },
+    });
+
+    pub fn getKeyword(bytes: []const u8) ?Tag {
+        return keywords.get(bytes);
+    }
 
     pub const Tag = enum {
         // Punctuation
@@ -138,14 +87,23 @@ pub const Token = struct {
         backslash,
         backslash_colon,
 
+        // Literals
+        number_literal,
         string_literal,
         symbol_literal,
-        number_literal,
         identifier,
+
+        // Misc.
         system,
         invalid,
         eos,
         eof,
+
+        // Keywords,
+        keyword_select,
+        keyword_exec,
+        keyword_update,
+        keyword_delete,
 
         pub fn lexeme(tag: Tag) ?[]const u8 {
             return switch (tag) {
@@ -210,15 +168,22 @@ pub const Token = struct {
                 .backslash => "\\",
                 .backslash_colon => "\\:",
 
+                .number_literal,
                 .string_literal,
                 .symbol_literal,
-                .number_literal,
                 .identifier,
+                => null,
+
                 .system,
                 .invalid,
                 .eos,
                 .eof,
                 => null,
+
+                .keyword_select => "select",
+                .keyword_exec => "exec",
+                .keyword_update => "update",
+                .keyword_delete => "delete",
             };
         }
 
@@ -227,9 +192,9 @@ pub const Token = struct {
                 .r_paren,
                 .r_bracket,
                 .r_brace,
+                .number_literal,
                 .string_literal,
                 .symbol_literal,
-                .number_literal,
                 .identifier,
                 .eos,
                 => true,
@@ -237,12 +202,6 @@ pub const Token = struct {
             };
         }
     };
-
-    pub const keywords = std.StaticStringMap(Tag).initComptime(.{});
-
-    pub fn getKeyword(bytes: []const u8) ?Tag {
-        return keywords.get(bytes);
-    }
 
     fn eos(index: usize) Token {
         return .{
