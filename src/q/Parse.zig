@@ -1043,41 +1043,48 @@ test "parse end of statement" {
 
 test "parse select" {
     try testParse(
-        "select a,b from x where c,d",
+        "select a,b by a,b from x where a,b",
         &.{
-            .keyword_select, .identifier, .comma,      .identifier, .identifier,
-            .identifier,     .identifier, .identifier, .comma,      .identifier,
+            .keyword_select, .identifier, .comma,      .identifier, .identifier, .identifier, .comma,
+            .identifier,     .identifier, .identifier, .identifier, .identifier, .comma,      .identifier,
         },
-        &.{ .root, .select, .identifier, .identifier, .identifier, .identifier, .identifier },
+        &.{ .root, .select, .identifier, .identifier, .identifier, .identifier, .identifier, .identifier, .identifier },
         &.{},
     );
     try testParse(
-        "select(a,b),(b,c)from x where(c,d),(d,e)",
+        "select(a,b),(c,d)by(a,b),(c,d)from x where(a,b),(c,d)",
         &.{
-            .keyword_select, .l_paren, .identifier, .comma,   .identifier, .r_paren,    .comma,      .l_paren,
-            .identifier,     .comma,   .identifier, .r_paren, .identifier, .identifier, .identifier, .l_paren,
-            .identifier,     .comma,   .identifier, .r_paren, .comma,      .l_paren,    .identifier, .comma,
-            .identifier,     .r_paren,
+            .keyword_select, .l_paren,    .identifier, .comma,   .identifier, .r_paren, .comma,      .l_paren,
+            .identifier,     .comma,      .identifier, .r_paren, .identifier, .l_paren, .identifier, .comma,
+            .identifier,     .r_paren,    .comma,      .l_paren, .identifier, .comma,   .identifier, .r_paren,
+            .identifier,     .identifier, .identifier, .l_paren, .identifier, .comma,   .identifier, .r_paren,
+            .comma,          .l_paren,    .identifier, .comma,   .identifier, .r_paren,
         },
         &.{
-            .root,               .select,             .grouped_expression, .identifier,   .apply_binary, .comma,
-            .identifier,         .grouped_expression, .identifier,         .apply_binary, .comma,        .identifier,
-            .identifier,         .grouped_expression, .identifier,         .apply_binary, .comma,        .identifier,
-            .grouped_expression, .identifier,         .apply_binary,       .comma,        .identifier,
+            .root,         .select,     .grouped_expression, .identifier,         .apply_binary,
+            .comma,        .identifier, .grouped_expression, .identifier,         .apply_binary,
+            .comma,        .identifier, .grouped_expression, .identifier,         .apply_binary,
+            .comma,        .identifier, .grouped_expression, .identifier,         .apply_binary,
+            .comma,        .identifier, .identifier,         .grouped_expression, .identifier,
+            .apply_binary, .comma,      .identifier,         .grouped_expression, .identifier,
+            .apply_binary, .comma,      .identifier,
         },
         &.{},
     );
     try testParse(
-        "select f[a,b;c],d from x where f[a,b;c],d",
+        "select f[a,b;c],d by f[a,b;c],d from x where f[a,b;c],d",
         &.{
             .keyword_select, .identifier, .l_bracket,  .identifier, .comma,      .identifier, .semicolon,  .identifier,
-            .r_bracket,      .comma,      .identifier, .identifier, .identifier, .identifier, .identifier, .l_bracket,
-            .identifier,     .comma,      .identifier, .semicolon,  .identifier, .r_bracket,  .comma,      .identifier,
+            .r_bracket,      .comma,      .identifier, .identifier, .identifier, .l_bracket,  .identifier, .comma,
+            .identifier,     .semicolon,  .identifier, .r_bracket,  .comma,      .identifier, .identifier, .identifier,
+            .identifier,     .identifier, .l_bracket,  .identifier, .comma,      .identifier, .semicolon,  .identifier,
+            .r_bracket,      .comma,      .identifier,
         },
         &.{
-            .root,       .select,     .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier,
-            .identifier, .identifier, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier,
-            .identifier,
+            .root,       .select,     .identifier, .call,       .identifier, .apply_binary, .comma,        .identifier,
+            .identifier, .identifier, .identifier, .call,       .identifier, .apply_binary, .comma,        .identifier,
+            .identifier, .identifier, .identifier, .identifier, .call,       .identifier,   .apply_binary, .comma,
+            .identifier, .identifier, .identifier,
         },
         &.{},
     );
