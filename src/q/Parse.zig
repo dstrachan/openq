@@ -203,12 +203,17 @@ fn parseStatements(p: *Parse) !Statements {
             },
         };
         if (expr.unwrap()) |node| try p.scratch.append(p.gpa, node);
-        _ = p.eatToken(.semicolon);
-        if (p.tokenTag(p.tok_i) != .eos and p.tokenTag(p.tok_i) != .eof) {
-            try p.warn(.expected_expr);
-            p.skipStatement();
+        switch (p.tokenTag(p.tok_i)) {
+            .semicolon, .eos => {
+                _ = p.nextToken();
+                continue;
+            },
+            .eof => break,
+            else => {
+                try p.warn(.expected_expr);
+                p.skipStatement();
+            },
         }
-        _ = p.eatToken(.eos);
     }
 
     const items = p.scratch.items[scratch_top..];
@@ -954,7 +959,7 @@ fn nextToken(p: *Parse) TokenIndex {
 }
 
 fn skipStatement(p: *Parse) void {
-    while (p.tokenTag(p.tok_i) != .eof) {
+    while (p.tokenTag(p.tok_i) != .eos and p.tokenTag(p.tok_i) != .eof) {
         _ = p.nextToken();
     }
     _ = p.nextToken();
