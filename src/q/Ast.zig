@@ -142,6 +142,31 @@ pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
     return tree.source[token.loc.start..token.loc.end];
 }
 
+pub fn extraDataSlice(tree: Ast, range: Node.SubRange, comptime T: type) []const T {
+    return @ptrCast(tree.extra_data[@intFromEnum(range.start)..@intFromEnum(range.end)]);
+}
+
+pub fn extraData(tree: Ast, index: ExtraIndex, comptime T: type) T {
+    const fields = std.meta.fields(T);
+    var result: T = undefined;
+    inline for (fields, 0..) |field, i| {
+        @field(result, field.name) = switch (field.type) {
+            Node.Index,
+            Node.OptionalIndex,
+            OptionalTokenIndex,
+            ExtraIndex,
+            => @enumFromInt(tree.extra_data[@intFromEnum(index) + i]),
+            TokenIndex => tree.extra_data[@intFromEnum(index) + i],
+            else => @compileError("unexpected field type: " ++ @typeName(field.type)),
+        };
+    }
+    return result;
+}
+
+pub fn rootStatements(tree: Ast) []const Node.Index {
+    return tree.extraDataSlice(tree.nodeData(.root).extra_range, Node.Index);
+}
+
 /// Index into `extra_data`.
 pub const ExtraIndex = enum(u32) {
     _,
