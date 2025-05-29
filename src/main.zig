@@ -13,6 +13,8 @@ const Token = q.Token;
 const Tokenizer = q.Tokenizer;
 const Ast = q.Ast;
 
+const utils = @import("utils.zig");
+
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
@@ -229,27 +231,8 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
     };
 
     const tree: Ast = try .parse(arena, source);
-
-    const writer = io.getStdOut().writer();
-    try writer.writeAll(
-        \\{"tokens":[
-    );
-    for (0..tree.tokens.len) |index| {
-        try writer.print(
-            \\{{"{s}":"{}"}}
-        , .{ @tagName(tree.tokenTag(@intCast(index))), std.zig.fmtEscapes(tree.tokenSlice(@intCast(index))) });
-        if (index < tree.tokens.len - 1) try writer.writeByte(',');
-    }
-    try writer.writeAll(
-        \\],"nodes":[
-    );
-    for (tree.nodes.items(.tag), 0..) |tag, index| {
-        try writer.print(
-            \\{{"{s}":"{}"}}
-        , .{ @tagName(tag), std.zig.fmtEscapes("") });
-        if (index < tree.nodes.len - 1) try writer.writeByte(',');
-    }
-    try writer.writeAll("]}");
+    const writer = io.getStdOut().writer().any();
+    try utils.writeJsonNode(writer, tree, .root);
 
     return cleanExit();
 }
