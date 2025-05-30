@@ -64,6 +64,12 @@ fn tokenSlice(p: *const Parse, token_index: TokenIndex) []const u8 {
     return p.source[token.loc.start..token.loc.end];
 }
 
+fn tokenIsBoolOrByte(p: *const Parse, token_index: TokenIndex) bool {
+    assert(p.tokenTag(token_index) == .number_literal);
+    const slice = p.tokenSlice(token_index);
+    return slice[slice.len - 1] == 'b' or (slice.len >= 2 and slice[1] == 'x');
+}
+
 const Statements = struct {
     len: usize,
     data: Node.Data,
@@ -773,7 +779,7 @@ fn parseNumberLiteral(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    while (p.tokenTag(p.tok_i) == .number_literal) {
+    while (p.tokenTag(p.tok_i) == .number_literal and !p.tokenIsBoolOrByte(p.tok_i - 1)) {
         try p.scratch.append(p.gpa, @enumFromInt(p.nextToken()));
     }
 
@@ -1463,6 +1469,51 @@ test "parse delete columns" {
             .root, .delete_cols, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // delete
             .identifier, // from
         },
+        &.{},
+    );
+}
+
+test "boolean or byte literal ends number list literal" {
+    try testParse(
+        "0 1 2",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0i 1 2",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "010b 0 1 2",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_literal, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0x000102 0 1 2",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_literal, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0 1 2 010b",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0 1 2 0x000102",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0 1 2i",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
         &.{},
     );
 }
