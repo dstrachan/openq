@@ -349,7 +349,7 @@ fn parseNoun(p: *Parse, comptime sql_identifier: ?SqlIdentifier) !Node.OptionalI
         .keyword_delete => @panic("NYI"),
     };
     const call = try p.parseCall(noun);
-    return if (call == .none) noun.toOptional() else call;
+    return call.toOptional();
 }
 
 fn expectVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier) !Node.Index {
@@ -448,8 +448,8 @@ fn parseVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier
     return verb.toOptional();
 }
 
-fn parseCall(p: *Parse, lhs: Node.Index) !Node.OptionalIndex {
-    if (p.tokenTag(p.tok_i) != .l_bracket) return p.parseIterator(lhs.toOptional());
+fn parseCall(p: *Parse, lhs: Node.Index) !Node.Index {
+    if (p.tokenTag(p.tok_i) != .l_bracket) return p.parseIterator(lhs);
 
     const l_bracket = p.assertToken(.l_bracket);
 
@@ -478,7 +478,7 @@ fn parseCall(p: *Parse, lhs: Node.Index) !Node.OptionalIndex {
     }));
 }
 
-fn parseIterator(p: *Parse, lhs: Node.OptionalIndex) Error!Node.OptionalIndex {
+fn parseIterator(p: *Parse, lhs: Node.Index) Error!Node.Index {
     const tag: Node.Tag = switch (p.tokenTag(p.tok_i)) {
         .apostrophe => .apostrophe,
         .apostrophe_colon => .apostrophe_colon,
@@ -486,12 +486,12 @@ fn parseIterator(p: *Parse, lhs: Node.OptionalIndex) Error!Node.OptionalIndex {
         .slash_colon => .slash_colon,
         .backslash => .backslash,
         .backslash_colon => .backslash_colon,
-        else => return .none,
+        else => return lhs,
     };
     const iterator = try p.addNode(.{
         .tag = tag,
         .main_token = p.nextToken(),
-        .data = .{ .opt_node = lhs },
+        .data = .{ .opt_node = lhs.toOptional() },
     });
     return p.parseCall(iterator);
 }
@@ -578,16 +578,19 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
                 },
             },
         }),
-        else => return p.setNode(apply_index, .{
-            .tag = .apply_unary,
-            .main_token = undefined,
-            .data = .{
-                .node_and_node = .{
-                    lhs,
-                    try p.expectVerb(rhs, sql_identifier),
+        else => {
+            const verb = try p.parseVerb(rhs, sql_identifier);
+            return p.setNode(apply_index, .{
+                .tag = .apply_unary,
+                .main_token = undefined,
+                .data = .{
+                    .node_and_node = .{
+                        lhs,
+                        verb.unwrap() orelse rhs,
+                    },
                 },
-            },
-        }),
+            });
+        },
     }
 }
 
@@ -975,13 +978,13 @@ fn testParse(
     var tree = try Ast.parse(gpa, source);
     defer tree.deinit(gpa);
 
-    try std.testing.expectEqualSlices(Token.Tag, expected_tokens, tree.tokens.items(.tag)[0 .. tree.tokens.len - 1]);
-    try std.testing.expectEqualSlices(Node.Tag, expected_nodes, tree.nodes.items(.tag));
-
     const actual_errors = try gpa.alloc(Ast.Error.Tag, tree.errors.len);
     defer gpa.free(actual_errors);
     for (tree.errors, actual_errors) |err, *actual_error| actual_error.* = err.tag;
     try std.testing.expectEqualSlices(Ast.Error.Tag, expected_errors, actual_errors);
+
+    try std.testing.expectEqualSlices(Token.Tag, expected_tokens, tree.tokens.items(.tag)[0 .. tree.tokens.len - 1]);
+    try std.testing.expectEqualSlices(Node.Tag, expected_nodes, tree.nodes.items(.tag));
 }
 
 test "parse end of statement" {
@@ -1093,6 +1096,23 @@ test "parse select" {
             .identifier, // from
             .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
         },
+        &.{},
+    );
+}
+
+test {
+    try testParse(
+        \\"string",string`symbol
+    ,
+        &.{ .string_literal, .comma, .identifier, .symbol_literal },
+        &.{ .root, .string_literal, .apply_binary, .comma, .identifier, .apply_unary, .symbol_literal },
+        &.{},
+    );
+    try testParse(
+        \\f[1;2]
+    ,
+        &.{ .identifier, .l_bracket, .number_literal, .semicolon, .number_literal, .r_bracket },
+        &.{ .root, .identifier, .call, .number_literal, .number_literal },
         &.{},
     );
 }
