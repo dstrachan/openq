@@ -312,9 +312,145 @@ pub fn writeJsonNode(writer: AnyWriter, tree: Ast, node: Node.Index) !void {
 
             try writer.writeAll("]}}");
         },
-        .exec => @panic("NYI"),
-        .update => @panic("NYI"),
-        .delete_rows => @panic("NYI"),
-        .delete_cols => @panic("NYI"),
+        .exec => {
+            try writer.writeAll(
+                \\{"exec":{"select":[
+            );
+
+            const exec = tree.extraData(tree.nodeData(node).extra, Node.Exec);
+
+            const select_nodes = tree.extraDataSlice(.{
+                .start = exec.select_start,
+                .end = exec.by_start,
+            }, Node.Index);
+            for (select_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < select_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll(
+                \\],"by":[
+            );
+            const by_nodes = tree.extraDataSlice(.{
+                .start = exec.by_start,
+                .end = exec.where_start,
+            }, Node.Index);
+            for (by_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < by_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll(
+                \\],"from":
+            );
+            try writeJsonNode(writer, tree, exec.from);
+
+            try writer.writeAll(
+                \\,"where":[
+            );
+            const where_nodes = tree.extraDataSlice(.{
+                .start = exec.where_start,
+                .end = exec.where_end,
+            }, Node.Index);
+            for (where_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < where_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll("]}}");
+        },
+        .update => {
+            try writer.writeAll(
+                \\{"update":{"select":[
+            );
+
+            const update = tree.extraData(tree.nodeData(node).extra, Node.Update);
+
+            const select_nodes = tree.extraDataSlice(.{
+                .start = update.select_start,
+                .end = update.by_start,
+            }, Node.Index);
+            for (select_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < select_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll(
+                \\],"by":[
+            );
+            const by_nodes = tree.extraDataSlice(.{
+                .start = update.by_start,
+                .end = update.where_start,
+            }, Node.Index);
+            for (by_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < by_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll(
+                \\],"from":
+            );
+            try writeJsonNode(writer, tree, update.from);
+
+            try writer.writeAll(
+                \\,"where":[
+            );
+            const where_nodes = tree.extraDataSlice(.{
+                .start = update.where_start,
+                .end = update.where_end,
+            }, Node.Index);
+            for (where_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < where_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll("]}}");
+        },
+        .delete_rows => {
+            try writer.writeAll(
+                \\{"delete_rows":{"from":
+            );
+
+            const delete_rows = tree.extraData(tree.nodeData(node).extra, Node.DeleteRows);
+
+            try writeJsonNode(writer, tree, delete_rows.from);
+
+            try writer.writeAll(
+                \\,"where":[
+            );
+            const where_nodes = tree.extraDataSlice(.{
+                .start = delete_rows.where_start,
+                .end = delete_rows.where_end,
+            }, Node.Index);
+            for (where_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < where_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll("]}}");
+        },
+        .delete_cols => {
+            try writer.writeAll(
+                \\{"delete_cols":{"select":[
+            );
+
+            const delete_cols = tree.extraData(tree.nodeData(node).extra, Node.DeleteCols);
+
+            const select_nodes = tree.extraDataSlice(.{
+                .start = delete_cols.select_start,
+                .end = delete_cols.select_end,
+            }, Node.Index);
+            for (select_nodes, 0..) |n, i| {
+                try writeJsonNode(writer, tree, n);
+                if (i < select_nodes.len - 1) try writer.writeByte(',');
+            }
+
+            try writer.writeAll(
+                \\],"from":
+            );
+            try writeJsonNode(writer, tree, delete_cols.from);
+
+            try writer.writeAll("}}");
+        },
     }
 }
