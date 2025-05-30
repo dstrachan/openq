@@ -344,9 +344,9 @@ fn parseNoun(p: *Parse, comptime sql_identifier: ?SqlIdentifier) !Node.OptionalI
 
         // Keywords
         .keyword_select => try p.parseSelect(),
-        .keyword_exec => @panic("NYI"),
-        .keyword_update => @panic("NYI"),
-        .keyword_delete => @panic("NYI"),
+        .keyword_exec => try p.parseExec(),
+        .keyword_update => try p.parseUpdate(),
+        .keyword_delete => try p.parseDelete(),
     };
     const call = try p.parseCall(noun);
     return call.toOptional();
@@ -879,6 +879,187 @@ fn parseSelect(p: *Parse) !Node.Index {
     });
 }
 
+fn parseExec(p: *Parse) !Node.Index {
+    const exec_token = p.assertToken(.keyword_exec);
+
+    const exec_index = try p.reserveNode(.exec);
+    errdefer p.unreserveNode(exec_index);
+
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    // Select phrase
+    const select_top = p.scratch.items.len;
+    if (!p.peekIdentifier(.{ .by = true, .from = true })) {
+        while (true) {
+            const expr = try p.expectExpression(.{ .by = true, .from = true });
+            try p.scratch.append(p.gpa, expr);
+            _ = p.eatToken(.comma) orelse break;
+        }
+    }
+
+    // By phrase
+    const by_top = p.scratch.items.len;
+    if (p.eatIdentifier(.{ .by = true })) |_| {
+        while (true) {
+            const expr = try p.expectExpression(.{ .from = true });
+            try p.scratch.append(p.gpa, expr);
+            _ = p.eatToken(.comma) orelse break;
+        }
+    }
+
+    // From phrase
+    _ = try p.expectIdentifier(.{ .from = true });
+    const from_expr = try p.expectExpression(.{ .where = true });
+
+    // Where phrase
+    const where_top = p.scratch.items.len;
+    if (p.eatIdentifier(.{ .where = true })) |_| {
+        while (true) {
+            const expr = try p.expectExpression(.{});
+            try p.scratch.append(p.gpa, expr);
+            _ = p.eatToken(.comma) orelse break;
+        }
+    }
+
+    const select = try p.listToSpan(p.scratch.items[select_top..by_top]);
+    const by = try p.listToSpan(p.scratch.items[by_top..where_top]);
+    const where = try p.listToSpan(p.scratch.items[where_top..]);
+    const exec_node: Node.Exec = .{
+        .select_start = select.start,
+        .by_start = by.start,
+        .from = from_expr,
+        .where_start = where.start,
+        .where_end = where.end,
+    };
+    return p.setNode(exec_index, .{
+        .tag = .exec,
+        .main_token = exec_token,
+        .data = .{ .extra = try p.addExtra(exec_node) },
+    });
+}
+
+fn parseUpdate(p: *Parse) !Node.Index {
+    const update_token = p.assertToken(.keyword_update);
+
+    const update_index = try p.reserveNode(.update);
+    errdefer p.unreserveNode(update_index);
+
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    // Select phrase
+    const select_top = p.scratch.items.len;
+    if (!p.peekIdentifier(.{ .by = true, .from = true })) {
+        while (true) {
+            const expr = try p.expectExpression(.{ .by = true, .from = true });
+            try p.scratch.append(p.gpa, expr);
+            _ = p.eatToken(.comma) orelse break;
+        }
+    }
+
+    // By phrase
+    const by_top = p.scratch.items.len;
+    if (p.eatIdentifier(.{ .by = true })) |_| {
+        while (true) {
+            const expr = try p.expectExpression(.{ .from = true });
+            try p.scratch.append(p.gpa, expr);
+            _ = p.eatToken(.comma) orelse break;
+        }
+    }
+
+    // From phrase
+    _ = try p.expectIdentifier(.{ .from = true });
+    const from_expr = try p.expectExpression(.{ .where = true });
+
+    // Where phrase
+    const where_top = p.scratch.items.len;
+    if (p.eatIdentifier(.{ .where = true })) |_| {
+        while (true) {
+            const expr = try p.expectExpression(.{});
+            try p.scratch.append(p.gpa, expr);
+            _ = p.eatToken(.comma) orelse break;
+        }
+    }
+
+    const select = try p.listToSpan(p.scratch.items[select_top..by_top]);
+    const by = try p.listToSpan(p.scratch.items[by_top..where_top]);
+    const where = try p.listToSpan(p.scratch.items[where_top..]);
+    const update_node: Node.Update = .{
+        .select_start = select.start,
+        .by_start = by.start,
+        .from = from_expr,
+        .where_start = where.start,
+        .where_end = where.end,
+    };
+    return p.setNode(update_index, .{
+        .tag = .update,
+        .main_token = update_token,
+        .data = .{ .extra = try p.addExtra(update_node) },
+    });
+}
+
+fn parseDelete(p: *Parse) !Node.Index {
+    const delete_token = p.assertToken(.keyword_delete);
+
+    const delete_index = try p.reserveNode(.delete_rows);
+    errdefer p.unreserveNode(delete_index);
+
+    const scratch_top = p.scratch.items.len;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    if (p.eatIdentifier(.{ .from = true })) |_| {
+        // From phrase
+        const from_expr = try p.expectExpression(.{ .where = true });
+
+        // Where phrase
+        const where_top = p.scratch.items.len;
+        if (p.eatIdentifier(.{ .where = true })) |_| {
+            while (true) {
+                const expr = try p.expectExpression(.{});
+                try p.scratch.append(p.gpa, expr);
+                _ = p.eatToken(.comma) orelse break;
+            }
+        }
+
+        const where = try p.listToSpan(p.scratch.items[where_top..]);
+        const delete_node: Node.DeleteRows = .{
+            .from = from_expr,
+            .where_start = where.start,
+            .where_end = where.end,
+        };
+        return p.setNode(delete_index, .{
+            .tag = .delete_rows,
+            .main_token = delete_token,
+            .data = .{ .extra = try p.addExtra(delete_node) },
+        });
+    }
+
+    // Select phrase
+    const select_top = p.scratch.items.len;
+    while (true) {
+        const expr = try p.expectExpression(.{ .from = true });
+        try p.scratch.append(p.gpa, expr);
+        _ = p.eatToken(.comma) orelse break;
+    }
+
+    // From phrase
+    _ = try p.expectIdentifier(.{ .from = true });
+    const from_expr = try p.expectExpression(.{ .where = true });
+
+    const select = try p.listToSpan(p.scratch.items[select_top..]);
+    const delete_node: Node.DeleteCols = .{
+        .select_start = select.start,
+        .select_end = select.end,
+        .from = from_expr,
+    };
+    return p.setNode(delete_index, .{
+        .tag = .delete_cols,
+        .main_token = delete_token,
+        .data = .{ .extra = try p.addExtra(delete_node) },
+    });
+}
+
 const SqlIdentifier = packed struct(u8) {
     by: bool = false,
     from: bool = false,
@@ -1100,19 +1281,188 @@ test "parse select" {
     );
 }
 
-test {
+test "parse exec" {
     try testParse(
-        \\"string",string`symbol
-    ,
-        &.{ .string_literal, .comma, .identifier, .symbol_literal },
-        &.{ .root, .string_literal, .apply_binary, .comma, .identifier, .apply_unary, .symbol_literal },
+        "exec a,b by a,b from x where a,b",
+        &.{
+            .keyword_exec, .identifier, .comma, .identifier, // exec
+            .identifier, .identifier, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .exec, .identifier, .identifier, // exec
+            .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
         &.{},
     );
     try testParse(
-        \\f[1;2]
-    ,
-        &.{ .identifier, .l_bracket, .number_literal, .semicolon, .number_literal, .r_bracket },
-        &.{ .root, .identifier, .call, .number_literal, .number_literal },
+        "exec(a,b),(c,d)by(a,b),(c,d)from x where(a,b),(c,d)",
+        &.{
+            .keyword_exec, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // exec
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // by
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .exec, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // exec
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // by
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "exec f[a,b;c],d by f[a,b;c],d from x where f[a,b;c],d",
+        &.{
+            .keyword_exec, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // exec
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .exec, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // exec
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse update" {
+    try testParse(
+        "update a,b by a,b from x where a,b",
+        &.{
+            .keyword_update, .identifier, .comma, .identifier, // update
+            .identifier, .identifier, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .update, .identifier, .identifier, // update
+            .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "update(a,b),(c,d)by(a,b),(c,d)from x where(a,b),(c,d)",
+        &.{
+            .keyword_update, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // update
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // by
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .update, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // update
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // by
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "update f[a,b;c],d by f[a,b;c],d from x where f[a,b;c],d",
+        &.{
+            .keyword_update, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // update
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .update, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // update
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse delete rows" {
+    try testParse(
+        "delete from x where a,b",
+        &.{
+            .keyword_delete, // delete
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .delete_rows, // delete
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "delete from x where(a,b),(c,d)",
+        &.{
+            .keyword_delete, // delete
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .delete_rows, // delete
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "delete from x where f[a,b;c],d",
+        &.{
+            .keyword_delete, // delete
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .delete_rows, // delete
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse delete columns" {
+    try testParse(
+        "delete a,b from x",
+        &.{
+            .keyword_delete, .identifier, .comma, .identifier, // delete
+            .identifier, .identifier, // from
+        },
+        &.{
+            .root, .delete_cols, .identifier, .identifier, // delete
+            .identifier, // from
+        },
+        &.{},
+    );
+    try testParse(
+        "delete(a,b),(c,d)from x",
+        &.{
+            .keyword_delete, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // delete
+            .identifier, .identifier, // from
+        },
+        &.{
+            .root, .delete_cols, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // delete
+            .identifier, // from
+        },
+        &.{},
+    );
+    try testParse(
+        "delete f[a,b;c],d from x",
+        &.{
+            .keyword_delete, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // delete
+            .identifier, .identifier, // from
+        },
+        &.{
+            .root, .delete_cols, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // delete
+            .identifier, // from
+        },
         &.{},
     );
 }

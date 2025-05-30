@@ -564,6 +564,34 @@ pub const Node = struct {
         where_start: ExtraIndex,
         where_end: ExtraIndex,
     };
+
+    pub const Exec = struct {
+        select_start: ExtraIndex,
+        by_start: ExtraIndex,
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const Update = struct {
+        select_start: ExtraIndex,
+        by_start: ExtraIndex,
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const DeleteRows = struct {
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const DeleteCols = struct {
+        select_start: ExtraIndex,
+        select_end: ExtraIndex,
+        from: Index,
+    };
 };
 
 pub const Error = struct {
