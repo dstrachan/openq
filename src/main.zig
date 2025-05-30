@@ -38,6 +38,7 @@ const usage =
     \\  tokenize    Tokenize input
     \\  parse       Parse input
     \\  validate    Validate input
+    \\  repl        Start an interactive REPL
     \\
     \\  help        Print this help and exit
     \\  version     Print version number and exit
@@ -75,7 +76,6 @@ pub fn main() !void {
 }
 
 fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
-    _ = gpa; // autofix
     if (args.len <= 1) {
         debug.print("{s}\n", .{usage});
         fatal("expected command argument", .{});
@@ -89,6 +89,8 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         try cmdParse(arena, cmd_args);
     } else if (mem.eql(u8, cmd, "validate")) {
         try cmdValidate(arena, cmd_args);
+    } else if (mem.eql(u8, cmd, "repl")) {
+        try cmdRepl(gpa, cmd_args);
     } else if (mem.eql(u8, cmd, "version")) {
         try io.getStdOut().writeAll(build_options.version ++ "\n");
     } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
@@ -361,6 +363,74 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
         }
 
         // TODO: Print QIR
+    }
+
+    return cleanExit();
+}
+
+const usage_repl =
+    \\Usage: openq repl
+    \\
+    \\  Start an interactive REPL.
+    \\
+    \\Options:
+    \\
+    \\  -h, --help             Print this help and exit
+    \\  --color [auto|off|on]  Enable or disable colored error messages
+    \\
+;
+
+const banner = "OpenQ " ++ build_options.version ++ " " ++
+    @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n\n";
+
+fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
+    var color: std.zig.Color = .auto;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (mem.startsWith(u8, arg, "-")) {
+            if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+                try io.getStdOut().writeAll(usage_parse);
+                return cleanExit();
+            } else if (mem.eql(u8, arg, "--color")) {
+                if (i + 1 >= args.len) {
+                    fatal("expected [auto|on|off] after --color", .{});
+                }
+                i += 1;
+                const next_arg = args[i];
+                color = std.meta.stringToEnum(std.zig.Color, next_arg) orelse {
+                    fatal("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
+                };
+            } else {
+                fatal("unrecognized parameter: '{s}'", .{arg});
+            }
+        } else {
+            fatal("extra positional parameter: '{s}'", .{arg});
+        }
+    }
+
+    const stdin = io.getStdIn().reader();
+    const stderr = io.getStdErr().writer();
+
+    try stderr.writeAll(banner);
+
+    var buffer: std.ArrayList(u8) = .init(gpa);
+    defer buffer.deinit();
+    while (true) {
+        try stderr.writeAll("q)");
+
+        try stdin.streamUntilDelimiter(buffer.writer(), '\n', null);
+
+        if (mem.eql(u8, buffer.items, "\\\\")) break;
+
+        try buffer.append(0);
+        var tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
+        defer tree.deinit(gpa);
+
+        try utils.writeJsonNode(stderr.any(), tree, .root);
+
+        buffer.shrinkRetainingCapacity(0);
     }
 
     return cleanExit();
