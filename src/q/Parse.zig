@@ -127,9 +127,11 @@ fn addExtra(p: *Parse, extra: anytype) Allocator.Error!ExtraIndex {
             OptionalTokenIndex,
             ExtraIndex,
             => @intFromEnum(@field(extra, field.name)),
+
             TokenIndex,
             => @field(extra, field.name),
-            else => @compileError("unexpected field type: " ++ @typeName(field.type)),
+
+            else => @compileError("bad field type: " ++ @typeName(field.type)),
         };
         p.extra_data.appendAssumeCapacity(data);
     }

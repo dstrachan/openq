@@ -44,6 +44,38 @@ pub const OptionalTokenIndex = enum(u32) {
     }
 };
 
+/// A relative token index.
+pub const TokenOffset = enum(i32) {
+    zero = 0,
+    _,
+
+    pub fn init(base: TokenIndex, destination: TokenIndex) TokenOffset {
+        const base_i64: i64 = base;
+        const destination_i64: i64 = destination;
+        return @enumFromInt(destination_i64 - base_i64);
+    }
+
+    pub fn toOptional(to: TokenOffset) OptionalTokenOffset {
+        const result: OptionalTokenOffset = @enumFromInt(@intFromEnum(to));
+        assert(result != .none);
+        return result;
+    }
+
+    pub fn toAbsolute(offset: TokenOffset, base: TokenIndex) TokenIndex {
+        return @intCast(@as(i64, base) + @intFromEnum(offset));
+    }
+};
+
+/// A relative token index, or null.
+pub const OptionalTokenOffset = enum(i32) {
+    none = std.math.maxInt(i32),
+    _,
+
+    pub fn unwrap(oto: OptionalTokenOffset) ?TokenOffset {
+        return if (oto == .none) null else @enumFromInt(@intFromEnum(oto));
+    }
+};
+
 pub fn tokenTag(tree: *const Ast, token_index: TokenIndex) Token.Tag {
     return tree.tokens.items(.tag)[token_index];
 }
@@ -156,8 +188,11 @@ pub fn extraData(tree: Ast, index: ExtraIndex, comptime T: type) T {
             OptionalTokenIndex,
             ExtraIndex,
             => @enumFromInt(tree.extra_data[@intFromEnum(index) + i]),
-            TokenIndex => tree.extra_data[@intFromEnum(index) + i],
-            else => @compileError("unexpected field type: " ++ @typeName(field.type)),
+
+            TokenIndex,
+            => tree.extra_data[@intFromEnum(index) + i],
+
+            else => @compileError("bad field type: " ++ @typeName(field.type)),
         };
     }
     return result;
