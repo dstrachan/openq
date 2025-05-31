@@ -12,6 +12,7 @@ const q = @import("q");
 const Token = q.Token;
 const Tokenizer = q.Tokenizer;
 const Ast = q.Ast;
+const AstGen = q.AstGen;
 
 const utils = @import("utils.zig");
 
@@ -35,6 +36,7 @@ const usage =
     \\
     \\  tokenize    Tokenize input
     \\  parse       Parse input
+    \\  generate    Generate IR
     \\  repl        Start an interactive REPL
     \\
     \\  help        Print this help and exit
@@ -84,6 +86,8 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         try cmdTokenize(arena, cmd_args);
     } else if (mem.eql(u8, cmd, "parse")) {
         try cmdParse(arena, cmd_args);
+    } else if (mem.eql(u8, cmd, "generate")) {
+        try cmdGenerate(arena, cmd_args);
     } else if (mem.eql(u8, cmd, "repl")) {
         try cmdRepl(gpa, cmd_args);
     } else if (mem.eql(u8, cmd, "version")) {
@@ -235,6 +239,70 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
     const tree: Ast = try .parse(arena, source);
     const writer = io.getStdOut().writer().any();
     try utils.writeJsonNode(writer, tree, .root);
+
+    return cleanExit();
+}
+
+const usage_generate =
+    \\Usage: openq generate [file]
+    \\
+    \\  Given a .q source file, parses the input and generates IR.
+    \\
+    \\  If [file] is omitted, stdin is used.
+    \\
+    \\Options:
+    \\
+    \\  -h, --help             Print this help and exit
+    \\  --color [auto|off|on]  Enable or disable colored error messages
+    \\
+;
+
+fn cmdGenerate(arena: Allocator, args: []const []const u8) !void {
+    var color: std.zig.Color = .auto;
+    var q_source_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (mem.startsWith(u8, arg, "-")) {
+            if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+                try io.getStdOut().writeAll(usage_parse);
+                return cleanExit();
+            } else if (mem.eql(u8, arg, "--color")) {
+                if (i + 1 >= args.len) {
+                    fatal("expected [auto|on|off] after --color", .{});
+                }
+                i += 1;
+                const next_arg = args[i];
+                color = std.meta.stringToEnum(std.zig.Color, next_arg) orelse {
+                    fatal("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
+                };
+            } else {
+                fatal("unrecognized parameter: '{s}'", .{arg});
+            }
+        } else if (q_source_path == null) {
+            q_source_path = arg;
+        } else {
+            fatal("extra positional parameter: '{s}'", .{arg});
+        }
+    }
+
+    const display_path = q_source_path orelse "<stdin>";
+    const source: [:0]const u8 = s: {
+        var f = if (q_source_path) |p| file: {
+            break :file fs.cwd().openFile(p, .{}) catch |err| {
+                fatal("unable to open file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
+            };
+        } else io.getStdIn();
+        defer if (q_source_path != null) f.close();
+        break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
+            fatal("unable to load file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
+        };
+    };
+
+    const tree: Ast = try .parse(arena, source);
+    const qir = try AstGen.generate(arena, tree);
+    _ = qir; // autofix
 
     return cleanExit();
 }
