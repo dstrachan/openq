@@ -246,4 +246,36 @@ pub const Inst = struct {
         int: u64,
         float: f64,
     };
+
+    /// This data is stored inside extra, with trailing operands according to `body_len`.
+    /// Each operand is an `Index`.
+    pub const Block = struct {
+        body_len: u32,
+    };
+
+    /// Trailing: `CompileErrors.Item` for each `items_len`.
+    pub const CompileErrors = struct {
+        items_len: u32,
+
+        /// Trailing: `note_payload_index: u32` for each `notes_len`.
+        /// It's a payload index of another `Item`.
+        pub const Item = struct {
+            /// null terminated string index
+            msg: NullTerminatedString,
+            node: Ast.Node.OptionalIndex,
+            /// If node is .none then this will be populated.
+            token: Ast.OptionalTokenIndex,
+            /// Can be used in combination with `token`.
+            byte_offset: u32,
+            /// 0 or a payload index of a `Block`, each is a payload
+            /// index of another `Item`.
+            notes: u32,
+
+            pub fn notesLen(item: Item, qir: Qir) u32 {
+                if (item.notes == 0) return 0;
+                const block = qir.extraData(Block, item.notes);
+                return block.data.body_len;
+            }
+        };
+    };
 };
