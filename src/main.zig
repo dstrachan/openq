@@ -14,6 +14,7 @@ const Tokenizer = q.Tokenizer;
 const Ast = q.Ast;
 const AstGen = q.AstGen;
 const Qir = q.Qir;
+const Vm = q.Vm;
 
 const utils = @import("utils.zig");
 
@@ -415,6 +416,9 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
 
     try stderr.writeAll(banner);
 
+    var vm: Vm = .init();
+    defer vm.deinit();
+
     var buffer: std.ArrayList(u8) = .init(gpa);
     defer buffer.deinit();
     while (true) {
@@ -428,7 +432,9 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         var tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
         defer tree.deinit(gpa);
 
-        try utils.writeJsonNode(stderr.any(), tree, .root);
+        var value = try vm.eval(tree);
+        defer value.deref();
+        try io.getStdOut().writer().print("Value{{ .ref_count = {d}, .as = {} }}\n", .{ value.ref_count, value.as });
 
         buffer.shrinkRetainingCapacity(0);
     }
