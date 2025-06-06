@@ -10,6 +10,8 @@ pub const Node = Ast.Node;
 pub const Parse = @import("q/Parse.zig");
 pub const AstGen = @import("q/AstGen.zig");
 pub const Qir = @import("q/Qir.zig");
+pub const Vm = @import("q/Vm.zig");
+pub const Value = @import("q/Value.zig");
 
 pub fn putAstErrorsIntoBundle(gpa: Allocator, tree: Ast, path: []const u8, wip_errors: *std.zig.ErrorBundle.Wip) !void {
     var qir = try AstGen.generate(gpa, tree);
