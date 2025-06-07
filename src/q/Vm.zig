@@ -9,15 +9,33 @@ const Value = q.Value;
 
 const Vm = @This();
 
-pub fn init() Vm {
-    return .{};
+gpa: Allocator,
+error_buffer: std.ArrayListUnmanaged(u8) = .empty,
+identifiers: std.StringHashMapUnmanaged(Value) = .empty,
+
+pub const Error = Allocator.Error || error{
+    UndeclaredIdentifier,
+};
+
+pub fn init(gpa: Allocator) Vm {
+    return .{
+        .gpa = gpa,
+    };
 }
 
 pub fn deinit(vm: *Vm) void {
-    _ = vm; // autofix
+    var it = vm.identifiers.iterator();
+    while (it.next()) |entry| {
+        vm.gpa.free(entry.key_ptr.*);
+        entry.value_ptr.deref();
+    }
+    vm.identifiers.deinit(vm.gpa);
+    vm.error_buffer.deinit(vm.gpa);
 }
 
 pub fn eval(vm: *Vm, tree: Ast) !Value {
+    vm.error_buffer.clearRetainingCapacity();
+
     const statements = tree.rootStatements();
     for (statements, 0..) |node, i| {
         const value = try vm.evalNode(tree, node);
@@ -33,7 +51,7 @@ fn evalNode(vm: *Vm, tree: Ast, node: Node.Index) !Value {
         .no_op => @panic("NYI"),
 
         .grouped_expression,
-        => return evalNode(vm, tree, tree.nodeData(node).node_and_token[0]),
+        => return vm.evalNode(tree, tree.nodeData(node).node_and_token[0]),
 
         .empty_list => @panic("NYI"),
         .list => @panic("NYI"),
@@ -105,10 +123,28 @@ fn evalNode(vm: *Vm, tree: Ast, node: Node.Index) !Value {
         => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @enumFromInt(tree.nodeMainToken(node));
+            const op_tag = tree.nodeTag(op);
+            if (op_tag == .colon) {
+                assert(tree.nodeTag(lhs) == .identifier); // TODO: Validation layer
+                const rhs = maybe_rhs.unwrap().?; // TODO: Validation layer
+                var rhs_value = try vm.evalNode(tree, rhs);
+                const identifier = tree.tokenSlice(tree.nodeMainToken(lhs));
+                const gop = try vm.identifiers.getOrPut(vm.gpa, identifier);
+                if (gop.found_existing) {
+                    gop.value_ptr.deref();
+                } else {
+                    gop.key_ptr.* = try vm.gpa.dupe(u8, identifier);
+                }
+
+                gop.value_ptr.* = rhs_value;
+                rhs_value.ref();
+
+                return rhs_value;
+            }
 
             if (maybe_rhs.unwrap()) |rhs| {
-                const rhs_value = try evalNode(vm, tree, rhs);
-                const lhs_value = try evalNode(vm, tree, lhs);
+                const rhs_value = try vm.evalNode(tree, rhs);
+                const lhs_value = try vm.evalNode(tree, lhs);
                 switch (tree.nodeTag(op)) {
                     .plus => return add(lhs_value, rhs_value),
                     .minus => return subtract(lhs_value, rhs_value),
@@ -122,9 +158,9 @@ fn evalNode(vm: *Vm, tree: Ast, node: Node.Index) !Value {
 
         .number_literal,
         => {
-            const long = std.zig.parseNumberLiteral(tree.tokenSlice(tree.nodeMainToken(node)));
-            switch (long) {
-                .int => |v| return .init(.{ .long = @intCast(v) }),
+            const number = std.zig.parseNumberLiteral(tree.tokenSlice(tree.nodeMainToken(node)));
+            switch (number) {
+                .int => |int| return .init(.{ .long = @intCast(int) }),
                 .big_int => unreachable,
                 .float => unreachable,
                 .failure => unreachable,
@@ -134,7 +170,15 @@ fn evalNode(vm: *Vm, tree: Ast, node: Node.Index) !Value {
         .string_literal => @panic("NYI"),
         .symbol_literal => @panic("NYI"),
         .symbol_list_literal => @panic("NYI"),
-        .identifier => @panic("NYI"),
+        .identifier => {
+            const identifier = tree.tokenSlice(tree.nodeMainToken(node));
+            if (vm.identifiers.get(identifier)) |value| {
+                return value;
+            }
+
+            try vm.error_buffer.writer(vm.gpa).print("use of undeclared identifier '{s}'", .{identifier});
+            return error.UndeclaredIdentifier;
+        },
         .builtin => @panic("NYI"),
 
         .select => @panic("NYI"),

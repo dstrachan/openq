@@ -416,7 +416,7 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
 
     try stderr.writeAll(banner);
 
-    var vm: Vm = .init();
+    var vm: Vm = .init(gpa);
     defer vm.deinit();
 
     var buffer: std.ArrayList(u8) = .init(gpa);
@@ -424,6 +424,7 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
     while (true) {
         try stderr.writeAll("q)");
 
+        buffer.shrinkRetainingCapacity(0);
         try stdin.streamUntilDelimiter(buffer.writer(), '\n', null);
 
         if (mem.eql(u8, buffer.items, "\\\\")) break;
@@ -432,11 +433,15 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         var tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
         defer tree.deinit(gpa);
 
-        var value = try vm.eval(tree);
+        var value = vm.eval(tree) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UndeclaredIdentifier => {
+                try io.getStdOut().writer().print("{s}\n", .{vm.error_buffer.items});
+                continue;
+            },
+        };
         defer value.deref();
         try io.getStdOut().writer().print("Value{{ .ref_count = {d}, .as = {} }}\n", .{ value.ref_count, value.as });
-
-        buffer.shrinkRetainingCapacity(0);
     }
 
     return cleanExit();
