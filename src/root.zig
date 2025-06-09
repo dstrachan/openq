@@ -12,6 +12,9 @@ pub const AstGen = @import("q/AstGen.zig");
 pub const Qir = @import("q/Qir.zig");
 pub const Vm = @import("q/Vm.zig");
 pub const Value = @import("q/Value.zig");
+pub const Chunk = @import("q/Chunk.zig");
+pub const OpCode = Chunk.OpCode;
+pub const Compiler = @import("q/Compiler.zig");
 
 pub fn putAstErrorsIntoBundle(gpa: Allocator, tree: Ast, path: []const u8, wip_errors: *std.zig.ErrorBundle.Wip) !void {
     var qir = try AstGen.generate(gpa, tree);

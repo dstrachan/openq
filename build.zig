@@ -26,6 +26,12 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(lib);
 
+    const lib_options = b.addOptions();
+    lib.root_module.addOptions("build_options", lib_options);
+
+    lib_options.addOption(bool, "trace_execution", optimize == .Debug);
+    lib_options.addOption(bool, "print_code", optimize == .Debug);
+
     const exe = b.addExecutable(.{
         .name = "openq",
         .root_module = exe_mod,
