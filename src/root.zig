@@ -8,6 +8,9 @@ pub const Node = Ast.Node;
 pub const Parse = @import("q/Parse.zig");
 pub const Vm = @import("q/Vm.zig");
 pub const Value = @import("q/Value.zig");
+pub const Chunk = @import("q/Chunk.zig");
+pub const OpCode = Chunk.OpCode;
+pub const Compiler = @import("q/Compiler.zig");
 
 test {
     std.testing.refAllDecls(@This());

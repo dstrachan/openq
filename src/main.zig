@@ -13,6 +13,7 @@ const Token = q.Token;
 const Tokenizer = q.Tokenizer;
 const Ast = q.Ast;
 const Vm = q.Vm;
+const Chunk = q.Chunk;
 
 const utils = @import("utils.zig");
 
@@ -287,7 +288,7 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
 
     try stderr.writeAll(banner);
 
-    var vm: Vm = .init(gpa);
+    const vm: *Vm = try .init(gpa);
     defer vm.deinit();
 
     var buffer: std.ArrayList(u8) = .init(gpa);
@@ -304,15 +305,14 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         var tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
         defer tree.deinit(gpa);
 
-        var value = vm.eval(tree) catch |err| switch (err) {
+        vm.interpret(tree) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.UndeclaredIdentifier => {
-                try io.getStdOut().writer().print("{s}\n", .{vm.error_buffer.items});
-                continue;
-            },
+            error.NYI => try stderr.writeAll("'nyi\n"),
+            error.Rank => try stderr.writeAll("'rank\n"),
+            error.Type => try stderr.writeAll("'type\n"),
+            error.CompileError => try stderr.writeAll("'compile\n"),
+            error.RunError => try stderr.writeAll("'run\n"),
         };
-        defer value.deref();
-        try io.getStdOut().writer().print("Value{{ .ref_count = {d}, .as = {} }}\n", .{ value.ref_count, value.as });
     }
 
     return cleanExit();
