@@ -6,237 +6,312 @@ const q = @import("../root.zig");
 const Ast = q.Ast;
 const Node = Ast.Node;
 const Value = q.Value;
+const Chunk = q.Chunk;
+const OpCode = Chunk.OpCode;
+const Compiler = q.Compiler;
+
+const build_options = @import("build_options");
 
 const Vm = @This();
 
+pub const StackMax = 256;
+
 gpa: Allocator,
+chunk: *Chunk,
+ip: [*]u8,
+stack: [StackMax]Value,
+stack_top: [*]Value,
 error_buffer: std.ArrayListUnmanaged(u8) = .empty,
-identifiers: std.StringHashMapUnmanaged(Value) = .empty,
 
 pub const Error = Allocator.Error || error{
     UndeclaredIdentifier,
 };
 
-pub fn init(gpa: Allocator) Vm {
-    return .{
+pub fn init(gpa: Allocator) !*Vm {
+    const vm = try gpa.create(Vm);
+    vm.* = .{
         .gpa = gpa,
+        .chunk = undefined,
+        .ip = undefined,
+        .stack = undefined,
+        .stack_top = undefined,
     };
+    vm.resetStack();
+    return vm;
 }
 
 pub fn deinit(vm: *Vm) void {
-    var it = vm.identifiers.iterator();
-    while (it.next()) |entry| {
-        vm.gpa.free(entry.key_ptr.*);
-        entry.value_ptr.deref();
-    }
-    vm.identifiers.deinit(vm.gpa);
     vm.error_buffer.deinit(vm.gpa);
+    vm.gpa.destroy(vm);
 }
 
-pub fn eval(vm: *Vm, tree: Ast) !Value {
-    vm.error_buffer.clearRetainingCapacity();
-
-    const statements = tree.rootStatements();
-    for (statements, 0..) |node, i| {
-        const value = try vm.evalNode(tree, node);
-        if (i == statements.len - 1) return value;
-    }
-
-    unreachable;
+fn resetStack(vm: *Vm) void {
+    vm.stack_top = &vm.stack;
 }
 
-fn evalNode(vm: *Vm, tree: Ast, node: Node.Index) !Value {
-    switch (tree.nodeTag(node)) {
-        .root => @panic("NYI"),
-        .no_op => @panic("NYI"),
+fn push(vm: *Vm, value: Value) void {
+    vm.stack_top[0] = value;
+    vm.stack_top += 1;
+}
 
-        .grouped_expression,
-        => return vm.evalNode(tree, tree.nodeData(node).node_and_token[0]),
+fn pop(vm: *Vm) Value {
+    vm.stack_top -= 1;
+    return vm.stack_top[0];
+}
 
-        .empty_list => @panic("NYI"),
-        .list => @panic("NYI"),
-        .table_literal => @panic("NYI"),
+pub fn interpret(vm: *Vm, tree: Ast) !void {
+    var chunk: Chunk = .empty;
+    defer chunk.deinit(vm.gpa);
 
-        .function => @panic("NYI"),
+    Compiler.compile(vm.gpa, tree, &chunk) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NYI => return error.NYI,
+        error.Rank => return error.Rank,
+        error.Type => return error.Type,
+        else => return error.CompileError,
+    };
 
-        .expr_block => @panic("NYI"),
+    vm.chunk = &chunk;
+    vm.ip = chunk.data.items(.code).ptr;
 
-        .colon => @panic("NYI"),
-        .colon_colon => @panic("NYI"),
-        .plus => @panic("NYI"),
-        .plus_colon => @panic("NYI"),
-        .minus => @panic("NYI"),
-        .minus_colon => @panic("NYI"),
-        .asterisk => @panic("NYI"),
-        .asterisk_colon => @panic("NYI"),
-        .percent => @panic("NYI"),
-        .percent_colon => @panic("NYI"),
-        .ampersand => @panic("NYI"),
-        .ampersand_colon => @panic("NYI"),
-        .pipe => @panic("NYI"),
-        .pipe_colon => @panic("NYI"),
-        .caret => @panic("NYI"),
-        .caret_colon => @panic("NYI"),
-        .equal => @panic("NYI"),
-        .equal_colon => @panic("NYI"),
-        .l_angle_bracket => @panic("NYI"),
-        .l_angle_bracket_colon => @panic("NYI"),
-        .l_angle_bracket_equal => @panic("NYI"),
-        .l_angle_bracket_r_angle_bracket => @panic("NYI"),
-        .r_angle_bracket => @panic("NYI"),
-        .r_angle_bracket_colon => @panic("NYI"),
-        .r_angle_bracket_equal => @panic("NYI"),
-        .dollar => @panic("NYI"),
-        .dollar_colon => @panic("NYI"),
-        .comma => @panic("NYI"),
-        .comma_colon => @panic("NYI"),
-        .hash => @panic("NYI"),
-        .hash_colon => @panic("NYI"),
-        .underscore => @panic("NYI"),
-        .underscore_colon => @panic("NYI"),
-        .tilde => @panic("NYI"),
-        .tilde_colon => @panic("NYI"),
-        .bang => @panic("NYI"),
-        .bang_colon => @panic("NYI"),
-        .question_mark => @panic("NYI"),
-        .question_mark_colon => @panic("NYI"),
-        .at => @panic("NYI"),
-        .at_colon => @panic("NYI"),
-        .dot => @panic("NYI"),
-        .dot_colon => @panic("NYI"),
-        .zero_colon => @panic("NYI"),
-        .zero_colon_colon => @panic("NYI"),
-        .one_colon => @panic("NYI"),
-        .one_colon_colon => @panic("NYI"),
-        .two_colon => @panic("NYI"),
+    vm.run() catch return error.RunError;
+}
 
-        .apostrophe => @panic("NYI"),
-        .apostrophe_colon => @panic("NYI"),
-        .slash => @panic("NYI"),
-        .slash_colon => @panic("NYI"),
-        .backslash => @panic("NYI"),
-        .backslash_colon => @panic("NYI"),
+fn run(vm: *Vm) !void {
+    const stdout = std.io.getStdOut().writer();
 
-        .call => @panic("NYI"),
-        .apply_unary => @panic("NYI"),
-        .apply_binary,
-        => {
-            const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
-            const op: Node.Index = @enumFromInt(tree.nodeMainToken(node));
-            const op_tag = tree.nodeTag(op);
-            if (op_tag == .colon) {
-                assert(tree.nodeTag(lhs) == .identifier); // TODO: Validation layer
-                const rhs = maybe_rhs.unwrap().?; // TODO: Validation layer
-                var rhs_value = try vm.evalNode(tree, rhs);
-                const identifier = tree.tokenSlice(tree.nodeMainToken(lhs));
-                const gop = try vm.identifiers.getOrPut(vm.gpa, identifier);
-                if (gop.found_existing) {
-                    gop.value_ptr.deref();
-                } else {
-                    gop.key_ptr.* = try vm.gpa.dupe(u8, identifier);
-                }
-
-                gop.value_ptr.* = rhs_value;
-                rhs_value.ref();
-
-                return rhs_value;
+    while (true) {
+        if (build_options.trace_execution) {
+            try stdout.writeAll("          ");
+            var slot: [*]Value = &vm.stack;
+            while (@intFromPtr(slot) < @intFromPtr(vm.stack_top)) : (slot += 1) {
+                try stdout.writeAll("[ ");
+                try slot[0].print();
+                try stdout.writeAll(" ]");
             }
+            try stdout.writeByte('\n');
+            _ = try vm.chunk.disassembleInstruction(vm.ip - vm.chunk.data.items(.code).ptr);
+        }
 
-            if (maybe_rhs.unwrap()) |rhs| {
-                const rhs_value = try vm.evalNode(tree, rhs);
-                const lhs_value = try vm.evalNode(tree, lhs);
-                switch (tree.nodeTag(op)) {
-                    .plus => return add(lhs_value, rhs_value),
-                    .minus => return subtract(lhs_value, rhs_value),
-                    .asterisk => return multiply(lhs_value, rhs_value),
-                    .percent => return divide(lhs_value, rhs_value),
-                    else => @panic(@tagName(tree.nodeTag(node))),
-                }
-                return .{ .as = .{ .long = 1 } };
-            } else @panic("NYI");
-        },
+        const instruction: OpCode = @enumFromInt(vm.readByte());
+        switch (instruction) {
+            .constant => vm.push(vm.readConstant()),
 
-        .number_literal,
-        => {
-            const number = std.zig.parseNumberLiteral(tree.tokenSlice(tree.nodeMainToken(node)));
-            switch (number) {
-                .int => |int| return .init(.{ .long = @intCast(int) }),
-                .big_int => unreachable,
-                .float => unreachable,
-                .failure => unreachable,
-            }
-        },
-        .number_list_literal => @panic("NYI"),
-        .string_literal => @panic("NYI"),
-        .symbol_literal => @panic("NYI"),
-        .symbol_list_literal => @panic("NYI"),
-        .identifier => {
-            const identifier = tree.tokenSlice(tree.nodeMainToken(node));
-            if (vm.identifiers.get(identifier)) |value| {
-                return value;
-            }
+            .add => vm.binary(add),
+            .subtract => vm.binary(subtract),
+            .multiply => vm.binary(multiply),
+            .divide => vm.binary(divide),
+            .apply => @panic("NYI"),
 
-            try vm.error_buffer.writer(vm.gpa).print("use of undeclared identifier '{s}'", .{identifier});
-            return error.UndeclaredIdentifier;
-        },
-        .builtin => @panic("NYI"),
+            .flip => @panic("NYI"),
+            .negate => vm.unary(negate),
+            .first => @panic("NYI"),
+            .reciprocal => vm.unary(reciprocal),
 
-        .select => @panic("NYI"),
-        .exec => @panic("NYI"),
-        .update => @panic("NYI"),
-        .delete_rows => @panic("NYI"),
-        .delete_cols => @panic("NYI"),
+            .@"return" => {
+                try vm.pop().print();
+                try stdout.writeByte('\n');
+                return;
+            },
+        }
     }
 }
 
-fn add(lhs: Value, rhs: Value) Value {
-    return .init(switch (lhs.type) {
-        .long => switch (rhs.type) {
-            .long => .{ .long = lhs.as.long + rhs.as.long },
-            .float => .{ .float = @as(f64, @floatFromInt(lhs.as.long)) + rhs.as.float },
-        },
-        .float => switch (rhs.type) {
-            .long => .{ .float = lhs.as.float + @as(f64, @floatFromInt(rhs.as.long)) },
-            .float => .{ .float = lhs.as.float + rhs.as.float },
-        },
-    });
+inline fn readByte(vm: *Vm) u8 {
+    const byte = vm.ip[0];
+    vm.ip += 1;
+    return byte;
 }
 
-fn subtract(lhs: Value, rhs: Value) Value {
-    return .init(switch (lhs.type) {
-        .long => switch (rhs.type) {
-            .long => .{ .long = lhs.as.long - rhs.as.long },
-            .float => .{ .float = @as(f64, @floatFromInt(lhs.as.long)) - rhs.as.float },
-        },
-        .float => switch (rhs.type) {
-            .long => .{ .float = lhs.as.float - @as(f64, @floatFromInt(rhs.as.long)) },
-            .float => .{ .float = lhs.as.float - rhs.as.float },
-        },
-    });
+inline fn readConstant(vm: *Vm) Value {
+    return vm.chunk.constants.items[vm.readByte()];
 }
 
-fn multiply(lhs: Value, rhs: Value) Value {
-    return .init(switch (lhs.type) {
-        .long => switch (rhs.type) {
-            .long => .{ .long = lhs.as.long * rhs.as.long },
-            .float => .{ .float = @as(f64, @floatFromInt(lhs.as.long)) * rhs.as.float },
-        },
-        .float => switch (rhs.type) {
-            .long => .{ .float = lhs.as.float * @as(f64, @floatFromInt(rhs.as.long)) },
-            .float => .{ .float = lhs.as.float * rhs.as.float },
-        },
-    });
+inline fn unary(vm: *Vm, f: *const fn (Value) Value) void {
+    const x = vm.pop();
+    vm.push(f(x));
 }
 
-fn divide(lhs: Value, rhs: Value) Value {
-    return .init(switch (lhs.type) {
-        .long => switch (rhs.type) {
-            .long => .{ .float = @as(f64, @floatFromInt(lhs.as.long)) / @as(f64, @floatFromInt(rhs.as.long)) },
-            .float => .{ .float = @as(f64, @floatFromInt(lhs.as.long)) / rhs.as.float },
+inline fn binary(vm: *Vm, f: *const fn (Value, Value) Value) void {
+    const x = vm.pop();
+    const y = vm.pop();
+    vm.push(f(x, y));
+}
+
+fn add(x: Value, y: Value) Value {
+    return switch (x.type) {
+        .boolean => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .short => @panic("NYI"),
+        .int => @panic("NYI"),
+        .long => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .long(x.as.long + y.as.long),
+            .real => @panic("NYI"),
+            .float => .float(@as(f64, @floatFromInt(x.as.long)) + y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
         },
-        .float => switch (rhs.type) {
-            .long => .{ .float = lhs.as.float / @as(f64, @floatFromInt(rhs.as.long)) },
-            .float => .{ .float = lhs.as.float / rhs.as.float },
+        .real => @panic("NYI"),
+        .float => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .float(x.as.float + @as(f64, @floatFromInt(y.as.long))),
+            .real => @panic("NYI"),
+            .float => .float(x.as.float + y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
         },
-    });
+        .char => @panic("NYI"),
+        .symbol => @panic("NYI"),
+    };
+}
+
+fn subtract(x: Value, y: Value) Value {
+    return switch (x.type) {
+        .boolean => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .short => @panic("NYI"),
+        .int => @panic("NYI"),
+        .long => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .long(x.as.long - y.as.long),
+            .real => @panic("NYI"),
+            .float => .float(@as(f64, @floatFromInt(x.as.long)) - y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
+        },
+        .real => @panic("NYI"),
+        .float => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .float(x.as.float - @as(f64, @floatFromInt(y.as.long))),
+            .real => @panic("NYI"),
+            .float => .float(x.as.float - y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
+        },
+        .char => @panic("NYI"),
+        .symbol => @panic("NYI"),
+    };
+}
+
+fn multiply(x: Value, y: Value) Value {
+    return switch (x.type) {
+        .boolean => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .short => @panic("NYI"),
+        .int => @panic("NYI"),
+        .long => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .long(x.as.long * y.as.long),
+            .real => @panic("NYI"),
+            .float => .float(@as(f64, @floatFromInt(x.as.long)) * y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
+        },
+        .real => @panic("NYI"),
+        .float => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .float(x.as.float * @as(f64, @floatFromInt(y.as.long))),
+            .real => @panic("NYI"),
+            .float => .float(x.as.float * y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
+        },
+        .char => @panic("NYI"),
+        .symbol => @panic("NYI"),
+    };
+}
+
+fn divide(x: Value, y: Value) Value {
+    return switch (x.type) {
+        .boolean => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .short => @panic("NYI"),
+        .int => @panic("NYI"),
+        .long => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .float(@as(f64, @floatFromInt(x.as.long)) / @as(f64, @floatFromInt(y.as.long))),
+            .real => @panic("NYI"),
+            .float => .float(@as(f64, @floatFromInt(x.as.long)) / y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
+        },
+        .real => @panic("NYI"),
+        .float => switch (y.type) {
+            .boolean => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .short => @panic("NYI"),
+            .int => @panic("NYI"),
+            .long => .float(x.as.float / @as(f64, @floatFromInt(y.as.long))),
+            .real => @panic("NYI"),
+            .float => .float(x.as.float / y.as.float),
+            .char => @panic("NYI"),
+            .symbol => @panic("NYI"),
+        },
+        .char => @panic("NYI"),
+        .symbol => @panic("NYI"),
+    };
+}
+
+fn negate(x: Value) Value {
+    return switch (x.type) {
+        .boolean => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .short => @panic("NYI"),
+        .int => @panic("NYI"),
+        .long => .long(-x.as.long),
+        .real => @panic("NYI"),
+        .float => .float(-x.as.float),
+        .char => @panic("NYI"),
+        .symbol => @panic("NYI"),
+    };
+}
+
+fn reciprocal(x: Value) Value {
+    return switch (x.type) {
+        .boolean => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .short => @panic("NYI"),
+        .int => @panic("NYI"),
+        .long => .float(1 / @as(f64, @floatFromInt(x.as.long))),
+        .real => @panic("NYI"),
+        .float => .float(1 / x.as.float),
+        .char => @panic("NYI"),
+        .symbol => @panic("NYI"),
+    };
 }
