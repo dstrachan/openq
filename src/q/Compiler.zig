@@ -128,8 +128,13 @@ fn number(compiler: Compiler, node: Node.Index) !void {
 fn string(compiler: Compiler, node: Node.Index) !void {
     const main_token = compiler.tree.nodeMainToken(node);
     const bytes = compiler.tree.tokenSlice(main_token);
-    const duped_slice = try compiler.gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
-    try compiler.emitConstant(.charList(duped_slice));
+    assert(bytes.len > 1);
+    if (bytes.len == 3) {
+        try compiler.emitConstant(.char(bytes[1]));
+    } else {
+        const duped_slice = try compiler.gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
+        try compiler.emitConstant(.charList(duped_slice));
+    }
 }
 
 inline fn binary(compiler: Compiler, op_code: OpCode, args: []const Node.Index) !void {
@@ -257,6 +262,7 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
                     .minus => try compiler.binary(.subtract, &.{ x, y }),
                     .asterisk => try compiler.binary(.multiply, &.{ x, y }),
                     .percent => try compiler.binary(.divide, &.{ x, y }),
+                    .comma => try compiler.binary(.concat, &.{ x, y }),
                     .at => try compiler.binary(.apply, &.{ x, y }),
                     inline else => |t| @panic("NYI " ++ @tagName(t)),
                 }
