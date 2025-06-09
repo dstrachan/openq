@@ -97,16 +97,17 @@ fn run(vm: *Vm) !void {
         switch (instruction) {
             .constant => vm.push(vm.readConstant()),
 
-            .add => vm.binary(add),
-            .subtract => vm.binary(subtract),
-            .multiply => vm.binary(multiply),
-            .divide => vm.binary(divide),
+            .add => try vm.binary(add),
+            .subtract => try vm.binary(subtract),
+            .multiply => try vm.binary(multiply),
+            .divide => try vm.binary(divide),
             .apply => @panic("NYI"),
+            .concat => try vm.binary(concat),
 
             .flip => @panic("NYI"),
-            .negate => vm.unary(negate),
+            .negate => try vm.unary(negate),
             .first => @panic("NYI"),
-            .reciprocal => vm.unary(reciprocal),
+            .reciprocal => try vm.unary(reciprocal),
 
             .@"return" => {
                 var value = vm.pop();
@@ -130,23 +131,24 @@ inline fn readConstant(vm: *Vm) Value {
     return vm.chunk.constants.items[vm.readByte()];
 }
 
-inline fn unary(vm: *Vm, f: *const fn (*Value) Value) void {
+inline fn unary(vm: *Vm, f: *const fn (*Vm, *Value) anyerror!Value) !void {
     var x = vm.pop();
     defer x.deref(vm.gpa);
 
-    vm.push(f(&x));
+    vm.push(try f(vm, &x));
 }
 
-inline fn binary(vm: *Vm, f: *const fn (*Value, *Value) Value) void {
+inline fn binary(vm: *Vm, f: *const fn (*Vm, *Value, *Value) anyerror!Value) !void {
     var x = vm.pop();
     defer x.deref(vm.gpa);
     var y = vm.pop();
     defer y.deref(vm.gpa);
 
-    vm.push(f(&x, &y));
+    vm.push(try f(vm, &x, &y));
 }
 
-fn add(x: *Value, y: *Value) Value {
+fn add(vm: *Vm, x: *Value, y: *Value) !Value {
+    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -216,7 +218,8 @@ fn add(x: *Value, y: *Value) Value {
     };
 }
 
-fn subtract(x: *Value, y: *Value) Value {
+fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
+    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -286,7 +289,8 @@ fn subtract(x: *Value, y: *Value) Value {
     };
 }
 
-fn multiply(x: *Value, y: *Value) Value {
+fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
+    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -356,7 +360,8 @@ fn multiply(x: *Value, y: *Value) Value {
     };
 }
 
-fn divide(x: *Value, y: *Value) Value {
+fn divide(vm: *Vm, x: *Value, y: *Value) !Value {
+    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -426,7 +431,98 @@ fn divide(x: *Value, y: *Value) Value {
     };
 }
 
-fn negate(x: *Value) Value {
+fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
+    return switch (x.type) {
+        .mixed_list => @panic("NYI"),
+        .boolean => @panic("NYI"),
+        .boolean_list => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .guid_list => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .byte_list => @panic("NYI"),
+        .short => @panic("NYI"),
+        .short_list => @panic("NYI"),
+        .int => @panic("NYI"),
+        .int_list => @panic("NYI"),
+        .long => @panic("NYI"),
+        .long_list => @panic("NYI"),
+        .real => @panic("NYI"),
+        .real_list => @panic("NYI"),
+        .float => @panic("NYI"),
+        .float_list => @panic("NYI"),
+        .char => switch (y.type) {
+            .mixed_list => @panic("NYI"),
+            .boolean => @panic("NYI"),
+            .boolean_list => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .guid_list => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .byte_list => @panic("NYI"),
+            .short => @panic("NYI"),
+            .short_list => @panic("NYI"),
+            .int => @panic("NYI"),
+            .int_list => @panic("NYI"),
+            .long => @panic("NYI"),
+            .long_list => @panic("NYI"),
+            .real => @panic("NYI"),
+            .real_list => @panic("NYI"),
+            .float => @panic("NYI"),
+            .float_list => @panic("NYI"),
+            .char => blk: {
+                const bytes = try vm.gpa.alloc(u8, 2);
+                bytes[0] = x.as.char;
+                bytes[1] = y.as.char;
+                break :blk .charList(bytes);
+            },
+            .char_list => blk: {
+                const bytes = try vm.gpa.alloc(u8, 1 + y.as.char_list.len);
+                bytes[0] = x.as.char;
+                @memcpy(bytes[1..], y.as.char_list);
+                break :blk .charList(bytes);
+            },
+            .symbol => @panic("NYI"),
+            .symbol_list => @panic("NYI"),
+        },
+        .char_list => switch (y.type) {
+            .mixed_list => @panic("NYI"),
+            .boolean => @panic("NYI"),
+            .boolean_list => @panic("NYI"),
+            .guid => @panic("NYI"),
+            .guid_list => @panic("NYI"),
+            .byte => @panic("NYI"),
+            .byte_list => @panic("NYI"),
+            .short => @panic("NYI"),
+            .short_list => @panic("NYI"),
+            .int => @panic("NYI"),
+            .int_list => @panic("NYI"),
+            .long => @panic("NYI"),
+            .long_list => @panic("NYI"),
+            .real => @panic("NYI"),
+            .real_list => @panic("NYI"),
+            .float => @panic("NYI"),
+            .float_list => @panic("NYI"),
+            .char => blk: {
+                const bytes = try vm.gpa.alloc(u8, x.as.char_list.len + 1);
+                @memcpy(bytes[0..x.as.char_list.len], x.as.char_list);
+                bytes[x.as.char_list.len] = y.as.char;
+                break :blk .charList(bytes);
+            },
+            .char_list => blk: {
+                const bytes = try vm.gpa.alloc(u8, x.as.char_list.len + y.as.char_list.len);
+                @memcpy(bytes[0..x.as.char_list.len], x.as.char_list);
+                @memcpy(bytes[x.as.char_list.len..], y.as.char_list);
+                break :blk .charList(bytes);
+            },
+            .symbol => @panic("NYI"),
+            .symbol_list => @panic("NYI"),
+        },
+        .symbol => @panic("NYI"),
+        .symbol_list => @panic("NYI"),
+    };
+}
+
+fn negate(vm: *Vm, x: *Value) !Value {
+    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -452,7 +548,8 @@ fn negate(x: *Value) Value {
     };
 }
 
-fn reciprocal(x: *Value) Value {
+fn reciprocal(vm: *Vm, x: *Value) !Value {
+    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),

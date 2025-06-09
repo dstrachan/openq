@@ -89,7 +89,7 @@ pub inline fn float(value: f64) Value {
 }
 
 pub inline fn char(value: u8) Value {
-    return .{ .type = .char, .as = .{ .byte = value } };
+    return .{ .type = .char, .as = .{ .char = value } };
 }
 
 pub inline fn charList(value: []u8) Value {
