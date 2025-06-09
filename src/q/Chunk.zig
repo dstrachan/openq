@@ -17,6 +17,7 @@ pub const OpCode = enum(u8) {
     subtract,
     multiply,
     divide,
+    concat,
     apply,
 
     flip,
@@ -78,6 +79,7 @@ pub fn disassembleInstruction(chunk: Chunk, offset: usize) !usize {
         .subtract,
         .multiply,
         .divide,
+        .concat,
         .apply,
         => |t| return simpleInstruction(@tagName(t), offset),
 
