@@ -92,6 +92,10 @@ pub inline fn char(value: u8) Value {
     return .{ .type = .char, .as = .{ .byte = value } };
 }
 
+pub inline fn charList(value: []u8) Value {
+    return .{ .type = .char_list, .as = .{ .char_list = value } };
+}
+
 pub inline fn symbol(value: [*:0]u8) Value {
     return .{ .type = .symbol, .as = .{ .symbol = value } };
 }
@@ -100,12 +104,22 @@ pub fn ref(value: *Value) void {
     value.ref_count += 1;
 }
 
-pub fn deref(value: *Value) void {
+pub fn deref(value: *Value, gpa: Allocator) void {
     assert(value.ref_count > 0);
     value.ref_count -= 1;
-    if (value.ref_count == 0) switch (value.as) {
-        .long => {},
-        .float => {},
+    if (value.ref_count == 0) switch (value.type) {
+        .mixed_list => gpa.free(value.as.mixed_list),
+        .boolean_list => gpa.free(value.as.boolean_list),
+        .guid_list => gpa.free(value.as.guid_list),
+        .byte_list => gpa.free(value.as.byte_list),
+        .short_list => gpa.free(value.as.short_list),
+        .int_list => gpa.free(value.as.int_list),
+        .long_list => gpa.free(value.as.long_list),
+        .real_list => gpa.free(value.as.real_list),
+        .float_list => gpa.free(value.as.float_list),
+        .char_list => gpa.free(value.as.char_list),
+        .symbol_list => gpa.free(value.as.symbol_list),
+        else => {},
     };
 }
 

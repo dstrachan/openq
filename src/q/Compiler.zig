@@ -125,6 +125,13 @@ fn number(compiler: Compiler, node: Node.Index) !void {
     }
 }
 
+fn string(compiler: Compiler, node: Node.Index) !void {
+    const main_token = compiler.tree.nodeMainToken(node);
+    const bytes = compiler.tree.tokenSlice(main_token);
+    const duped_slice = try compiler.gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
+    try compiler.emitConstant(.charList(duped_slice));
+}
+
 inline fn binary(compiler: Compiler, op_code: OpCode, args: []const Node.Index) !void {
     switch (args.len) {
         0, 1 => return error.NYI,
@@ -258,7 +265,7 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
 
         .number_literal => compiler.number(node),
         .number_list_literal => @panic("NYI"),
-        .string_literal => @panic("NYI"),
+        .string_literal => compiler.string(node),
         .symbol_literal => @panic("NYI"),
         .symbol_list_literal => @panic("NYI"),
         .identifier => @panic("NYI"),

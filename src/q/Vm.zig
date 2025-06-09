@@ -87,7 +87,7 @@ fn run(vm: *Vm) !void {
             while (@intFromPtr(slot) < @intFromPtr(vm.stack_top)) : (slot += 1) {
                 try stdout.writeAll("[ ");
                 try slot[0].print();
-                try stdout.writeAll(" ]");
+                try stdout.print(" ({d}) ]", .{slot[0].ref_count});
             }
             try stdout.writeByte('\n');
             _ = try vm.chunk.disassembleInstruction(vm.ip - vm.chunk.data.items(.code).ptr);
@@ -109,7 +109,10 @@ fn run(vm: *Vm) !void {
             .reciprocal => vm.unary(reciprocal),
 
             .@"return" => {
-                try vm.pop().print();
+                var value = vm.pop();
+                defer value.deref(vm.gpa);
+
+                try value.print();
                 try stdout.writeByte('\n');
                 return;
             },
@@ -127,18 +130,23 @@ inline fn readConstant(vm: *Vm) Value {
     return vm.chunk.constants.items[vm.readByte()];
 }
 
-inline fn unary(vm: *Vm, f: *const fn (Value) Value) void {
-    const x = vm.pop();
-    vm.push(f(x));
+inline fn unary(vm: *Vm, f: *const fn (*Value) Value) void {
+    var x = vm.pop();
+    defer x.deref(vm.gpa);
+
+    vm.push(f(&x));
 }
 
-inline fn binary(vm: *Vm, f: *const fn (Value, Value) Value) void {
-    const x = vm.pop();
-    const y = vm.pop();
-    vm.push(f(x, y));
+inline fn binary(vm: *Vm, f: *const fn (*Value, *Value) Value) void {
+    var x = vm.pop();
+    defer x.deref(vm.gpa);
+    var y = vm.pop();
+    defer y.deref(vm.gpa);
+
+    vm.push(f(&x, &y));
 }
 
-fn add(x: Value, y: Value) Value {
+fn add(x: *Value, y: *Value) Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -208,7 +216,7 @@ fn add(x: Value, y: Value) Value {
     };
 }
 
-fn subtract(x: Value, y: Value) Value {
+fn subtract(x: *Value, y: *Value) Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -278,7 +286,7 @@ fn subtract(x: Value, y: Value) Value {
     };
 }
 
-fn multiply(x: Value, y: Value) Value {
+fn multiply(x: *Value, y: *Value) Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -348,7 +356,7 @@ fn multiply(x: Value, y: Value) Value {
     };
 }
 
-fn divide(x: Value, y: Value) Value {
+fn divide(x: *Value, y: *Value) Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -418,7 +426,7 @@ fn divide(x: Value, y: Value) Value {
     };
 }
 
-fn negate(x: Value) Value {
+fn negate(x: *Value) Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -444,7 +452,7 @@ fn negate(x: Value) Value {
     };
 }
 
-fn reciprocal(x: Value) Value {
+fn reciprocal(x: *Value) Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
