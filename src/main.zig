@@ -428,11 +428,14 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         buffer.shrinkRetainingCapacity(0);
         try stdin.streamUntilDelimiter(buffer.writer(), '\n', null);
 
+        if (buffer.getLast() == '\r') _ = buffer.shrinkRetainingCapacity(buffer.items.len - 1);
         if (mem.eql(u8, buffer.items, "\\\\")) break;
 
         try buffer.append(0);
         var tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
         defer tree.deinit(gpa);
+
+        if (tree.errors.len > 0) continue;
 
         vm.interpret(tree) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
