@@ -60,6 +60,8 @@ fn pop(vm: *Vm) Value {
 }
 
 pub fn interpret(vm: *Vm, tree: Ast) !void {
+    assert(tree.errors.len == 0);
+
     var chunk: Chunk = .empty;
     defer chunk.deinit(vm.gpa);
 
