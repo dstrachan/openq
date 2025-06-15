@@ -48,8 +48,8 @@ pub const ValueUnion = union {
     float_list: []f64,
     char: u8,
     char_list: []u8,
-    symbol: [*:0]u8,
-    symbol_list: [][*:0]u8,
+    symbol: []u8,
+    symbol_list: [][]u8,
 };
 
 type: ValueType,
@@ -96,7 +96,7 @@ pub inline fn charList(value: []u8) Value {
     return .{ .type = .char_list, .as = .{ .char_list = value } };
 }
 
-pub inline fn symbol(value: [*:0]u8) Value {
+pub inline fn symbol(value: []u8) Value {
     return .{ .type = .symbol, .as = .{ .symbol = value } };
 }
 
@@ -118,6 +118,7 @@ pub fn deref(value: *Value, gpa: Allocator) void {
         .real_list => gpa.free(value.as.real_list),
         .float_list => gpa.free(value.as.float_list),
         .char_list => gpa.free(value.as.char_list),
+        .symbol => if (value.as.symbol.len > 0) gpa.free(value.as.symbol),
         .symbol_list => gpa.free(value.as.symbol_list),
         else => {},
     };
