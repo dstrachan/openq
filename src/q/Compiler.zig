@@ -126,14 +126,34 @@ fn number(compiler: Compiler, node: Node.Index) !void {
 }
 
 fn string(compiler: Compiler, node: Node.Index) !void {
-    const main_token = compiler.tree.nodeMainToken(node);
-    const bytes = compiler.tree.tokenSlice(main_token);
-    assert(bytes.len > 1);
+    const tree = compiler.tree;
+    const gpa = compiler.gpa;
+    assert(tree.nodeTag(node) == .string_literal);
+
+    const token = tree.nodeMainToken(node);
+    const bytes = tree.tokenSlice(token);
+    assert(bytes.len >= 2);
     if (bytes.len == 3) {
         try compiler.emitConstant(.char(bytes[1]));
     } else {
-        const duped_slice = try compiler.gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
+        const duped_slice = try gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
         try compiler.emitConstant(.charList(duped_slice));
+    }
+}
+
+fn symbol(compiler: Compiler, node: Node.Index) !void {
+    const tree = compiler.tree;
+    const gpa = compiler.gpa;
+    assert(tree.nodeTag(node) == .symbol_literal);
+
+    const token = tree.nodeMainToken(node);
+    const bytes = tree.tokenSlice(token);
+    assert(bytes.len >= 1);
+    if (bytes.len == 1) {
+        try compiler.emitConstant(.symbol(""));
+    } else {
+        const duped_slice = try gpa.dupe(u8, bytes[1..]);
+        try compiler.emitConstant(.symbol(duped_slice));
     }
 }
 
@@ -272,7 +292,7 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
         .number_literal => compiler.number(node),
         .number_list_literal => @panic("NYI"),
         .string_literal => compiler.string(node),
-        .symbol_literal => @panic("NYI"),
+        .symbol_literal => compiler.symbol(node),
         .symbol_list_literal => @panic("NYI"),
         .identifier => @panic("NYI"),
         .builtin => @panic("NYI"),

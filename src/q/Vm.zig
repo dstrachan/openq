@@ -21,7 +21,7 @@ chunk: *Chunk,
 ip: [*]u8,
 stack: [StackMax]Value,
 stack_top: [*]Value,
-error_buffer: std.ArrayListUnmanaged(u8) = .empty,
+symbols: std.StringHashMapUnmanaged(void) = .empty,
 
 pub const Error = Allocator.Error || error{
     UndeclaredIdentifier,
@@ -41,7 +41,9 @@ pub fn init(gpa: Allocator) !*Vm {
 }
 
 pub fn deinit(vm: *Vm) void {
-    vm.error_buffer.deinit(vm.gpa);
+    var it = vm.symbols.keyIterator();
+    while (it.next()) |entry| vm.gpa.free(entry.*);
+    vm.symbols.deinit(vm.gpa);
     vm.gpa.destroy(vm);
 }
 
