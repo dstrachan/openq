@@ -67,7 +67,7 @@ pub fn interpret(vm: *Vm, tree: Ast) !void {
     var chunk: Chunk = .empty;
     defer chunk.deinit(vm.gpa);
 
-    Compiler.compile(vm.gpa, tree, &chunk) catch |err| switch (err) {
+    Compiler.compile(vm.gpa, tree, vm, &chunk) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NYI => return error.NYI,
         error.Rank => return error.Rank,
@@ -152,7 +152,6 @@ inline fn binary(vm: *Vm, f: *const fn (*Vm, *Value, *Value) anyerror!Value) !vo
 }
 
 fn add(vm: *Vm, x: *Value, y: *Value) !Value {
-    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -177,11 +176,11 @@ fn add(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .long(x.as.long + y.as.long),
+            .long => vm.createLong(x.as.long + y.as.long),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(@as(f64, @floatFromInt(x.as.long)) + y.as.float),
+            .float => vm.createFloat(@as(f64, @floatFromInt(x.as.long)) + y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -203,11 +202,11 @@ fn add(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .float(x.as.float + @as(f64, @floatFromInt(y.as.long))),
+            .long => vm.createFloat(x.as.float + @as(f64, @floatFromInt(y.as.long))),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(x.as.float + y.as.float),
+            .float => vm.createFloat(x.as.float + y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -223,7 +222,6 @@ fn add(vm: *Vm, x: *Value, y: *Value) !Value {
 }
 
 fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
-    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -248,11 +246,11 @@ fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .long(x.as.long - y.as.long),
+            .long => vm.createLong(x.as.long - y.as.long),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(@as(f64, @floatFromInt(x.as.long)) - y.as.float),
+            .float => vm.createFloat(@as(f64, @floatFromInt(x.as.long)) - y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -274,11 +272,11 @@ fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .float(x.as.float - @as(f64, @floatFromInt(y.as.long))),
+            .long => vm.createFloat(x.as.float - @as(f64, @floatFromInt(y.as.long))),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(x.as.float - y.as.float),
+            .float => vm.createFloat(x.as.float - y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -294,7 +292,6 @@ fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
 }
 
 fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
-    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -319,11 +316,11 @@ fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .long(x.as.long * y.as.long),
+            .long => vm.createLong(x.as.long * y.as.long),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(@as(f64, @floatFromInt(x.as.long)) * y.as.float),
+            .float => vm.createFloat(@as(f64, @floatFromInt(x.as.long)) * y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -345,11 +342,11 @@ fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .float(x.as.float * @as(f64, @floatFromInt(y.as.long))),
+            .long => vm.createFloat(x.as.float * @as(f64, @floatFromInt(y.as.long))),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(x.as.float * y.as.float),
+            .float => vm.createFloat(x.as.float * y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -365,7 +362,6 @@ fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
 }
 
 fn divide(vm: *Vm, x: *Value, y: *Value) !Value {
-    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -390,11 +386,11 @@ fn divide(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .float(@as(f64, @floatFromInt(x.as.long)) / @as(f64, @floatFromInt(y.as.long))),
+            .long => vm.createFloat(@as(f64, @floatFromInt(x.as.long)) / @as(f64, @floatFromInt(y.as.long))),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(@as(f64, @floatFromInt(x.as.long)) / y.as.float),
+            .float => vm.createFloat(@as(f64, @floatFromInt(x.as.long)) / y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -416,11 +412,11 @@ fn divide(vm: *Vm, x: *Value, y: *Value) !Value {
             .short_list => @panic("NYI"),
             .int => @panic("NYI"),
             .int_list => @panic("NYI"),
-            .long => .float(x.as.float / @as(f64, @floatFromInt(y.as.long))),
+            .long => vm.createFloat(x.as.float / @as(f64, @floatFromInt(y.as.long))),
             .long_list => @panic("NYI"),
             .real => @panic("NYI"),
             .real_list => @panic("NYI"),
-            .float => .float(x.as.float / y.as.float),
+            .float => vm.createFloat(x.as.float / y.as.float),
             .float_list => @panic("NYI"),
             .char => @panic("NYI"),
             .char_list => @panic("NYI"),
@@ -476,13 +472,13 @@ fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
                 const bytes = try vm.gpa.alloc(u8, 2);
                 bytes[0] = x.as.char;
                 bytes[1] = y.as.char;
-                break :blk .charList(bytes);
+                break :blk vm.createCharList(bytes);
             },
             .char_list => blk: {
                 const bytes = try vm.gpa.alloc(u8, 1 + y.as.char_list.len);
                 bytes[0] = x.as.char;
                 @memcpy(bytes[1..], y.as.char_list);
-                break :blk .charList(bytes);
+                break :blk vm.createCharList(bytes);
             },
             .symbol => @panic("NYI"),
             .symbol_list => @panic("NYI"),
@@ -509,13 +505,13 @@ fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
                 const bytes = try vm.gpa.alloc(u8, x.as.char_list.len + 1);
                 @memcpy(bytes[0..x.as.char_list.len], x.as.char_list);
                 bytes[x.as.char_list.len] = y.as.char;
-                break :blk .charList(bytes);
+                break :blk vm.createCharList(bytes);
             },
             .char_list => blk: {
                 const bytes = try vm.gpa.alloc(u8, x.as.char_list.len + y.as.char_list.len);
                 @memcpy(bytes[0..x.as.char_list.len], x.as.char_list);
                 @memcpy(bytes[x.as.char_list.len..], y.as.char_list);
-                break :blk .charList(bytes);
+                break :blk vm.createCharList(bytes);
             },
             .symbol => @panic("NYI"),
             .symbol_list => @panic("NYI"),
@@ -526,7 +522,6 @@ fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
 }
 
 fn negate(vm: *Vm, x: *Value) !Value {
-    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -539,11 +534,11 @@ fn negate(vm: *Vm, x: *Value) !Value {
         .short_list => @panic("NYI"),
         .int => @panic("NYI"),
         .int_list => @panic("NYI"),
-        .long => .long(-x.as.long),
+        .long => vm.createLong(-x.as.long),
         .long_list => @panic("NYI"),
         .real => @panic("NYI"),
         .real_list => @panic("NYI"),
-        .float => .float(-x.as.float),
+        .float => vm.createFloat(-x.as.float),
         .float_list => @panic("NYI"),
         .char => @panic("NYI"),
         .char_list => @panic("NYI"),
@@ -553,7 +548,6 @@ fn negate(vm: *Vm, x: *Value) !Value {
 }
 
 fn reciprocal(vm: *Vm, x: *Value) !Value {
-    _ = vm; // autofix
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -566,15 +560,70 @@ fn reciprocal(vm: *Vm, x: *Value) !Value {
         .short_list => @panic("NYI"),
         .int => @panic("NYI"),
         .int_list => @panic("NYI"),
-        .long => .float(1 / @as(f64, @floatFromInt(x.as.long))),
+        .long => vm.createFloat(1 / @as(f64, @floatFromInt(x.as.long))),
         .long_list => @panic("NYI"),
         .real => @panic("NYI"),
         .real_list => @panic("NYI"),
-        .float => .float(1 / x.as.float),
+        .float => vm.createFloat(1 / x.as.float),
         .float_list => @panic("NYI"),
         .char => @panic("NYI"),
         .char_list => @panic("NYI"),
         .symbol => @panic("NYI"),
         .symbol_list => @panic("NYI"),
     };
+}
+
+pub inline fn createBoolean(vm: *Vm, value: bool) Value {
+    _ = vm; // autofix
+    return .{ .type = .boolean, .as = .{ .boolean = value } };
+}
+
+pub inline fn createGuid(vm: *Vm, value: [16]u8) Value {
+    _ = vm; // autofix
+    return .{ .type = .guid, .as = .{ .guid = value } };
+}
+
+pub inline fn createByte(vm: *Vm, value: u8) Value {
+    _ = vm; // autofix
+    return .{ .type = .byte, .as = .{ .byte = value } };
+}
+
+pub inline fn createShort(vm: *Vm, value: i16) Value {
+    _ = vm; // autofix
+    return .{ .type = .short, .as = .{ .short = value } };
+}
+
+pub inline fn createInt(vm: *Vm, value: i32) Value {
+    _ = vm; // autofix
+    return .{ .type = .int, .as = .{ .int = value } };
+}
+
+pub inline fn createLong(vm: *Vm, value: i64) Value {
+    _ = vm; // autofix
+    return .{ .type = .long, .as = .{ .long = value } };
+}
+
+pub inline fn createReal(vm: *Vm, value: f32) Value {
+    _ = vm; // autofix
+    return .{ .type = .real, .as = .{ .real = value } };
+}
+
+pub inline fn createFloat(vm: *Vm, value: f64) Value {
+    _ = vm; // autofix
+    return .{ .type = .float, .as = .{ .float = value } };
+}
+
+pub inline fn createChar(vm: *Vm, value: u8) Value {
+    _ = vm; // autofix
+    return .{ .type = .char, .as = .{ .char = value } };
+}
+
+pub inline fn createCharList(vm: *Vm, value: []u8) Value {
+    _ = vm; // autofix
+    return .{ .type = .char_list, .as = .{ .char_list = value } };
+}
+
+pub inline fn createSymbol(vm: *Vm, value: []u8) Value {
+    _ = vm; // autofix
+    return .{ .type = .symbol, .as = .{ .symbol = value } };
 }

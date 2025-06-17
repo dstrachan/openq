@@ -8,6 +8,7 @@ const Chunk = q.Chunk;
 const OpCode = q.OpCode;
 const Value = q.Value;
 const Node = Ast.Node;
+const Vm = q.Vm;
 
 const build_options = @import("build_options");
 
@@ -15,6 +16,7 @@ const Compiler = @This();
 
 gpa: Allocator,
 tree: Ast,
+vm: *Vm,
 current_chunk: *Chunk,
 
 pub const Error = Allocator.Error || error{
@@ -24,10 +26,11 @@ pub const Error = Allocator.Error || error{
     CompileError,
 };
 
-pub fn compile(gpa: Allocator, tree: Ast, chunk: *Chunk) !void {
+pub fn compile(gpa: Allocator, tree: Ast, vm: *Vm, chunk: *Chunk) !void {
     const compiler: Compiler = .{
         .gpa = gpa,
         .tree = tree,
+        .vm = vm,
         .current_chunk = chunk,
     };
 
@@ -84,7 +87,9 @@ inline fn currentOffset(compiler: Compiler) OpCode.Index {
 }
 
 fn number(compiler: Compiler, node: Node.Index) !void {
+    const vm = compiler.vm;
     const tree = compiler.tree;
+
     const bytes = tree.tokenSlice(tree.nodeMainToken(node));
     if (std.mem.startsWith(u8, bytes, "0x")) {
         return error.NYI;
@@ -92,33 +97,33 @@ fn number(compiler: Compiler, node: Node.Index) !void {
         try compiler.emitConstant(switch (bytes[bytes.len - 1]) {
             'b' => blk: {
                 if (bytes.len > 2) return error.NYI;
-                break :blk .boolean(bytes[0] == '1');
+                break :blk vm.createBoolean(bytes[0] == '1');
             },
-            'h' => .short(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'h' => vm.createShort(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @intCast(i),
                 else => return error.Number,
             }),
-            'i' => .int(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'i' => vm.createInt(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @intCast(i),
                 else => return error.Number,
             }),
-            'j' => .long(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'j' => vm.createLong(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @intCast(i),
                 else => return error.Number,
             }),
-            'e' => .real(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'e' => vm.createReal(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @floatFromInt(i),
                 .float => std.fmt.parseFloat(f32, bytes[0 .. bytes.len - 1]) catch return error.Number,
                 else => return error.Number,
             }),
-            'f' => .float(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'f' => vm.createFloat(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @floatFromInt(i),
                 .float => std.fmt.parseFloat(f64, bytes[0 .. bytes.len - 1]) catch return error.Number,
                 else => return error.Number,
             }),
             else => switch (std.zig.parseNumberLiteral(bytes)) {
-                .int => |i| .long(@intCast(i)),
-                .float => .float(std.fmt.parseFloat(f64, bytes) catch return error.Number),
+                .int => |i| vm.createLong(@intCast(i)),
+                .float => vm.createFloat(std.fmt.parseFloat(f64, bytes) catch return error.Number),
                 else => return error.Number,
             },
         });
@@ -126,6 +131,7 @@ fn number(compiler: Compiler, node: Node.Index) !void {
 }
 
 fn string(compiler: Compiler, node: Node.Index) !void {
+    const vm = compiler.vm;
     const tree = compiler.tree;
     const gpa = compiler.gpa;
     assert(tree.nodeTag(node) == .string_literal);
@@ -134,14 +140,15 @@ fn string(compiler: Compiler, node: Node.Index) !void {
     const bytes = tree.tokenSlice(token);
     assert(bytes.len >= 2);
     if (bytes.len == 3) {
-        try compiler.emitConstant(.char(bytes[1]));
+        try compiler.emitConstant(vm.createChar(bytes[1]));
     } else {
         const duped_slice = try gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
-        try compiler.emitConstant(.charList(duped_slice));
+        try compiler.emitConstant(vm.createCharList(duped_slice));
     }
 }
 
 fn symbol(compiler: Compiler, node: Node.Index) !void {
+    const vm = compiler.vm;
     const tree = compiler.tree;
     const gpa = compiler.gpa;
     assert(tree.nodeTag(node) == .symbol_literal);
@@ -150,26 +157,20 @@ fn symbol(compiler: Compiler, node: Node.Index) !void {
     const bytes = tree.tokenSlice(token);
     assert(bytes.len >= 1);
     if (bytes.len == 1) {
-        try compiler.emitConstant(.symbol(""));
+        try compiler.emitConstant(vm.createSymbol(""));
     } else {
         const duped_slice = try gpa.dupe(u8, bytes[1..]);
-        try compiler.emitConstant(.symbol(duped_slice));
+        try compiler.emitConstant(vm.createSymbol(duped_slice));
     }
 }
 
-inline fn binary(compiler: Compiler, op_code: OpCode, args: []const Node.Index) !void {
-    switch (args.len) {
-        0, 1 => return error.NYI,
-        2 => {
-            if (compiler.tree.nodeTag(args[1]) == .no_op) return error.NYI;
-            if (compiler.tree.nodeTag(args[0]) == .no_op) return error.NYI;
+inline fn binary(compiler: Compiler, op_code: OpCode, x: Node.Index, y: Node.Index) !void {
+    if (compiler.tree.nodeTag(y) == .no_op) return error.NYI;
+    if (compiler.tree.nodeTag(x) == .no_op) return error.NYI;
 
-            try compiler.compileNode(args[1]);
-            try compiler.compileNode(args[0]);
-            try compiler.emitByte(@intFromEnum(op_code));
-        },
-        else => return error.Rank,
-    }
+    try compiler.compileNode(y);
+    try compiler.compileNode(x);
+    try compiler.emitByte(@intFromEnum(op_code));
 }
 
 fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
@@ -251,43 +252,41 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
             const args = nodes[1..];
 
             switch (tree.nodeTag(func)) {
-                .plus => try compiler.binary(.add, args),
-                .minus => try compiler.binary(.subtract, args),
-                .asterisk => try compiler.binary(.multiply, args),
-                .percent => try compiler.binary(.divide, args),
+                .plus => switch (args.len) {
+                    // 1 => try compiler.binary(.add, args[0], null),
+                    2 => try compiler.binary(.add, args[0], args[1]),
+                    else => return error.Rank,
+                },
+                .minus => switch (args.len) {
+                    // 1 => try compiler.binary(.subtract, args[0], null),
+                    2 => try compiler.binary(.subtract, args[0], args[1]),
+                    else => return error.Rank,
+                },
+                .asterisk => switch (args.len) {
+                    // 1 => try compiler.binary(.multiply, args[0], null),
+                    2 => try compiler.binary(.multiply, args[0], args[1]),
+                    else => return error.Rank,
+                },
+                .percent => switch (args.len) {
+                    // 1 => try compiler.binary(.divide, args[0], null),
+                    2 => try compiler.binary(.divide, args[0], args[1]),
+                    else => return error.Rank,
+                },
+                .comma => switch (args.len) {
+                    // 1 => try compiler.binary(.concat, args[0], null),
+                    2 => try compiler.binary(.concat, args[0], args[1]),
+                    else => return error.Rank,
+                },
+                .at => switch (args.len) {
+                    // 1 => try compiler.binary(.apply, args[0], null),
+                    2 => try compiler.binary(.apply, args[0], args[1]),
+                    else => return error.Rank,
+                },
                 inline else => |t| @panic("NYI " ++ @tagName(t)),
             }
         },
-        .apply_unary => {
-            const op, const x = tree.nodeData(node).node_and_node;
-
-            try compiler.compileNode(x);
-            const op_index = compiler.currentOffset();
-            try compiler.compileNode(op);
-            switch (compiler.current_chunk.opCode(op_index)) {
-                .add => compiler.replaceByte(op_index, @intFromEnum(OpCode.flip)),
-                .subtract => compiler.replaceByte(op_index, @intFromEnum(OpCode.negate)),
-                .multiply => compiler.replaceByte(op_index, @intFromEnum(OpCode.first)),
-                .divide => compiler.replaceByte(op_index, @intFromEnum(OpCode.reciprocal)),
-                else => try compiler.emitByte(@intFromEnum(OpCode.apply)),
-            }
-        },
-        .apply_binary => {
-            const x, const maybe_y = tree.nodeData(node).node_and_opt_node;
-            const op: Node.Index = @enumFromInt(tree.nodeMainToken(node));
-
-            if (maybe_y.unwrap()) |y| {
-                switch (tree.nodeTag(op)) {
-                    .plus => try compiler.binary(.add, &.{ x, y }),
-                    .minus => try compiler.binary(.subtract, &.{ x, y }),
-                    .asterisk => try compiler.binary(.multiply, &.{ x, y }),
-                    .percent => try compiler.binary(.divide, &.{ x, y }),
-                    .comma => try compiler.binary(.concat, &.{ x, y }),
-                    .at => try compiler.binary(.apply, &.{ x, y }),
-                    inline else => |t| @panic("NYI " ++ @tagName(t)),
-                }
-            } else @panic("NYI");
-        },
+        .apply_unary => unreachable,
+        .apply_binary => unreachable,
 
         .number_literal => compiler.number(node),
         .number_list_literal => @panic("NYI"),
