@@ -56,50 +56,6 @@ type: ValueType,
 ref_count: u32 = 1,
 as: ValueUnion,
 
-pub inline fn boolean(value: bool) Value {
-    return .{ .type = .boolean, .as = .{ .boolean = value } };
-}
-
-pub inline fn guid(value: [16]u8) Value {
-    return .{ .type = .guid, .as = .{ .guid = value } };
-}
-
-pub inline fn byte(value: u8) Value {
-    return .{ .type = .byte, .as = .{ .byte = value } };
-}
-
-pub inline fn short(value: i16) Value {
-    return .{ .type = .short, .as = .{ .short = value } };
-}
-
-pub inline fn int(value: i32) Value {
-    return .{ .type = .int, .as = .{ .int = value } };
-}
-
-pub inline fn long(value: i64) Value {
-    return .{ .type = .long, .as = .{ .long = value } };
-}
-
-pub inline fn real(value: f32) Value {
-    return .{ .type = .real, .as = .{ .real = value } };
-}
-
-pub inline fn float(value: f64) Value {
-    return .{ .type = .float, .as = .{ .float = value } };
-}
-
-pub inline fn char(value: u8) Value {
-    return .{ .type = .char, .as = .{ .char = value } };
-}
-
-pub inline fn charList(value: []u8) Value {
-    return .{ .type = .char_list, .as = .{ .char_list = value } };
-}
-
-pub inline fn symbol(value: []u8) Value {
-    return .{ .type = .symbol, .as = .{ .symbol = value } };
-}
-
 pub fn ref(value: *Value) void {
     value.ref_count += 1;
 }

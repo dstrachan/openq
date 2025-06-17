@@ -432,7 +432,9 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         if (mem.eql(u8, buffer.items, "\\\\")) break;
 
         try buffer.append(0);
-        var tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
+        var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
+        defer orig_tree.deinit(gpa);
+        var tree = try orig_tree.normalize(gpa);
         defer tree.deinit(gpa);
 
         if (tree.errors.len > 0) continue;
