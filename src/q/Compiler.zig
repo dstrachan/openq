@@ -8,6 +8,7 @@ const Chunk = q.Chunk;
 const OpCode = q.OpCode;
 const Value = q.Value;
 const Node = Ast.Node;
+const Vm = q.Vm;
 
 const build_options = @import("build_options");
 
@@ -15,6 +16,7 @@ const Compiler = @This();
 
 gpa: Allocator,
 tree: Ast,
+vm: *Vm,
 current_chunk: *Chunk,
 
 pub const Error = Allocator.Error || error{
@@ -24,10 +26,11 @@ pub const Error = Allocator.Error || error{
     CompileError,
 };
 
-pub fn compile(gpa: Allocator, tree: Ast, chunk: *Chunk) !void {
+pub fn compile(gpa: Allocator, tree: Ast, vm: *Vm, chunk: *Chunk) !void {
     const compiler: Compiler = .{
         .gpa = gpa,
         .tree = tree,
+        .vm = vm,
         .current_chunk = chunk,
     };
 
@@ -84,7 +87,9 @@ inline fn currentOffset(compiler: Compiler) OpCode.Index {
 }
 
 fn number(compiler: Compiler, node: Node.Index) !void {
+    const vm = compiler.vm;
     const tree = compiler.tree;
+
     const bytes = tree.tokenSlice(tree.nodeMainToken(node));
     if (std.mem.startsWith(u8, bytes, "0x")) {
         return error.NYI;
@@ -92,33 +97,33 @@ fn number(compiler: Compiler, node: Node.Index) !void {
         try compiler.emitConstant(switch (bytes[bytes.len - 1]) {
             'b' => blk: {
                 if (bytes.len > 2) return error.NYI;
-                break :blk .boolean(bytes[0] == '1');
+                break :blk vm.createBoolean(bytes[0] == '1');
             },
-            'h' => .short(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'h' => vm.createShort(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @intCast(i),
                 else => return error.Number,
             }),
-            'i' => .int(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'i' => vm.createInt(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @intCast(i),
                 else => return error.Number,
             }),
-            'j' => .long(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'j' => vm.createLong(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @intCast(i),
                 else => return error.Number,
             }),
-            'e' => .real(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'e' => vm.createReal(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @floatFromInt(i),
                 .float => std.fmt.parseFloat(f32, bytes[0 .. bytes.len - 1]) catch return error.Number,
                 else => return error.Number,
             }),
-            'f' => .float(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+            'f' => vm.createFloat(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
                 .int => |i| @floatFromInt(i),
                 .float => std.fmt.parseFloat(f64, bytes[0 .. bytes.len - 1]) catch return error.Number,
                 else => return error.Number,
             }),
             else => switch (std.zig.parseNumberLiteral(bytes)) {
-                .int => |i| .long(@intCast(i)),
-                .float => .float(std.fmt.parseFloat(f64, bytes) catch return error.Number),
+                .int => |i| vm.createLong(@intCast(i)),
+                .float => vm.createFloat(std.fmt.parseFloat(f64, bytes) catch return error.Number),
                 else => return error.Number,
             },
         });
@@ -126,6 +131,7 @@ fn number(compiler: Compiler, node: Node.Index) !void {
 }
 
 fn string(compiler: Compiler, node: Node.Index) !void {
+    const vm = compiler.vm;
     const tree = compiler.tree;
     const gpa = compiler.gpa;
     assert(tree.nodeTag(node) == .string_literal);
@@ -134,14 +140,15 @@ fn string(compiler: Compiler, node: Node.Index) !void {
     const bytes = tree.tokenSlice(token);
     assert(bytes.len >= 2);
     if (bytes.len == 3) {
-        try compiler.emitConstant(.char(bytes[1]));
+        try compiler.emitConstant(vm.createChar(bytes[1]));
     } else {
         const duped_slice = try gpa.dupe(u8, bytes[1 .. bytes.len - 1]);
-        try compiler.emitConstant(.charList(duped_slice));
+        try compiler.emitConstant(vm.createCharList(duped_slice));
     }
 }
 
 fn symbol(compiler: Compiler, node: Node.Index) !void {
+    const vm = compiler.vm;
     const tree = compiler.tree;
     const gpa = compiler.gpa;
     assert(tree.nodeTag(node) == .symbol_literal);
@@ -150,10 +157,10 @@ fn symbol(compiler: Compiler, node: Node.Index) !void {
     const bytes = tree.tokenSlice(token);
     assert(bytes.len >= 1);
     if (bytes.len == 1) {
-        try compiler.emitConstant(.symbol(""));
+        try compiler.emitConstant(vm.createSymbol(""));
     } else {
         const duped_slice = try gpa.dupe(u8, bytes[1..]);
-        try compiler.emitConstant(.symbol(duped_slice));
+        try compiler.emitConstant(vm.createSymbol(duped_slice));
     }
 }
 
