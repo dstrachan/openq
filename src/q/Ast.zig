@@ -261,6 +261,139 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
     };
 }
 
+pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
+    var n = node;
+    var end_offset: u32 = 0;
+    while (true) switch (tree.nodeTag(n)) {
+        .root => return @intCast(tree.tokens.len - 1),
+        .no_op => unreachable,
+
+        .grouped_expression => return tree.nodeData(n).node_and_token[1] + end_offset,
+        .empty_list => return tree.nodeData(n).token + end_offset,
+
+        .list,
+        .expr_block,
+        => {
+            end_offset += 1; // r_paren/r_bracket
+            const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            var it = std.mem.reverseIterator(nodes[1..]);
+            n = while (it.next()) |expr| {
+                if (tree.nodeTag(expr) == .no_op) {
+                    end_offset += 1; // semicolon
+                    continue;
+                }
+                break expr;
+            } else if (tree.nodeTag(nodes[0]) != .no_op) nodes[0] else return tree.nodeMainToken(n) + end_offset;
+        },
+
+        .table_literal,
+        .function,
+        => return tree.nodeData(n).extra_and_token[1] + end_offset,
+
+        .colon,
+        .colon_colon,
+        .plus,
+        .plus_colon,
+        .minus,
+        .minus_colon,
+        .asterisk,
+        .asterisk_colon,
+        .percent,
+        .percent_colon,
+        .ampersand,
+        .ampersand_colon,
+        .pipe,
+        .pipe_colon,
+        .caret,
+        .caret_colon,
+        .equal,
+        .equal_colon,
+        .l_angle_bracket,
+        .l_angle_bracket_colon,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
+        .r_angle_bracket,
+        .r_angle_bracket_colon,
+        .r_angle_bracket_equal,
+        .dollar,
+        .dollar_colon,
+        .comma,
+        .comma_colon,
+        .hash,
+        .hash_colon,
+        .underscore,
+        .underscore_colon,
+        .tilde,
+        .tilde_colon,
+        .bang,
+        .bang_colon,
+        .question_mark,
+        .question_mark_colon,
+        .at,
+        .at_colon,
+        .dot,
+        .dot_colon,
+        .zero_colon,
+        .zero_colon_colon,
+        .one_colon,
+        .one_colon_colon,
+        .two_colon,
+        => return tree.nodeMainToken(n) + end_offset,
+
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => return tree.nodeMainToken(n) + end_offset,
+
+        .call => {
+            end_offset += 1; // r_bracket
+            const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            var it = std.mem.reverseIterator(nodes[2..]);
+            n = while (it.next()) |expr| {
+                if (tree.nodeTag(expr) == .no_op) {
+                    end_offset += 1; // semicolon
+                    continue;
+                }
+                break expr;
+            } else if (tree.nodeTag(nodes[1]) != .no_op) nodes[1] else return tree.nodeMainToken(n) + end_offset;
+        },
+        .apply_unary => n = tree.nodeData(n).node_and_node[1],
+        .apply_binary => n = tree.nodeData(n).node_and_opt_node[1].unwrap() orelse @enumFromInt(tree.nodeMainToken(n)),
+
+        .number_literal,
+        .string_literal,
+        .symbol_literal,
+        .identifier,
+        .builtin,
+        => return tree.nodeMainToken(n) + end_offset,
+
+        .number_list_literal,
+        .symbol_list_literal,
+        => return tree.nodeData(n).token + end_offset,
+
+        inline .select, .exec, .update, .delete_rows => |t| {
+            const sql = tree.extraData(tree.nodeData(n).extra, switch (t) {
+                .select => Node.Select,
+                .exec => Node.Exec,
+                .update => Node.Update,
+                .delete_rows => Node.DeleteRows,
+                else => unreachable,
+            });
+            n = if (sql.where_end != sql.where_start) blk: {
+                const nodes = tree.extraDataSlice(.{
+                    .start = sql.where_start,
+                    .end = sql.where_end,
+                }, Node.Index);
+                break :blk nodes[nodes.len - 1];
+            } else sql.from;
+        },
+        .delete_cols => n = tree.extraData(tree.nodeData(n).extra, Node.DeleteCols).from,
+    };
+}
+
 /// Index into `extra_data`.
 pub const ExtraIndex = enum(u32) {
     _,
