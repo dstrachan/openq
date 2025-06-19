@@ -64,8 +64,8 @@ pub fn nodeData(tree: *const Ast, node: Node.Index) Node.Data {
     return tree.nodes.items(.data)[@intFromEnum(node)];
 }
 
-const Location = std.zig.Ast.Location;
-const Span = std.zig.Ast.Span;
+pub const Location = std.zig.Ast.Location;
+pub const Span = std.zig.Ast.Span;
 
 pub fn deinit(tree: *Ast, gpa: Allocator) void {
     tree.tokens.deinit(gpa);
@@ -165,6 +165,56 @@ pub fn extraData(tree: Ast, index: ExtraIndex, comptime T: type) T {
 
 pub fn rootStatements(tree: Ast) []const Node.Index {
     return tree.extraDataSlice(tree.nodeData(.root).extra_range, Node.Index);
+}
+
+pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
+    switch (parse_error.tag) {
+        .expected_expr => {
+            return stream.print("expected expression, found '{s}'", .{
+                tree.tokenTag(parse_error.token).symbol(),
+            });
+        },
+        .expected_infix_expr => {
+            return stream.print("expected infix expression, found '{s}'", .{
+                tree.tokenTag(parse_error.token).symbol(),
+            });
+        },
+        .expected_token => {
+            const found_tag = tree.tokenTag(parse_error.token);
+            const expected_symbol = parse_error.extra.expected_tag.symbol();
+            switch (found_tag) {
+                .invalid => return stream.print("expected '{s}', found invalid bytes", .{
+                    expected_symbol,
+                }),
+                else => return stream.print("expected '{s}', found '{s}'", .{
+                    expected_symbol, found_tag.symbol(),
+                }),
+            }
+        },
+        .expected_qsql_token => {
+            const found_tag = tree.tokenTag(parse_error.token);
+            const expected_string = parse_error.extra.expected_string;
+            switch (found_tag) {
+                .invalid => return stream.print("expected '{s}', found invalid bytes", .{
+                    expected_string,
+                }),
+                else => return stream.print("expected '{s}', found '{s}'", .{
+                    expected_string, found_tag.symbol(),
+                }),
+            }
+        },
+        .invalid_byte => {
+            const tok_slice = tree.source[tree.tokenStart(parse_error.token)..];
+            return stream.print("{s} contains invalid byte: '{'}'", .{
+                switch (tok_slice[0]) {
+                    '"' => "string literal",
+                    '/' => "comment",
+                    else => "token",
+                },
+                std.zig.fmtEscapes(tok_slice[parse_error.extra.offset..][0..1]),
+            });
+        },
+    }
 }
 
 pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
@@ -393,6 +443,37 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         .delete_cols => n = tree.extraData(tree.nodeData(n).extra, Node.DeleteCols).from,
     };
 }
+
+pub fn tokensOnSameLine(tree: Ast, token1: TokenIndex, token2: TokenIndex) bool {
+    const source = tree.source[tree.tokenStart(token1)..tree.tokenStart(token2)];
+    return std.mem.indexOfScalar(u8, source, '\n') == null;
+}
+
+pub const Error = struct {
+    tag: Tag,
+    is_note: bool = false,
+    token: TokenIndex,
+    extra: union {
+        none: void,
+        expected_tag: Token.Tag,
+        expected_string: []const u8,
+        offset: usize,
+    } = .{ .none = {} },
+
+    pub const Tag = enum {
+        expected_expr,
+        expected_infix_expr,
+
+        /// `expected_tag` is populated.
+        expected_token,
+
+        /// `expected_string` is populated.
+        expected_qsql_token,
+
+        /// `offset` is populated
+        invalid_byte,
+    };
+};
 
 /// Index into `extra_data`.
 pub const ExtraIndex = enum(u32) {
@@ -821,27 +902,37 @@ pub const Node = struct {
     };
 };
 
-pub const Error = struct {
-    tag: Tag,
-    is_note: bool = false,
-    token: TokenIndex,
-    extra: union {
-        none: void,
-        expected_tag: Token.Tag,
-        expected_string: []const u8,
-    } = .{ .none = {} },
+pub fn nodeToSpan(tree: *const Ast, node: Ast.Node.Index) Span {
+    return tokensToSpan(
+        tree,
+        tree.firstToken(node),
+        tree.lastToken(node),
+        tree.nodeMainToken(node),
+    );
+}
 
-    pub const Tag = enum {
-        expected_expr,
-        expected_infix_expr,
+pub fn tokenToSpan(tree: *const Ast, token: Ast.TokenIndex) Span {
+    return tokensToSpan(tree, token, token, token);
+}
 
-        /// `expected_tag` is populated.
-        expected_token,
+pub fn tokensToSpan(tree: *const Ast, start: Ast.TokenIndex, end: Ast.TokenIndex, main: Ast.TokenIndex) Span {
+    var start_tok = start;
+    var end_tok = end;
 
-        /// `expected_string` is populated.
-        expected_qsql_token,
-    };
-};
+    if (tree.tokensOnSameLine(start, end)) {
+        // do nothing
+    } else if (tree.tokensOnSameLine(start, main)) {
+        end_tok = main;
+    } else if (tree.tokensOnSameLine(main, end)) {
+        start_tok = main;
+    } else {
+        start_tok = main;
+        end_tok = main;
+    }
+    const start_off = tree.tokenStart(start_tok);
+    const end_off = tree.tokenStart(end_tok) + @as(u32, @intCast(tree.tokenSlice(end_tok).len));
+    return .{ .start = start_off, .end = end_off, .main = tree.tokenStart(main) };
+}
 
 test {
     const gpa = std.testing.allocator;
