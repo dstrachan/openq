@@ -187,6 +187,20 @@ pub const Token = struct {
             };
         }
 
+        pub fn symbol(tag: Tag) []const u8 {
+            return tag.lexeme() orelse switch (tag) {
+                .number_literal => "a number literal",
+                .string_literal => "string literal",
+                .symbol_literal => "symbol literal",
+                .identifier => "identifier",
+                .system => "system command",
+                .invalid => "invalid token",
+                .eos => "end of statement",
+                .eof => "end of file",
+                else => unreachable,
+            };
+        }
+
         pub fn isNextMinus(tag: Tag) bool {
             return switch (tag) {
                 .r_paren,
