@@ -74,41 +74,42 @@ const Statements = struct {
     len: usize,
     data: Node.Data,
 
-    fn toSpan(self: Statements, p: *Parse) !Node.SubRange {
+    fn toSpan(self: Statements, p: anytype) !Node.SubRange {
         return switch (self.len) {
-            0 => p.listToSpan(&.{}),
-            1 => p.listToSpan(&.{self.data.opt_node_and_opt_node[0].unwrap().?}),
-            2 => p.listToSpan(&.{ self.data.opt_node_and_opt_node[0].unwrap().?, self.data.opt_node_and_opt_node[1].unwrap().? }),
+            0 => listToSpan(p, &.{}),
+            1 => listToSpan(p, &.{self.data.opt_node_and_opt_node[0].unwrap().?}),
+            2 => listToSpan(p, &.{ self.data.opt_node_and_opt_node[0].unwrap().?, self.data.opt_node_and_opt_node[1].unwrap().? }),
             else => self.data.extra_range,
         };
     }
 };
 
-fn listToSpan(p: *Parse, list: []const Node.Index) !Node.SubRange {
+fn listToSpan(p: anytype, list: []const Node.Index) !Node.SubRange {
     try p.extra_data.appendSlice(p.gpa, @ptrCast(list));
     return .{
         .start = @enumFromInt(p.extra_data.items.len - list.len),
         .end = @enumFromInt(p.extra_data.items.len),
     };
 }
-fn addNode(p: *Parse, elem: Ast.Node) Allocator.Error!Node.Index {
+
+fn addNode(p: anytype, elem: Ast.Node) Allocator.Error!Node.Index {
     const result: Node.Index = @enumFromInt(p.nodes.len);
     try p.nodes.append(p.gpa, elem);
     return result;
 }
 
-fn setNode(p: *Parse, i: usize, elem: Ast.Node) Node.Index {
+fn setNode(p: anytype, i: usize, elem: Ast.Node) Node.Index {
     p.nodes.set(i, elem);
     return @enumFromInt(i);
 }
 
-fn reserveNode(p: *Parse, tag: Ast.Node.Tag) !usize {
+fn reserveNode(p: anytype, tag: Ast.Node.Tag) !usize {
     try p.nodes.resize(p.gpa, p.nodes.len + 1);
     p.nodes.items(.tag)[p.nodes.len - 1] = tag;
     return p.nodes.len - 1;
 }
 
-fn unreserveNode(p: *Parse, node_index: usize) void {
+fn unreserveNode(p: anytype, node_index: usize) void {
     if (p.nodes.len == node_index) {
         p.nodes.resize(p.gpa, p.nodes.len - 1) catch unreachable;
     } else {
@@ -1154,6 +1155,248 @@ fn skipStatement(p: *Parse) void {
     }
     _ = p.nextToken();
 }
+
+pub const Normalize = struct {
+    gpa: Allocator,
+    source: [:0]const u8,
+    tokens: Ast.TokenList.Slice,
+    nodes: Ast.NodeList,
+    extra_data: std.ArrayListUnmanaged(u32),
+    scratch: std.ArrayListUnmanaged(Node.Index),
+    tree: Ast,
+
+    pub fn deinit(p: *Normalize) void {
+        p.nodes.deinit(p.gpa);
+        p.extra_data.deinit(p.gpa);
+        p.scratch.deinit(p.gpa);
+    }
+
+    pub fn normalize(p: *Normalize) !void {
+        // Root node must be index 0.
+        p.nodes.appendAssumeCapacity(.{
+            .tag = .root,
+            .main_token = 0,
+            .data = undefined,
+        });
+        const statements = try p.normalizeStatements();
+        p.nodes.items(.data)[0] = .{ .extra_range = try statements.toSpan(p) };
+    }
+
+    fn normalizeStatements(p: *Normalize) !Statements {
+        const scratch_top = p.scratch.items.len;
+        defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+        const statements = p.tree.rootStatements();
+        try p.scratch.ensureUnusedCapacity(p.gpa, statements.len);
+
+        for (statements) |node| {
+            p.scratch.appendAssumeCapacity(try p.normalizeNode(node));
+        }
+
+        const items = p.scratch.items[scratch_top..];
+        return .{
+            .len = items.len,
+            .data = switch (items.len) {
+                0, 1, 2 => .{ .opt_node_and_opt_node = .{
+                    if (items.len >= 1) items[0].toOptional() else .none,
+                    if (items.len >= 2) items[1].toOptional() else .none,
+                } },
+                else => .{ .extra_range = try listToSpan(p, items) },
+            },
+        };
+    }
+
+    fn normalizeNode(p: *Normalize, node: Node.Index) !Node.Index {
+        const tree = p.tree;
+        switch (tree.nodeTag(node)) {
+            .root => unreachable,
+            .no_op => return addNode(p, .{
+                .tag = .no_op,
+                .main_token = undefined,
+                .data = undefined,
+            }),
+
+            .grouped_expression => return p.normalizeNode(tree.nodeData(node).node_and_token[0]),
+            .empty_list => return addNode(p, .{
+                .tag = .empty_list,
+                .main_token = tree.nodeMainToken(node),
+                .data = .{ .token = tree.nodeData(node).token },
+            }),
+            .list => @panic("NYI"),
+            .table_literal => @panic("NYI"),
+
+            .function => @panic("NYI"),
+
+            .expr_block => @panic("NYI"),
+
+            .colon,
+            .colon_colon,
+            .plus,
+            .plus_colon,
+            .minus,
+            .minus_colon,
+            .asterisk,
+            .asterisk_colon,
+            .percent,
+            .percent_colon,
+            .ampersand,
+            .ampersand_colon,
+            .pipe,
+            .pipe_colon,
+            .caret,
+            .caret_colon,
+            .equal,
+            .equal_colon,
+            .l_angle_bracket,
+            .l_angle_bracket_colon,
+            .l_angle_bracket_equal,
+            .l_angle_bracket_r_angle_bracket,
+            .r_angle_bracket,
+            .r_angle_bracket_colon,
+            .r_angle_bracket_equal,
+            .dollar,
+            .dollar_colon,
+            .comma,
+            .comma_colon,
+            .hash,
+            .hash_colon,
+            .underscore,
+            .underscore_colon,
+            .tilde,
+            .tilde_colon,
+            .bang,
+            .bang_colon,
+            .question_mark,
+            .question_mark_colon,
+            .at,
+            .at_colon,
+            .dot,
+            .dot_colon,
+            .zero_colon,
+            .zero_colon_colon,
+            .one_colon,
+            .one_colon_colon,
+            .two_colon,
+            => |t| return addNode(p, .{
+                .tag = t,
+                .main_token = tree.nodeMainToken(node),
+                .data = undefined,
+            }),
+
+            .apostrophe,
+            .apostrophe_colon,
+            .slash,
+            .slash_colon,
+            .backslash,
+            .backslash_colon,
+            => |t| {
+                const maybe_lhs = tree.nodeData(node).opt_node;
+
+                const opt_node = if (maybe_lhs.unwrap()) |lhs| try p.normalizeNode(lhs) else null;
+                return addNode(p, .{
+                    .tag = t,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .opt_node = .fromOptional(opt_node) },
+                });
+            },
+
+            .call => {
+                const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+
+                const call_index = try reserveNode(p, .call);
+                errdefer unreserveNode(p, call_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                try p.scratch.ensureUnusedCapacity(p.gpa, nodes.len);
+                for (nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const args = p.scratch.items[scratch_top..];
+                return setNode(p, call_index, .{
+                    .tag = .call,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra_range = try listToSpan(p, args) },
+                });
+            },
+            .apply_unary => {
+                const lhs, const rhs = tree.nodeData(node).node_and_node;
+
+                const call_index = try reserveNode(p, .call);
+                errdefer unreserveNode(p, call_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                try p.scratch.ensureUnusedCapacity(p.gpa, 2);
+                p.scratch.appendAssumeCapacity(try p.normalizeNode(lhs));
+                p.scratch.appendAssumeCapacity(try p.normalizeNode(rhs));
+
+                const args = p.scratch.items[scratch_top..];
+                return setNode(p, call_index, .{
+                    .tag = .call,
+                    .main_token = undefined,
+                    .data = .{ .extra_range = try listToSpan(p, args) },
+                });
+            },
+            .apply_binary => {
+                const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
+                const op: Node.Index = @enumFromInt(tree.nodeMainToken(node));
+
+                const call_index = try reserveNode(p, .call);
+                errdefer unreserveNode(p, call_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                try p.scratch.ensureUnusedCapacity(p.gpa, 3);
+                p.scratch.appendAssumeCapacity(try p.normalizeNode(op));
+                p.scratch.appendAssumeCapacity(try p.normalizeNode(lhs));
+                if (maybe_rhs.unwrap()) |rhs| {
+                    p.scratch.appendAssumeCapacity(try p.normalizeNode(rhs));
+                } else {
+                    p.scratch.appendAssumeCapacity(try addNode(p, .{
+                        .tag = .no_op,
+                        .main_token = undefined,
+                        .data = undefined,
+                    }));
+                }
+
+                const args = p.scratch.items[scratch_top..];
+                return setNode(p, call_index, .{
+                    .tag = .call,
+                    .main_token = undefined,
+                    .data = .{ .extra_range = try listToSpan(p, args) },
+                });
+            },
+
+            .number_literal,
+            .string_literal,
+            .symbol_literal,
+            .identifier,
+            .builtin,
+            => |t| return addNode(p, .{
+                .tag = t,
+                .main_token = tree.nodeMainToken(node),
+                .data = undefined,
+            }),
+
+            .number_list_literal,
+            .symbol_list_literal,
+            => |t| return addNode(p, .{
+                .tag = t,
+                .main_token = tree.nodeMainToken(node),
+                .data = .{ .token = tree.nodeData(node).token },
+            }),
+
+            .select => @panic("NYI"),
+            .exec => @panic("NYI"),
+            .update => @panic("NYI"),
+            .delete_rows => @panic("NYI"),
+            .delete_cols => @panic("NYI"),
+        }
+    }
+};
 
 fn testParse(
     source: [:0]const u8,

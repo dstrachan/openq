@@ -123,6 +123,40 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Allocator.Error!Ast {
     };
 }
 
+pub fn normalize(tree: Ast, gpa: Allocator) !Ast {
+    assert(tree.errors.len == 0);
+
+    var tokens = try tree.tokens.toMultiArrayList().clone(gpa);
+    errdefer tokens.deinit(gpa);
+
+    var parser: Parse.Normalize = .{
+        .gpa = gpa,
+        .source = tree.source,
+        .tokens = tokens.slice(),
+        .nodes = .empty,
+        .extra_data = .empty,
+        .scratch = .empty,
+        .tree = tree,
+    };
+    defer parser.deinit();
+
+    // TODO: How many nodes can we reduce by?
+    try parser.nodes.ensureTotalCapacity(gpa, tree.nodes.len);
+
+    try parser.normalize();
+
+    const extra_data = try parser.extra_data.toOwnedSlice(gpa);
+    errdefer comptime unreachable;
+
+    return .{
+        .source = tree.source,
+        .tokens = tokens.toOwnedSlice(),
+        .nodes = parser.nodes.toOwnedSlice(),
+        .extra_data = extra_data,
+        .errors = &.{},
+    };
+}
+
 pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
     const token_tag = tree.tokenTag(token_index);
 
@@ -936,6 +970,16 @@ pub fn tokensToSpan(tree: *const Ast, start: Ast.TokenIndex, end: Ast.TokenIndex
 
 test {
     const gpa = std.testing.allocator;
-    var tree: Ast = try .parse(gpa, "3*4+5");
-    defer tree.deinit(gpa);
+
+    var tree1: Ast = try .parse(gpa, "3*4+5");
+    defer tree1.deinit(gpa);
+    var tree1_normalized = try tree1.normalize(gpa);
+    defer tree1_normalized.deinit(gpa);
+
+    var tree2: Ast = try .parse(gpa, "*[3;+[4;5]]");
+    defer tree2.deinit(gpa);
+    var tree2_normalized = try tree2.normalize(gpa);
+    defer tree2_normalized.deinit(gpa);
+
+    try std.testing.expectEqualSlices(Node.Tag, tree1_normalized.nodes.items(.tag), tree2_normalized.nodes.items(.tag));
 }
