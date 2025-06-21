@@ -188,12 +188,14 @@ const usage_parse =
     \\
     \\  -h, --help             Print this help and exit
     \\  --color [auto|off|on]  Enable or disable colored error messages
+    \\  --normalize            Normalize AST
     \\
 ;
 
 fn cmdParse(arena: Allocator, args: []const []const u8) !void {
     var color: std.zig.Color = .auto;
     var q_source_path: ?[]const u8 = null;
+    var normalize = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -211,6 +213,8 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
                 color = std.meta.stringToEnum(std.zig.Color, next_arg) orelse {
                     fatal("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
                 };
+            } else if (mem.eql(u8, arg, "--normalize")) {
+                normalize = true;
             } else {
                 fatal("unrecognized parameter: '{s}'", .{arg});
             }
@@ -234,7 +238,10 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
         };
     };
 
-    const tree: Ast = try .parse(arena, source);
+    const tree: Ast = tree: {
+        const tree: Ast = try .parse(arena, source);
+        break :tree if (normalize) try tree.normalize(arena) else tree;
+    };
     const writer = io.getStdOut().writer().any();
     try utils.writeJsonNode(writer, tree, .root);
 
