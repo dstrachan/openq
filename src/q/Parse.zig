@@ -1229,7 +1229,25 @@ pub const Normalize = struct {
                 .main_token = tree.nodeMainToken(node),
                 .data = .{ .token = tree.nodeData(node).token },
             }),
-            .list => @panic("NYI"),
+            .list => {
+                const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+
+                const list_index = try reserveNode(p, .list);
+                errdefer unreserveNode(p, list_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                try p.scratch.ensureUnusedCapacity(p.gpa, nodes.len);
+                for (node) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const list = p.scratch.items[scratch_top..];
+                return setNode(p, list_index, .{
+                    .tag = .list,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra_range = try listToSpan(p, list) },
+                });
+            },
             .table_literal => @panic("NYI"),
 
             .function => {
@@ -1453,6 +1471,7 @@ pub const Normalize = struct {
                 .main_token = tree.nodeMainToken(node),
                 .data = undefined,
             }),
+
             .identifier,
             => {
                 const token = tree.nodeMainToken(node);
