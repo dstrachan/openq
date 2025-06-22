@@ -117,7 +117,7 @@ fn unreserveNode(p: anytype, node_index: usize) void {
     }
 }
 
-fn addExtra(p: *Parse, extra: anytype) Allocator.Error!ExtraIndex {
+fn addExtra(p: anytype, extra: anytype) Allocator.Error!ExtraIndex {
     const fields = std.meta.fields(@TypeOf(extra));
     try p.extra_data.ensureUnusedCapacity(p.gpa, fields.len);
     const result: ExtraIndex = @enumFromInt(p.extra_data.items.len);
@@ -1164,6 +1164,13 @@ pub const Normalize = struct {
     extra_data: std.ArrayListUnmanaged(u32),
     scratch: std.ArrayListUnmanaged(Node.Index),
     tree: Ast,
+    extra: packed struct(u8) {
+        in_function: bool = false,
+        found_x: bool = false,
+        found_y: bool = false,
+        found_z: bool = false,
+        _: u4 = 0,
+    } = .{},
 
     pub fn deinit(p: *Normalize) void {
         p.nodes.deinit(p.gpa);
@@ -1225,7 +1232,74 @@ pub const Normalize = struct {
             .list => @panic("NYI"),
             .table_literal => @panic("NYI"),
 
-            .function => @panic("NYI"),
+            .function => {
+                const extra, const r_brace = tree.nodeData(node).extra_and_token;
+                const old_function = tree.extraData(extra, Node.Function);
+
+                const function_index = try reserveNode(p, .function);
+                errdefer unreserveNode(p, function_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                const old_params = tree.extraDataSlice(.{
+                    .start = old_function.params_start,
+                    .end = old_function.body_start,
+                }, Node.Index);
+                const old_body = tree.extraDataSlice(.{
+                    .start = old_function.body_start,
+                    .end = old_function.body_end,
+                }, Node.Index);
+                try p.scratch.ensureUnusedCapacity(p.gpa, old_params.len + old_body.len);
+
+                const prev_extra = p.extra;
+                defer p.extra = prev_extra;
+                p.extra = .{ .in_function = true };
+
+                const body_top = p.scratch.items.len;
+                for (old_body) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const params_top = p.scratch.items.len;
+                if (tree.tokenTag(tree.nodeMainToken(node) + 1) != .l_bracket) {
+                    if (p.extra.found_x or p.extra.found_y or p.extra.found_z) p.scratch.appendAssumeCapacity(
+                        try addNode(p, .{
+                            .tag = .identifier,
+                            .main_token = @intFromEnum(OptionalTokenIndex.none),
+                            .data = undefined,
+                        }),
+                    );
+                    if (p.extra.found_y or p.extra.found_z) p.scratch.appendAssumeCapacity(
+                        try addNode(p, .{
+                            .tag = .identifier,
+                            .main_token = @intFromEnum(OptionalTokenIndex.none),
+                            .data = undefined,
+                        }),
+                    );
+                    if (p.extra.found_z) p.scratch.appendAssumeCapacity(
+                        try addNode(p, .{
+                            .tag = .identifier,
+                            .main_token = @intFromEnum(OptionalTokenIndex.none),
+                            .data = undefined,
+                        }),
+                    );
+                } else for (old_params) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const params = try listToSpan(p, p.scratch.items[params_top..]);
+                const body = try listToSpan(p, p.scratch.items[body_top..params_top]);
+                const function: Node.Function = .{
+                    .params_start = params.start,
+                    .body_start = body.start,
+                    .body_end = body.end,
+                };
+                return setNode(p, function_index, .{
+                    .tag = .function,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra_and_token = .{
+                        try addExtra(p, function),
+                        r_brace,
+                    } },
+                });
+            },
 
             .expr_block => @panic("NYI"),
 
@@ -1373,13 +1447,31 @@ pub const Normalize = struct {
             .number_literal,
             .string_literal,
             .symbol_literal,
-            .identifier,
             .builtin,
             => |t| return addNode(p, .{
                 .tag = t,
                 .main_token = tree.nodeMainToken(node),
                 .data = undefined,
             }),
+            .identifier,
+            => {
+                const token = tree.nodeMainToken(node);
+                if (p.extra.in_function) {
+                    const slice = tree.tokenSlice(token);
+                    if (std.mem.eql(u8, slice, "x")) {
+                        p.extra.found_x = true;
+                    } else if (std.mem.eql(u8, slice, "y")) {
+                        p.extra.found_y = true;
+                    } else if (std.mem.eql(u8, slice, "z")) {
+                        p.extra.found_z = true;
+                    }
+                }
+                return addNode(p, .{
+                    .tag = .identifier,
+                    .main_token = token,
+                    .data = undefined,
+                });
+            },
 
             .number_list_literal,
             .symbol_list_literal,
