@@ -1239,7 +1239,7 @@ pub const Normalize = struct {
                 defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
                 try p.scratch.ensureUnusedCapacity(p.gpa, nodes.len);
-                for (node) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+                for (nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
 
                 const list = p.scratch.items[scratch_top..];
                 return setNode(p, list_index, .{
@@ -1319,7 +1319,25 @@ pub const Normalize = struct {
                 });
             },
 
-            .expr_block => @panic("NYI"),
+            .expr_block => {
+                const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+
+                const block_index = try reserveNode(p, .expr_block);
+                errdefer unreserveNode(p, block_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                try p.scratch.ensureUnusedCapacity(p.gpa, nodes.len);
+                for (nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const list = p.scratch.items[scratch_top..];
+                return setNode(p, block_index, .{
+                    .tag = .expr_block,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra_range = try listToSpan(p, list) },
+                });
+            },
 
             .colon,
             .colon_colon,
