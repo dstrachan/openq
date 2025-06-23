@@ -1454,7 +1454,9 @@ pub const Normalize = struct {
                 defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
                 try p.scratch.ensureUnusedCapacity(p.gpa, nodes.len);
-                for (nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+                for (nodes) |n| if (tree.nodeTag(n) != .no_op) {
+                    p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+                };
 
                 const list = p.scratch.items[scratch_top..];
                 return setNode(p, block_index, .{
@@ -2185,4 +2187,15 @@ test "AST normalize - implicit function parameters are added in sql from clause"
 test "AST normalize - implicit function parameters are added in table literals" {
     try testNormalize("{([]z:x)}", "{[x]([]z:x)}");
     try testNormalize("{([z:x]a:b)}", "{[x]([z:x]a:b)}");
+}
+
+test "AST normalize - blocks have empty nodes removed" {
+    try testNormalize("[x;y;z]", "[x;y;z]");
+    try testNormalize("[x;y; ]", "[x;y]");
+    try testNormalize("[x; ;z]", "[x;z]");
+    try testNormalize("[x; ; ]", "[x]");
+    try testNormalize("[ ;y;z]", "[y;z]");
+    try testNormalize("[ ;y; ]", "[y]");
+    try testNormalize("[ ; ;z]", "[z]");
+    try testNormalize("[ ; ; ]", "[]");
 }
