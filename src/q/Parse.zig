@@ -714,10 +714,12 @@ fn parseBlock(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    while (true) {
-        const expr = try p.parseExpression(null);
-        if (expr.unwrap()) |node| try p.scratch.append(p.gpa, node);
-        _ = p.eatToken(.semicolon) orelse break;
+    if (p.tokenTag(p.tok_i) != .r_bracket) {
+        while (true) {
+            const expr = try p.parseExpression(null);
+            try p.scratch.append(p.gpa, expr.unwrap() orelse try p.noOp());
+            _ = p.eatToken(.semicolon) orelse break;
+        }
     }
     _ = try p.expectToken(.r_bracket);
 

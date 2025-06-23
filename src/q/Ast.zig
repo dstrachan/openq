@@ -157,6 +157,12 @@ pub fn normalize(tree: Ast, gpa: Allocator) !Ast {
     };
 }
 
+pub fn nodeSlice(tree: Ast, node: Node.Index) []const u8 {
+    const first_token = tree.firstToken(node);
+    const last_token = tree.lastToken(node);
+    return tree.source[tree.tokenStart(first_token) .. tree.tokenStart(last_token) + tree.tokenSlice(last_token).len];
+}
+
 pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
     const token_tag = tree.tokenTag(token_index);
 
@@ -356,9 +362,8 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         .empty_list => return tree.nodeData(n).token + end_offset,
 
         .list,
-        .expr_block,
         => {
-            end_offset += 1; // r_paren/r_bracket
+            end_offset += 1; // r_paren
             const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
             var it = std.mem.reverseIterator(nodes[1..]);
             n = while (it.next()) |expr| {
@@ -373,6 +378,21 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         .table_literal,
         .function,
         => return tree.nodeData(n).extra_and_token[1] + end_offset,
+
+        .expr_block,
+        => {
+            end_offset += 1; // r_bracket
+            const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            if (nodes.len == 0) return tree.nodeMainToken(n) + end_offset;
+            var it = std.mem.reverseIterator(nodes[1..]);
+            n = while (it.next()) |expr| {
+                if (tree.nodeTag(expr) == .no_op) {
+                    end_offset += 1; // semicolon
+                    continue;
+                }
+                break expr;
+            } else if (tree.nodeTag(nodes[0]) != .no_op) nodes[0] else return tree.nodeMainToken(n) + end_offset;
+        },
 
         .colon,
         .colon_colon,
@@ -435,6 +455,7 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         .call => {
             end_offset += 1; // r_bracket
             const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            if (nodes.len == 1) return tree.nodeMainToken(n) + end_offset;
             var it = std.mem.reverseIterator(nodes[2..]);
             n = while (it.next()) |expr| {
                 if (tree.nodeTag(expr) == .no_op) {
@@ -966,4 +987,71 @@ pub fn tokensToSpan(tree: *const Ast, start: Ast.TokenIndex, end: Ast.TokenIndex
     const start_off = tree.tokenStart(start_tok);
     const end_off = tree.tokenStart(end_tok) + @as(u32, @intCast(tree.tokenSlice(end_tok).len));
     return .{ .start = start_off, .end = end_off, .main = tree.tokenStart(main) };
+}
+
+fn testFirstLast(source: [:0]const u8, node: Node.Index, expected_tag: Node.Tag) !void {
+    const gpa = std.testing.allocator;
+    var tree: Ast = try .parse(gpa, source);
+    defer tree.deinit(gpa);
+
+    try std.testing.expectEqual(expected_tag, tree.nodeTag(node));
+
+    try std.testing.expectEqualStrings(source[0..1], tree.tokenSlice(tree.firstToken(node)));
+    try std.testing.expectEqualStrings(source[source.len - 1 ..], tree.tokenSlice(tree.lastToken(node)));
+    try std.testing.expectEqualStrings(source, tree.nodeSlice(node));
+}
+
+test "first/last token call" {
+    try testFirstLast("f[]", @enumFromInt(2), .call);
+
+    try testFirstLast("f[x]", @enumFromInt(2), .call);
+
+    try testFirstLast("f[x;y]", @enumFromInt(2), .call);
+    try testFirstLast("f[x; ]", @enumFromInt(2), .call);
+    try testFirstLast("f[ ;y]", @enumFromInt(2), .call);
+    try testFirstLast("f[ ; ]", @enumFromInt(2), .call);
+}
+
+test "first/last token list" {
+    try testFirstLast("(x;y)", @enumFromInt(1), .list);
+    try testFirstLast("(x; )", @enumFromInt(1), .list);
+    try testFirstLast("( ;y)", @enumFromInt(1), .list);
+    try testFirstLast("( ; )", @enumFromInt(1), .list);
+    try testFirstLast("(x;y)", @enumFromInt(1), .list);
+    try testFirstLast("(x; )", @enumFromInt(1), .list);
+    try testFirstLast("( ;y)", @enumFromInt(1), .list);
+    try testFirstLast("( ; )", @enumFromInt(1), .list);
+
+    try testFirstLast("(x;y;z)", @enumFromInt(1), .list);
+    try testFirstLast("(x;y; )", @enumFromInt(1), .list);
+    try testFirstLast("(x; ;z)", @enumFromInt(1), .list);
+    try testFirstLast("(x; ; )", @enumFromInt(1), .list);
+    try testFirstLast("( ;y;z)", @enumFromInt(1), .list);
+    try testFirstLast("( ;y; )", @enumFromInt(1), .list);
+    try testFirstLast("( ; ;z)", @enumFromInt(1), .list);
+    try testFirstLast("( ; ; )", @enumFromInt(1), .list);
+}
+
+test "first/last token expr_block" {
+    try testFirstLast("[]", @enumFromInt(1), .expr_block);
+
+    try testFirstLast("[x]", @enumFromInt(1), .expr_block);
+
+    try testFirstLast("[x;y]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[x; ]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ;y]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ; ]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[x;y]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[x; ]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ;y]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ; ]", @enumFromInt(1), .expr_block);
+
+    try testFirstLast("[x;y;z]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[x;y; ]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[x; ;z]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[x; ; ]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ;y;z]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ;y; ]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ; ;z]", @enumFromInt(1), .expr_block);
+    try testFirstLast("[ ; ; ]", @enumFromInt(1), .expr_block);
 }
