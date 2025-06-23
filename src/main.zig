@@ -13,6 +13,7 @@ const Token = q.Token;
 const Tokenizer = q.Tokenizer;
 const Ast = q.Ast;
 const AstGen = q.AstGen;
+const Qir = q.Qir;
 
 const utils = @import("utils.zig");
 
@@ -305,9 +306,61 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
         };
     };
 
-    const tree: Ast = try .parse(arena, source);
+    const orig_tree: Ast = try .parse(arena, source);
+    const tree: Ast = try orig_tree.normalize(arena);
     if (tree.errors.len > 0) {
         try utils.printAstErrorsToStderr(arena, tree, display_path, color);
+    } else {
+        const qir = try AstGen.generate(arena, tree);
+        if (qir.hasCompileErrors()) {
+            var wip_errors: std.zig.ErrorBundle.Wip = undefined;
+            try wip_errors.init(arena);
+            try utils.addQirErrorMessages(&wip_errors, qir, tree, display_path);
+            var error_bundle = try wip_errors.toOwnedBundle("");
+            error_bundle.renderToStdErr(color.renderOptions());
+            if (qir.loweringFailed()) {
+                process.exit(1);
+            }
+        }
+
+        {
+            const token_bytes = @sizeOf(Ast.TokenList) +
+                tree.tokens.len * (@sizeOf(Token.Tag) + @sizeOf(Ast.ByteOffset));
+            const tree_bytes = @sizeOf(Ast) + tree.nodes.len * (@sizeOf(Ast.Node.Tag) + @sizeOf(Ast.TokenIndex) +
+                // Here we don't use @sizeOf(Ast.Node.Data) because it would include
+                // the debug safety tag but we want to measure release size.
+                8);
+            const instruction_bytes = qir.instructions.len *
+                // Here we don't use @sizeOf(Qir.Inst.Data) because it would include
+                // the debug safety tag but we want to measure release size.
+                (@sizeOf(Qir.Inst.Tag) + 8);
+            const extra_bytes = qir.extra.len * @sizeOf(u32);
+            const total_bytes = @sizeOf(Qir) + instruction_bytes + extra_bytes + qir.string_bytes.len * @sizeOf(u8);
+            const stdout = io.getStdOut();
+            const fmtIntSizeBin = std.fmt.fmtIntSizeBin;
+            try stdout.writer().print(
+                \\# Source bytes:       {}
+                \\# Tokens:             {} ({})
+                \\# AST nodes:          {} ({})
+                \\# Total QIR bytes:    {}
+                \\# Instructions:       {d} ({})
+                \\# String table bytes: {}
+                \\# Extra data items:   {d} ({})
+                \\
+            , .{
+                // zig fmt: off
+                fmtIntSizeBin(source.len),
+                tree.tokens.len, fmtIntSizeBin(token_bytes),
+                tree.nodes.len, fmtIntSizeBin(tree_bytes),
+                fmtIntSizeBin(total_bytes),
+                qir.instructions.len, fmtIntSizeBin(instruction_bytes),
+                fmtIntSizeBin(qir.string_bytes.len),
+                qir.extra.len, fmtIntSizeBin(extra_bytes),
+                // zig fmt: on
+            });
+        }
+
+        // TODO: Print QIR
     }
 
     return cleanExit();

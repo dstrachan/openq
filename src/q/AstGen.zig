@@ -82,7 +82,13 @@ pub fn generate(gpa: Allocator, tree: Ast) !Qir {
     try astgen.extra.ensureTotalCapacity(gpa, tree.nodes.len + reserved_count);
     astgen.extra.items.len += reserved_count;
 
+    // The AST -> QIR lowering process assumes an AST that does not have any parse errors.
+    // Parse errors, or AstGen errors in the root struct, are considered "fatal", so we emit no QIR.
     const fatal = if (tree.errors.len == 0) fatal: {
+        astgen.visit() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AnalysisFail => break :fatal true, // Handled via compile_errors below.
+        };
         break :fatal false;
     } else fatal: {
         try astgen.lowerAstErrors();
@@ -117,6 +123,119 @@ fn deinit(astgen: *AstGen) void {
     astgen.extra.deinit(astgen.gpa);
     astgen.string_bytes.deinit(astgen.gpa);
     astgen.compile_errors.deinit(astgen.gpa);
+}
+
+fn visit(astgen: *AstGen) InnerError!void {
+    // TODO: Remove once instructions are implemented.
+    try astgen.instructions.append(astgen.gpa, .{ .tag = .dummy, .data = undefined });
+    for (astgen.tree.rootStatements()) |node| {
+        try astgen.visitNode(node);
+    }
+}
+
+fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
+    const tree = astgen.tree;
+    std.log.debug("'{s}' {}", .{ tree.nodeSlice(node), tree.nodeTag(node) });
+    switch (tree.nodeTag(node)) {
+        .root => unreachable,
+        .no_op => @panic("NYI"),
+
+        .grouped_expression => @panic("NYI"),
+        .empty_list => @panic("NYI"),
+        .list => @panic("NYI"),
+        .table_literal => @panic("NYI"),
+
+        .function => @panic("NYI"),
+
+        .expr_block => @panic("NYI"),
+
+        .colon,
+        .colon_colon,
+        .plus,
+        .plus_colon,
+        .minus,
+        .minus_colon,
+        .asterisk,
+        .asterisk_colon,
+        .percent,
+        .percent_colon,
+        .ampersand,
+        .ampersand_colon,
+        .pipe,
+        .pipe_colon,
+        .caret,
+        .caret_colon,
+        .equal,
+        .equal_colon,
+        .l_angle_bracket,
+        .l_angle_bracket_colon,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
+        .r_angle_bracket,
+        .r_angle_bracket_colon,
+        .r_angle_bracket_equal,
+        .dollar,
+        .dollar_colon,
+        .comma,
+        .comma_colon,
+        .hash,
+        .hash_colon,
+        .underscore,
+        .underscore_colon,
+        .tilde,
+        .tilde_colon,
+        .bang,
+        .bang_colon,
+        .question_mark,
+        .question_mark_colon,
+        .at,
+        .at_colon,
+        .dot,
+        .dot_colon,
+        .zero_colon,
+        .zero_colon_colon,
+        .one_colon,
+        .one_colon_colon,
+        .two_colon,
+        => @panic("NYI"),
+
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => @panic("NYI"),
+
+        .call => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            const func = nodes[0];
+            const args = nodes[1..];
+            switch (tree.nodeTag(func)) {
+                .colon => {
+                    if (args.len != 2 or tree.nodeTag(args[1]) == .no_op) return astgen.failNode(node, "rank", .{});
+                    if (tree.nodeTag(args[0]) != .identifier) return astgen.failNode(args[0], "type", .{});
+                },
+                inline else => |t| @panic("NYI " ++ @tagName(t)),
+            }
+        },
+        .apply_unary => unreachable,
+        .apply_binary => unreachable,
+
+        .number_literal => @panic("NYI"),
+        .number_list_literal => @panic("NYI"),
+        .string_literal => @panic("NYI"),
+        .symbol_literal => @panic("NYI"),
+        .symbol_list_literal => @panic("NYI"),
+        .identifier => @panic("NYI"),
+        .builtin => @panic("NYI"),
+
+        .select => @panic("NYI"),
+        .exec => @panic("NYI"),
+        .update => @panic("NYI"),
+        .delete_rows => @panic("NYI"),
+        .delete_cols => @panic("NYI"),
+    }
 }
 
 fn lowerAstErrors(astgen: *AstGen) !void {
