@@ -447,10 +447,11 @@ fn parseVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier
         .eof => unreachable,
 
         // Keywords
-        .keyword_select => @panic("NYI"),
-        .keyword_exec => @panic("NYI"),
-        .keyword_update => @panic("NYI"),
-        .keyword_delete => @panic("NYI"),
+        .keyword_select,
+        .keyword_exec,
+        .keyword_update,
+        .keyword_delete,
+        => try p.parseUnary(lhs, sql_identifier),
     };
     return verb.toOptional();
 }
@@ -1178,6 +1179,49 @@ pub const Normalize = struct {
         p.scratch.deinit(p.gpa);
     }
 
+    fn tokenTag(p: *Normalize, token_index: TokenIndex) Token.Tag {
+        return p.tokens.items(.tag)[token_index];
+    }
+
+    fn tokenStart(p: *Normalize, token_index: TokenIndex) Ast.ByteOffset {
+        return p.tokens.items(.start)[token_index];
+    }
+
+    fn nodeTag(p: *Normalize, node: Node.Index) Node.Tag {
+        return p.nodes.items(.tag)[@intFromEnum(node)];
+    }
+
+    fn nodeMainToken(p: *Normalize, node: Node.Index) TokenIndex {
+        return p.nodes.items(.main_token)[@intFromEnum(node)];
+    }
+
+    fn nodeData(p: *Normalize, node: Node.Index) Node.Data {
+        return p.nodes.items(.data)[@intFromEnum(node)];
+    }
+
+    fn extraDataSlice(p: *Normalize, range: Node.SubRange, comptime T: type) []const T {
+        return @ptrCast(p.extra_data.items[@intFromEnum(range.start)..@intFromEnum(range.end)]);
+    }
+
+    fn tokenSlice(p: *Normalize, token_index: TokenIndex) []const u8 {
+        const token_tag = p.tokenTag(token_index);
+
+        // Many tokens can be determined entirely by their tag.
+        if (token_tag.lexeme()) |lexeme| {
+            return lexeme;
+        }
+
+        // For some tokens, re-tokenization is needed to find the end.
+        var tokenizer: Tokenizer = .{
+            .buffer = p.source,
+            .index = p.tokenStart(token_index),
+            .next_is_minus = token_index != 0 and p.tokenTag(token_index - 1).isNextMinus(),
+        };
+        const token = tokenizer.next();
+        assert(token.tag == token_tag);
+        return p.source[token.loc.start..token.loc.end];
+    }
+
     pub fn normalize(p: *Normalize) !void {
         // Root node must be index 0.
         p.nodes.appendAssumeCapacity(.{
@@ -1248,7 +1292,86 @@ pub const Normalize = struct {
                     .data = .{ .extra_range = try listToSpan(p, list) },
                 });
             },
-            .table_literal => @panic("NYI"),
+            .table_literal => {
+                const extra, const r_paren = tree.nodeData(node).extra_and_token;
+                const old_table = tree.extraData(extra, Node.Table);
+
+                const table_index = try reserveNode(p, .table_literal);
+                errdefer unreserveNode(p, table_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                const old_keys = tree.extraDataSlice(.{
+                    .start = old_table.keys_start,
+                    .end = old_table.columns_start,
+                }, Node.Index);
+                const old_columns = tree.extraDataSlice(.{
+                    .start = old_table.columns_start,
+                    .end = old_table.columns_end,
+                }, Node.Index);
+                try p.scratch.ensureUnusedCapacity(p.gpa, old_keys.len + old_columns.len);
+
+                const keys_top = p.scratch.items.len;
+                for (old_keys) |n| {
+                    const new_node = try p.normalizeNode(n);
+                    p.scratch.appendAssumeCapacity(new_node);
+
+                    // Ignore first assignment node.
+                    if (p.extra.in_function and p.nodeTag(new_node) == .call) {
+                        const nodes = p.extraDataSlice(p.nodeData(new_node).extra_range, Node.Index);
+                        if (nodes.len == 3 and p.nodeTag(nodes[0]) == .colon and p.nodeTag(nodes[1]) == .identifier) {
+                            const token = p.nodeMainToken(nodes[1]);
+                            const slice = p.tokenSlice(token);
+                            if (std.mem.eql(u8, slice, "x")) {
+                                p.extra.found_x = false;
+                            } else if (std.mem.eql(u8, slice, "y")) {
+                                p.extra.found_y = false;
+                            } else if (std.mem.eql(u8, slice, "z")) {
+                                p.extra.found_z = false;
+                            }
+                        }
+                    }
+                }
+
+                const columns_top = p.scratch.items.len;
+                for (old_columns) |n| {
+                    const new_node = try p.normalizeNode(n);
+                    p.scratch.appendAssumeCapacity(new_node);
+
+                    // Ignore first assignment node.
+                    if (p.extra.in_function and p.nodeTag(new_node) == .call) {
+                        const nodes = p.extraDataSlice(p.nodeData(new_node).extra_range, Node.Index);
+                        if (nodes.len == 3 and p.nodeTag(nodes[0]) == .colon and p.nodeTag(nodes[1]) == .identifier) {
+                            const token = p.nodeMainToken(nodes[1]);
+                            const slice = p.tokenSlice(token);
+                            if (std.mem.eql(u8, slice, "x")) {
+                                p.extra.found_x = false;
+                            } else if (std.mem.eql(u8, slice, "y")) {
+                                p.extra.found_y = false;
+                            } else if (std.mem.eql(u8, slice, "z")) {
+                                p.extra.found_z = false;
+                            }
+                        }
+                    }
+                }
+
+                const keys = try listToSpan(p, p.scratch.items[keys_top..columns_top]);
+                const columns = try listToSpan(p, p.scratch.items[columns_top..]);
+                const table: Node.Table = .{
+                    .keys_start = keys.start,
+                    .columns_start = columns.start,
+                    .columns_end = columns.end,
+                };
+                return setNode(p, table_index, .{
+                    .tag = .table_literal,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra_and_token = .{
+                        try addExtra(p, table),
+                        r_paren,
+                    } },
+                });
+            },
 
             .function => {
                 const extra, const r_brace = tree.nodeData(node).extra_and_token;
@@ -1518,11 +1641,138 @@ pub const Normalize = struct {
                 .data = .{ .token = tree.nodeData(node).token },
             }),
 
-            .select => @panic("NYI"),
-            .exec => @panic("NYI"),
-            .update => @panic("NYI"),
-            .delete_rows => @panic("NYI"),
-            .delete_cols => @panic("NYI"),
+            inline .select, .exec, .update => |t| {
+                const T = switch (t) {
+                    .select => Node.Select,
+                    .exec => Node.Exec,
+                    .update => Node.Update,
+                    else => comptime unreachable,
+                };
+                const old_sql = tree.extraData(tree.nodeData(node).extra, T);
+
+                const sql_index = try reserveNode(p, t);
+                errdefer unreserveNode(p, sql_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                const from_expr = try p.normalizeNode(old_sql.from);
+
+                // Only allow extra to be modified in from clause.
+                const prev_extra = p.extra;
+                defer p.extra = prev_extra;
+
+                const select_nodes = tree.extraDataSlice(.{
+                    .start = old_sql.select_start,
+                    .end = old_sql.by_start,
+                }, Node.Index);
+                const by_nodes = tree.extraDataSlice(.{
+                    .start = old_sql.by_start,
+                    .end = old_sql.where_start,
+                }, Node.Index);
+                const where_nodes = tree.extraDataSlice(.{
+                    .start = old_sql.where_start,
+                    .end = old_sql.where_end,
+                }, Node.Index);
+                try p.scratch.ensureUnusedCapacity(p.gpa, select_nodes.len + by_nodes.len + where_nodes.len);
+
+                const select_top = p.scratch.items.len;
+                for (select_nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const by_top = p.scratch.items.len;
+                for (by_nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const where_top = p.scratch.items.len;
+                for (where_nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const sql = try listToSpan(p, p.scratch.items[select_top..by_top]);
+                const by = try listToSpan(p, p.scratch.items[by_top..where_top]);
+                const where = try listToSpan(p, p.scratch.items[where_top..]);
+                const sql_node: T = .{
+                    .select_start = sql.start,
+                    .by_start = by.start,
+                    .from = from_expr,
+                    .where_start = where.start,
+                    .where_end = where.end,
+                };
+                return setNode(p, sql_index, .{
+                    .tag = t,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra = try addExtra(p, sql_node) },
+                });
+            },
+            .delete_rows => {
+                const old_delete = tree.extraData(tree.nodeData(node).extra, Node.DeleteRows);
+
+                const delete_index = try reserveNode(p, .delete_rows);
+                errdefer unreserveNode(p, delete_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                const from_expr = try p.normalizeNode(old_delete.from);
+
+                // Only allow extra to be modified in from clause.
+                const prev_extra = p.extra;
+                defer p.extra = prev_extra;
+
+                const where_nodes = tree.extraDataSlice(.{
+                    .start = old_delete.where_start,
+                    .end = old_delete.where_end,
+                }, Node.Index);
+                try p.scratch.ensureUnusedCapacity(p.gpa, where_nodes.len);
+
+                const where_top = p.scratch.items.len;
+                for (where_nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const where = try listToSpan(p, p.scratch.items[where_top..]);
+                const delete_node: Node.DeleteRows = .{
+                    .from = from_expr,
+                    .where_start = where.start,
+                    .where_end = where.end,
+                };
+                return setNode(p, delete_index, .{
+                    .tag = .delete_rows,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra = try addExtra(p, delete_node) },
+                });
+            },
+            .delete_cols => {
+                const old_delete = tree.extraData(tree.nodeData(node).extra, Node.DeleteCols);
+
+                const delete_index = try reserveNode(p, .delete_cols);
+                errdefer unreserveNode(p, delete_index);
+
+                const scratch_top = p.scratch.items.len;
+                defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+                const from_expr = try p.normalizeNode(old_delete.from);
+
+                // Only allow extra to be modified in from clause.
+                const prev_extra = p.extra;
+                defer p.extra = prev_extra;
+
+                const select_nodes = tree.extraDataSlice(.{
+                    .start = old_delete.select_start,
+                    .end = old_delete.select_end,
+                }, Node.Index);
+                try p.scratch.ensureUnusedCapacity(p.gpa, select_nodes.len);
+
+                const select_top = p.scratch.items.len;
+                for (select_nodes) |n| p.scratch.appendAssumeCapacity(try p.normalizeNode(n));
+
+                const select = try listToSpan(p, p.scratch.items[select_top..]);
+                const delete_node: Node.DeleteCols = .{
+                    .select_start = select.start,
+                    .select_end = select.end,
+                    .from = from_expr,
+                };
+                return setNode(p, delete_index, .{
+                    .tag = .delete_cols,
+                    .main_token = tree.nodeMainToken(node),
+                    .data = .{ .extra = try addExtra(p, delete_node) },
+                });
+            },
         }
     }
 };
@@ -1888,4 +2138,49 @@ test "boolean or byte literal ends number list literal" {
         &.{ .root, .number_list_literal },
         &.{},
     );
+}
+
+fn testNormalize(source1: [:0]const u8, source2: [:0]const u8) !void {
+    const gpa = std.testing.allocator;
+
+    var tree1: Ast = try .parse(gpa, source1);
+    defer tree1.deinit(gpa);
+    var tree1_normalized = try tree1.normalize(gpa);
+    defer tree1_normalized.deinit(gpa);
+
+    var tree2: Ast = try .parse(gpa, source2);
+    defer tree2.deinit(gpa);
+    var tree2_normalized = try tree2.normalize(gpa);
+    defer tree2_normalized.deinit(gpa);
+
+    try std.testing.expectEqualSlices(Node.Tag, tree1_normalized.nodes.items(.tag), tree2_normalized.nodes.items(.tag));
+}
+
+test "AST normalize - binary ops are converted to calls" {
+    try testNormalize("3*4+5", "*[3;+[4;5]]");
+}
+
+test "AST normalize - grouped expressions are removed" {
+    try testNormalize("(3)*((4)+(5))", "(*)[(3);((+)[(4);(5)])]");
+}
+
+test "AST normalize - implicit function parameters are added" {
+    try testNormalize("{x}", "{[x]x}");
+    try testNormalize("{y}", "{[x;y]y}");
+    try testNormalize("{z}", "{[x;y;z]z}");
+    try testNormalize("{a}", "{[]a}");
+    try testNormalize("{x+y+z}", "{[x;y;z]x+y+z}");
+}
+
+test "AST normalize - implicit function parameters are added in sql from clause" {
+    try testNormalize("{select y from x where z}", "{[x]select y from x where z}");
+    try testNormalize("{exec y from x where z}", "{[x]exec y from x where z}");
+    try testNormalize("{update y from x where z}", "{[x]update y from x where z}");
+    try testNormalize("{delete from x where z}", "{[x]delete from x where z}");
+    try testNormalize("{delete y from x}", "{[x]delete y from x}");
+}
+
+test "AST normalize - implicit function parameters are added in table literals" {
+    try testNormalize("{([]z:x)}", "{[x]([]z:x)}");
+    try testNormalize("{([z:x]a:b)}", "{[x]([z:x]a:b)}");
 }
