@@ -476,7 +476,7 @@ pub fn putAstErrorsIntoBundle(gpa: Allocator, tree: Ast, path: []const u8, wip_e
     try addQirErrorMessages(wip_errors, qir, tree, path);
 }
 
-fn addQirErrorMessages(eb: *std.zig.ErrorBundle.Wip, qir: Qir, tree: Ast, src_path: []const u8) !void {
+pub fn addQirErrorMessages(eb: *std.zig.ErrorBundle.Wip, qir: Qir, tree: Ast, src_path: []const u8) !void {
     const payload_index = qir.extra[@intFromEnum(Qir.ExtraIndex.compile_errors)];
     assert(payload_index != 0);
 

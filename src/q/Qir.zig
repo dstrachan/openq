@@ -102,7 +102,10 @@ pub const Inst = struct {
     tag: Tag,
     data: Data,
 
-    pub const Tag = enum(u8) {};
+    pub const Tag = enum(u8) {
+        // TODO: Remove
+        dummy,
+    };
 
     pub const Data = union {};
 
