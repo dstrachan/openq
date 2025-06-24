@@ -15,6 +15,7 @@ instructions: std.MultiArrayList(Qir.Inst) = .empty,
 extra: std.ArrayListUnmanaged(u32) = .empty,
 string_bytes: std.ArrayListUnmanaged(u8) = .empty,
 compile_errors: std.ArrayListUnmanaged(Qir.Inst.CompileErrors.Item) = .empty,
+scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(void)) = .empty,
 
 const InnerError = error{ OutOfMemory, AnalysisFail };
 
@@ -70,6 +71,8 @@ pub fn generate(gpa: Allocator, tree: Ast) !Qir {
     };
     defer astgen.deinit();
 
+    try astgen.scopes.append(gpa, .empty);
+
     // String table index 0 is reserved for `NullTerminatedString.empty`.
     try astgen.string_bytes.append(gpa, 0);
 
@@ -123,6 +126,8 @@ fn deinit(astgen: *AstGen) void {
     astgen.extra.deinit(astgen.gpa);
     astgen.string_bytes.deinit(astgen.gpa);
     astgen.compile_errors.deinit(astgen.gpa);
+    for (astgen.scopes.items) |*scope| scope.deinit(astgen.gpa);
+    astgen.scopes.deinit(astgen.gpa);
 }
 
 fn visit(astgen: *AstGen) InnerError!void {
@@ -134,20 +139,55 @@ fn visit(astgen: *AstGen) InnerError!void {
 }
 
 fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
+    const gpa = astgen.gpa;
     const tree = astgen.tree;
-    std.log.debug("'{s}' {}", .{ tree.nodeSlice(node), tree.nodeTag(node) });
     switch (tree.nodeTag(node)) {
         .root => unreachable,
-        .no_op => @panic("NYI"),
+        .no_op => {},
 
-        .grouped_expression => @panic("NYI"),
-        .empty_list => @panic("NYI"),
-        .list => @panic("NYI"),
+        .grouped_expression => try astgen.visitNode(tree.nodeData(node).node),
+        .empty_list => {},
+        .list => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            var it = std.mem.reverseIterator(nodes);
+            while (it.next()) |n| try astgen.visitNode(n);
+        },
         .table_literal => @panic("NYI"),
 
-        .function => @panic("NYI"),
+        .function => {
+            const function = tree.extraData(tree.nodeData(node).extra_and_token[0], Ast.Node.Function);
 
-        .expr_block => @panic("NYI"),
+            const params = tree.extraDataSlice(.{
+                .start = function.params_start,
+                .end = function.body_start,
+            }, Ast.Node.Index);
+            if (params.len > 8) return astgen.failNode(params[8], "params", .{});
+
+            try astgen.scopes.append(gpa, .empty);
+            defer {
+                astgen.scopes.items[astgen.scopes.items.len - 1].deinit(gpa);
+                _ = astgen.scopes.pop();
+            }
+
+            try astgen.scopes.items[astgen.scopes.items.len - 1].ensureUnusedCapacity(gpa, @intCast(params.len));
+            for (params) |param| {
+                if (tree.nodeTag(param) != .identifier) return astgen.failNode(param, "type", .{});
+
+                const gop = astgen.scopes.items[astgen.scopes.items.len - 1].getOrPutAssumeCapacity(tree.tokenSlice(tree.nodeMainToken(param)));
+                if (gop.found_existing) return astgen.failNode(param, "duplicate", .{});
+            }
+
+            const body = tree.extraDataSlice(.{
+                .start = function.body_start,
+                .end = function.body_end,
+            }, Ast.Node.Index);
+            for (body) |n| try astgen.visitNode(n);
+        },
+
+        .expr_block => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            for (nodes) |n| try astgen.visitNode(n);
+        },
 
         .colon,
         .colon_colon,
@@ -197,7 +237,7 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
         .one_colon,
         .one_colon_colon,
         .two_colon,
-        => @panic("NYI"),
+        => {},
 
         .apostrophe,
         .apostrophe_colon,
@@ -205,7 +245,7 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
         .slash_colon,
         .backslash,
         .backslash_colon,
-        => @panic("NYI"),
+        => if (tree.nodeData(node).opt_node.unwrap()) |n| try astgen.visitNode(n),
 
         .call => {
             const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
@@ -215,26 +255,40 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
                 .colon => {
                     if (args.len != 2 or tree.nodeTag(args[1]) == .no_op) return astgen.failNode(node, "rank", .{});
                     if (tree.nodeTag(args[0]) != .identifier) return astgen.failNode(args[0], "type", .{});
+
+                    try astgen.visitNode(args[1]);
+
+                    const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
+                    try astgen.scopes.items[astgen.scopes.items.len - 1].put(gpa, slice, {});
+
+                    return;
                 },
-                inline else => |t| @panic("NYI " ++ @tagName(t)),
+                else => {},
             }
+            var it = std.mem.reverseIterator(nodes);
+            while (it.next()) |n| try astgen.visitNode(n);
         },
         .apply_unary => unreachable,
         .apply_binary => unreachable,
 
-        .number_literal => @panic("NYI"),
-        .number_list_literal => @panic("NYI"),
-        .string_literal => @panic("NYI"),
-        .symbol_literal => @panic("NYI"),
-        .symbol_list_literal => @panic("NYI"),
-        .identifier => @panic("NYI"),
-        .builtin => @panic("NYI"),
+        .number_literal,
+        .number_list_literal,
+        .string_literal,
+        .symbol_literal,
+        .symbol_list_literal,
+        .builtin,
+        => {},
 
-        .select => @panic("NYI"),
-        .exec => @panic("NYI"),
-        .update => @panic("NYI"),
-        .delete_rows => @panic("NYI"),
-        .delete_cols => @panic("NYI"),
+        .identifier => {
+            const slice = tree.tokenSlice(tree.nodeMainToken(node));
+            if (!astgen.scopes.getLast().contains(slice)) return astgen.appendErrorNode(node, "use of undeclared identifier '{s}'", .{slice});
+        },
+
+        .select => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.Select).from),
+        .exec => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.Exec).from),
+        .update => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.Update).from),
+        .delete_rows => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteRows).from),
+        .delete_cols => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteCols).from),
     }
 }
 
