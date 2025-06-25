@@ -565,3 +565,129 @@ fn errNoteNode(
         .notes = 0,
     });
 }
+
+fn testError(source: [:0]const u8, comptime expected: []const u8) !void {
+    const gpa = std.testing.allocator;
+
+    var orig_tree: Ast = try .parse(gpa, source);
+    defer orig_tree.deinit(gpa);
+    var tree = try orig_tree.normalize(gpa);
+    defer tree.deinit(gpa);
+
+    var qir = try generate(gpa, tree);
+    defer qir.deinit(gpa);
+    try std.testing.expect(qir.hasCompileErrors());
+
+    var wip_errors: std.zig.ErrorBundle.Wip = undefined;
+    try wip_errors.init(gpa);
+    defer wip_errors.deinit();
+    try q.addQirErrorMessages(&wip_errors, qir, tree, "test");
+
+    var error_bundle = try wip_errors.toOwnedBundle("");
+    defer error_bundle.deinit(gpa);
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    defer output.deinit(gpa);
+    try error_bundle.renderToWriter(.{ .ttyconf = .no_color }, output.writer(gpa));
+
+    try std.testing.expectEqualStrings(expected, std.mem.trim(u8, output.items, &std.ascii.whitespace));
+}
+
+test "undeclared identifier - identifier" {
+    try testError("test",
+        \\test:1:1: error: use of undeclared identifier 'test'
+        \\test
+        \\^~~~
+    );
+
+    try testError("a:a+b",
+        \\test:1:5: error: use of undeclared identifier 'b'
+        \\a:a+b
+        \\    ^
+        \\test:1:3: error: use of undeclared identifier 'a'
+        \\a:a+b
+        \\  ^
+    );
+    try testError("a:a+b:1",
+        \\test:1:3: error: use of undeclared identifier 'a'
+        \\a:a+b:1
+        \\  ^
+    );
+    try testError(
+        \\a:1
+        \\b:2
+        \\c:a+b
+        \\d:c+d
+    ,
+        \\test:4:5: error: use of undeclared identifier 'd'
+        \\d:c+d
+        \\    ^
+    );
+}
+
+test "undeclared identifier - sql" {
+    return error.SkipZigTest;
+}
+
+test "undeclared identifier - table literal" {
+    return error.SkipZigTest;
+}
+
+test "undeclared identifier - function" {
+    return error.SkipZigTest;
+}
+
+test "too many function parameters" {
+    try testError("{[x1;x2;x3;x4;x5;x6;x7;x8;x9;x10]}",
+        \\test:1:27: error: too many function parameters
+        \\{[x1;x2;x3;x4;x5;x6;x7;x8;x9;x10]}
+        \\                          ^~
+    );
+}
+
+test "duplicate function parameters" {
+    try testError("{[x1;x1;x1]}",
+        \\test:1:6: error: redeclaration of function parameter 'x1'
+        \\{[x1;x1;x1]}
+        \\     ^~
+        \\test:1:3: note: previous declaration here
+        \\{[x1;x1;x1]}
+        \\  ^~
+    );
+    try testError("{[x1;x2;x1]}",
+        \\test:1:9: error: redeclaration of function parameter 'x1'
+        \\{[x1;x2;x1]}
+        \\        ^~
+        \\test:1:3: note: previous declaration here
+        \\{[x1;x2;x1]}
+        \\  ^~
+    );
+}
+
+test "invalid function parameter" {
+    try testError("{[`x]}",
+        \\test:1:3: error: invalid function parameter
+        \\{[`x]}
+        \\  ^~
+    );
+    // TODO: Implement 4.1 pattern matching
+    return error.SkipZigTest;
+}
+
+test "too many arguments for assignment" {
+    return error.SkipZigTest;
+}
+
+test "cannot project assignment" {
+    return error.SkipZigTest;
+}
+
+test "invalid assignment target" {
+    try testError(
+        \\"test":123
+    ,
+        \\test:1:1: error: invalid assignment target
+        \\"test":123
+        \\^~~~~~
+    );
+}
