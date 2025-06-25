@@ -15,7 +15,7 @@ instructions: std.MultiArrayList(Qir.Inst) = .empty,
 extra: std.ArrayListUnmanaged(u32) = .empty,
 string_bytes: std.ArrayListUnmanaged(u8) = .empty,
 compile_errors: std.ArrayListUnmanaged(Qir.Inst.CompileErrors.Item) = .empty,
-scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(void)) = .empty,
+scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Ast.Node.Index)) = .empty,
 
 const InnerError = error{ OutOfMemory, AnalysisFail };
 
@@ -181,7 +181,7 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
                 .start = function.params_start,
                 .end = function.body_start,
             }, Ast.Node.Index);
-            if (params.len > 8) return astgen.failNode(params[8], "params", .{});
+            if (params.len > 8) return astgen.appendErrorNode(params[8], "too many function parameters", .{});
 
             try astgen.scopes.append(gpa, .empty);
             defer {
@@ -189,12 +189,19 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
                 _ = astgen.scopes.pop();
             }
 
-            try astgen.scopes.items[astgen.scopes.items.len - 1].ensureUnusedCapacity(gpa, @intCast(params.len));
+            var scope = &astgen.scopes.items[astgen.scopes.items.len - 1];
+            try scope.ensureUnusedCapacity(gpa, @intCast(params.len));
             for (params) |param| {
-                if (tree.nodeTag(param) != .identifier) return astgen.failNode(param, "type", .{});
+                if (tree.nodeTag(param) != .identifier) return astgen.appendErrorNode(param, "invalid function parameter", .{});
 
-                const gop = astgen.scopes.items[astgen.scopes.items.len - 1].getOrPutAssumeCapacity(tree.tokenSlice(tree.nodeMainToken(param)));
-                if (gop.found_existing) return astgen.failNode(param, "duplicate", .{});
+                const slice = tree.tokenSlice(tree.nodeMainToken(param));
+                const gop = scope.getOrPutAssumeCapacity(slice);
+                if (gop.found_existing) {
+                    return astgen.appendErrorNodeNotes(param, "redeclaration of function parameter '{s}'", .{slice}, &.{
+                        try astgen.errNoteNode(gop.value_ptr.*, "previous declaration here", .{}),
+                    });
+                }
+                gop.value_ptr.* = param;
             }
 
             const body = tree.extraDataSlice(.{
@@ -273,13 +280,13 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
             const args = nodes[1..];
             switch (tree.nodeTag(func)) {
                 .colon => {
-                    if (args.len != 2 or tree.nodeTag(args[1]) == .no_op) return astgen.failNode(node, "rank", .{});
-                    if (tree.nodeTag(args[0]) != .identifier) return astgen.failNode(args[0], "type", .{});
+                    if (args.len != 2 or tree.nodeTag(args[1]) == .no_op) return astgen.appendErrorNode(node, "rank", .{});
+                    if (tree.nodeTag(args[0]) != .identifier) return astgen.appendErrorNode(args[0], "invalid assignment target", .{});
 
                     try astgen.visitNode(args[1]);
 
                     const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
-                    try astgen.scopes.items[astgen.scopes.items.len - 1].put(gpa, slice, {});
+                    try astgen.scopes.items[astgen.scopes.items.len - 1].put(gpa, slice, args[0]);
 
                     return;
                 },
