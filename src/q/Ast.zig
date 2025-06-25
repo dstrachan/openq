@@ -165,6 +165,7 @@ pub fn nodeSlice(tree: Ast, node: Node.Index) []const u8 {
 
 pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
     const token_tag = tree.tokenTag(token_index);
+    assert(token_tag != .eos);
 
     // Many tokens can be determined entirely by their tag.
     if (token_tag.lexeme()) |lexeme| {
@@ -177,7 +178,10 @@ pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
         .index = tree.tokenStart(token_index),
         .next_is_minus = token_index != 0 and tree.tokenTag(token_index - 1).isNextMinus(),
     };
-    const token = tokenizer.next();
+    const token = token: {
+        const token = tokenizer.next();
+        break :token if (token.tag == .eos) tokenizer.next() else token;
+    };
     assert(token.tag == token_tag);
     return tree.source[token.loc.start..token.loc.end];
 }
