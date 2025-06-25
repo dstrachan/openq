@@ -315,7 +315,7 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
         if (qir.hasCompileErrors()) {
             var wip_errors: std.zig.ErrorBundle.Wip = undefined;
             try wip_errors.init(arena);
-            try utils.addQirErrorMessages(&wip_errors, qir, tree, display_path);
+            try q.addQirErrorMessages(&wip_errors, qir, tree, display_path);
             var error_bundle = try wip_errors.toOwnedBundle("");
             error_bundle.renderToStdErr(color.renderOptions());
             if (qir.loweringFailed()) {
