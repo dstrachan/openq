@@ -152,7 +152,27 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
             var it = std.mem.reverseIterator(nodes);
             while (it.next()) |n| try astgen.visitNode(n);
         },
-        .table_literal => @panic("NYI"),
+
+        .table_literal => {
+            const table = tree.extraData(tree.nodeData(node).extra_and_token[0], Ast.Node.Table);
+
+            inline for (&.{
+                tree.extraDataSlice(.{ .start = table.columns_start, .end = table.columns_end }, Ast.Node.Index),
+                tree.extraDataSlice(.{ .start = table.keys_start, .end = table.columns_start }, Ast.Node.Index),
+            }) |columns| {
+                var it = std.mem.reverseIterator(columns);
+                while (it.next()) |n| {
+                    if (tree.nodeTag(n) == .call) {
+                        const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Ast.Node.Index);
+                        if (nodes.len == 3 and tree.nodeTag(nodes[0]) == .colon and tree.nodeTag(nodes[1]) == .identifier) {
+                            try astgen.visitNode(nodes[2]);
+                            continue;
+                        }
+                    }
+                    try astgen.visitNode(n);
+                }
+            }
+        },
 
         .function => {
             const function = tree.extraData(tree.nodeData(node).extra_and_token[0], Ast.Node.Function);
