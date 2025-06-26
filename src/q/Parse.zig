@@ -1407,21 +1407,21 @@ pub const Normalize = struct {
                     if (p.extra.found_x or p.extra.found_y or p.extra.found_z) p.scratch.appendAssumeCapacity(
                         try addNode(p, .{
                             .tag = .identifier,
-                            .main_token = @intFromEnum(OptionalTokenIndex.none),
+                            .main_token = @intCast(p.tokens.len - 1),
                             .data = undefined,
                         }),
                     );
                     if (p.extra.found_y or p.extra.found_z) p.scratch.appendAssumeCapacity(
                         try addNode(p, .{
                             .tag = .identifier,
-                            .main_token = @intFromEnum(OptionalTokenIndex.none),
+                            .main_token = @intCast(p.tokens.len - 1),
                             .data = undefined,
                         }),
                     );
                     if (p.extra.found_z) p.scratch.appendAssumeCapacity(
                         try addNode(p, .{
                             .tag = .identifier,
-                            .main_token = @intFromEnum(OptionalTokenIndex.none),
+                            .main_token = @intCast(p.tokens.len - 1),
                             .data = undefined,
                         }),
                     );
@@ -1572,7 +1572,7 @@ pub const Normalize = struct {
                 const args = p.scratch.items[scratch_top..];
                 return setNode(p, call_index, .{
                     .tag = .call,
-                    .main_token = undefined,
+                    .main_token = @intCast(tree.tokens.len - 1),
                     .data = .{ .extra_range = try listToSpan(p, args) },
                 });
             },
@@ -1602,7 +1602,7 @@ pub const Normalize = struct {
                 const args = p.scratch.items[scratch_top..];
                 return setNode(p, call_index, .{
                     .tag = .call,
-                    .main_token = undefined,
+                    .main_token = @intCast(tree.tokens.len - 1),
                     .data = .{ .extra_range = try listToSpan(p, args) },
                 });
             },
