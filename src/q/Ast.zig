@@ -333,7 +333,10 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .backslash_colon,
         => n = tree.nodeData(n).opt_node.unwrap() orelse return tree.nodeMainToken(n),
 
-        .call => n = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index)[0],
+        .call => n = tree.extraDataSlice(
+            tree.nodeData(n).extra_range,
+            Node.Index,
+        )[@intFromBool(tree.tokenTag(tree.nodeMainToken(node)) == .eof)],
         .apply_unary => n = tree.nodeData(n).node_and_node[0],
         .apply_binary => n = tree.nodeData(n).node_and_opt_node[0],
 
@@ -457,6 +460,16 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         => return tree.nodeMainToken(n) + end_offset,
 
         .call => {
+            if (tree.tokenTag(tree.nodeMainToken(node)) == .eof) {
+                const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+                n = switch (nodes.len) {
+                    2 => unreachable, // TODO: Test
+                    3 => if (tree.nodeTag(nodes[2]) == .no_op) nodes[0] else nodes[2],
+                    else => unreachable,
+                };
+                continue;
+            }
+
             end_offset += 1; // r_bracket
             const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
             if (nodes.len == 1) return tree.nodeMainToken(n) + end_offset;
@@ -962,11 +975,10 @@ pub const Node = struct {
 };
 
 pub fn nodeToSpan(tree: *const Ast, node: Ast.Node.Index) Span {
-    return tokensToSpan(
-        tree,
+    return tree.tokensToSpan(
         tree.firstToken(node),
         tree.lastToken(node),
-        tree.nodeMainToken(node),
+        if (tree.nodeTag(node) == .call) tree.firstToken(node) else tree.nodeMainToken(node),
     );
 }
 
@@ -995,7 +1007,9 @@ pub fn tokensToSpan(tree: *const Ast, start: Ast.TokenIndex, end: Ast.TokenIndex
 
 fn testFirstLast(source: [:0]const u8, node: Node.Index, expected_tag: Node.Tag) !void {
     const gpa = std.testing.allocator;
-    var tree: Ast = try .parse(gpa, source);
+    var orig_tree: Ast = try .parse(gpa, source);
+    defer orig_tree.deinit(gpa);
+    var tree = try orig_tree.normalize(gpa);
     defer tree.deinit(gpa);
 
     try std.testing.expectEqual(expected_tag, tree.nodeTag(node));
@@ -1006,14 +1020,14 @@ fn testFirstLast(source: [:0]const u8, node: Node.Index, expected_tag: Node.Tag)
 }
 
 test "first/last token call" {
-    try testFirstLast("f[]", @enumFromInt(2), .call);
+    try testFirstLast("f[]", @enumFromInt(1), .call);
 
-    try testFirstLast("f[x]", @enumFromInt(2), .call);
+    try testFirstLast("f[x]", @enumFromInt(1), .call);
 
-    try testFirstLast("f[x;y]", @enumFromInt(2), .call);
-    try testFirstLast("f[x; ]", @enumFromInt(2), .call);
-    try testFirstLast("f[ ;y]", @enumFromInt(2), .call);
-    try testFirstLast("f[ ; ]", @enumFromInt(2), .call);
+    try testFirstLast("f[x;y]", @enumFromInt(1), .call);
+    try testFirstLast("f[x; ]", @enumFromInt(1), .call);
+    try testFirstLast("f[ ;y]", @enumFromInt(1), .call);
+    try testFirstLast("f[ ; ]", @enumFromInt(1), .call);
 }
 
 test "first/last token list" {
@@ -1034,28 +1048,4 @@ test "first/last token list" {
     try testFirstLast("( ;y; )", @enumFromInt(1), .list);
     try testFirstLast("( ; ;z)", @enumFromInt(1), .list);
     try testFirstLast("( ; ; )", @enumFromInt(1), .list);
-}
-
-test "first/last token expr_block" {
-    try testFirstLast("[]", @enumFromInt(1), .expr_block);
-
-    try testFirstLast("[x]", @enumFromInt(1), .expr_block);
-
-    try testFirstLast("[x;y]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[x; ]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ;y]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ; ]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[x;y]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[x; ]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ;y]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ; ]", @enumFromInt(1), .expr_block);
-
-    try testFirstLast("[x;y;z]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[x;y; ]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[x; ;z]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[x; ; ]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ;y;z]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ;y; ]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ; ;z]", @enumFromInt(1), .expr_block);
-    try testFirstLast("[ ; ; ]", @enumFromInt(1), .expr_block);
 }

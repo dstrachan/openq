@@ -191,10 +191,16 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
 
             var scope = &astgen.scopes.items[astgen.scopes.items.len - 1];
             try scope.ensureUnusedCapacity(gpa, @intCast(params.len));
-            for (params) |param| {
+            for (params, 0..) |param, i| {
                 if (tree.nodeTag(param) != .identifier) return astgen.appendErrorNode(param, "invalid function parameter", .{});
 
-                const slice = tree.tokenSlice(tree.nodeMainToken(param));
+                const token = tree.nodeMainToken(param);
+                const slice = if (tree.tokenTag(token) == .eof) switch (i) {
+                    0 => "x",
+                    1 => "y",
+                    2 => "z",
+                    else => unreachable,
+                } else tree.tokenSlice(token);
                 const gop = scope.getOrPutAssumeCapacity(slice);
                 if (gop.found_existing) {
                     return astgen.appendErrorNodeNotes(param, "redeclaration of function parameter '{s}'", .{slice}, &.{
@@ -280,8 +286,21 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
             const args = nodes[1..];
             switch (tree.nodeTag(func)) {
                 .colon => {
-                    if (args.len != 2 or tree.nodeTag(args[1]) == .no_op) return astgen.appendErrorNode(node, "rank", .{});
-                    if (tree.nodeTag(args[0]) != .identifier) return astgen.appendErrorNode(args[0], "invalid assignment target", .{});
+                    if (args.len != 2) return astgen.appendErrorNode(
+                        node,
+                        "expected 2 arguments, found {d}",
+                        .{args.len},
+                    );
+                    if (tree.nodeTag(args[1]) == .no_op) return astgen.appendErrorNode(
+                        node,
+                        "expected 2 arguments, found 1",
+                        .{},
+                    );
+                    if (tree.nodeTag(args[0]) != .identifier) return astgen.appendErrorNode(
+                        args[0],
+                        "invalid assignment target",
+                        .{},
+                    );
 
                     try astgen.visitNode(args[1]);
 
@@ -566,7 +585,20 @@ fn errNoteNode(
     });
 }
 
-fn testError(source: [:0]const u8, comptime expected: []const u8) !void {
+fn testNoFail(source: [:0]const u8) !void {
+    const gpa = std.testing.allocator;
+
+    var orig_tree: Ast = try .parse(gpa, source);
+    defer orig_tree.deinit(gpa);
+    var tree = try orig_tree.normalize(gpa);
+    defer tree.deinit(gpa);
+
+    var qir = try generate(gpa, tree);
+    defer qir.deinit(gpa);
+    try std.testing.expect(!qir.hasCompileErrors());
+}
+
+fn testFail(source: [:0]const u8, expected: []const u8) !void {
     const gpa = std.testing.allocator;
 
     var orig_tree: Ast = try .parse(gpa, source);
@@ -594,13 +626,12 @@ fn testError(source: [:0]const u8, comptime expected: []const u8) !void {
 }
 
 test "undeclared identifier - identifier" {
-    try testError("test",
+    try testFail("test",
         \\test:1:1: error: use of undeclared identifier 'test'
         \\test
         \\^~~~
     );
-
-    try testError("a:a+b",
+    try testFail("a:a+b",
         \\test:1:5: error: use of undeclared identifier 'b'
         \\a:a+b
         \\    ^
@@ -608,12 +639,12 @@ test "undeclared identifier - identifier" {
         \\a:a+b
         \\  ^
     );
-    try testError("a:a+b:1",
+    try testFail("a:a+b:1",
         \\test:1:3: error: use of undeclared identifier 'a'
         \\a:a+b:1
         \\  ^
     );
-    try testError(
+    try testFail(
         \\a:1
         \\b:2
         \\c:a+b
@@ -626,19 +657,103 @@ test "undeclared identifier - identifier" {
 }
 
 test "undeclared identifier - sql" {
-    return error.SkipZigTest;
+    try testFail("select x from y where z",
+        \\test:1:15: error: use of undeclared identifier 'y'
+        \\select x from y where z
+        \\              ^
+    );
+    try testFail("exec x from y where z",
+        \\test:1:13: error: use of undeclared identifier 'y'
+        \\exec x from y where z
+        \\            ^
+    );
+    try testFail("update x from y where z",
+        \\test:1:15: error: use of undeclared identifier 'y'
+        \\update x from y where z
+        \\              ^
+    );
+    try testFail("delete from y where z",
+        \\test:1:13: error: use of undeclared identifier 'y'
+        \\delete from y where z
+        \\            ^
+    );
+    try testFail("delete x from y",
+        \\test:1:15: error: use of undeclared identifier 'y'
+        \\delete x from y
+        \\              ^
+    );
 }
 
 test "undeclared identifier - table literal" {
-    return error.SkipZigTest;
+    try testFail("([]x)",
+        \\test:1:4: error: use of undeclared identifier 'x'
+        \\([]x)
+        \\   ^
+    );
+    try testFail("([x]())",
+        \\test:1:3: error: use of undeclared identifier 'x'
+        \\([x]())
+        \\  ^
+    );
+    try testFail("([x]x:())",
+        \\test:1:3: error: use of undeclared identifier 'x'
+        \\([x]x:())
+        \\  ^
+    );
+    try testFail("([x:()]x)",
+        \\test:1:8: error: use of undeclared identifier 'x'
+        \\([x:()]x)
+        \\       ^
+    );
+    try testNoFail("([x]x:x:())");
+    try testFail("([x:x:()]x)",
+        \\test:1:10: error: use of undeclared identifier 'x'
+        \\([x:x:()]x)
+        \\         ^
+    );
 }
 
 test "undeclared identifier - function" {
+    try testNoFail("{x;y;z}");
+    try testNoFail("{x;y; }");
+    try testNoFail("{x; ;z}");
+    try testNoFail("{x; ; }");
+    try testNoFail("{ ;y;z}");
+    try testNoFail("{ ;y; }");
+    try testNoFail("{ ; ;z}");
+    try testNoFail("{ ; ; }");
+
+    try testFail(
+        \\{[]x;y;z}
+    ,
+        \\test:1:4: error: use of undeclared identifier 'x'
+        \\{[]x;y;z}
+        \\   ^
+        \\test:1:6: error: use of undeclared identifier 'y'
+        \\{[]x;y;z}
+        \\     ^
+        \\test:1:8: error: use of undeclared identifier 'z'
+        \\{[]x;y;z}
+        \\       ^
+    );
+
+    try testFail(
+        \\{[]a:a+b}
+    ,
+        \\test:1:8: error: use of undeclared identifier 'b'
+        \\{[]a:a+b}
+        \\       ^
+        \\test:1:6: error: use of undeclared identifier 'a'
+        \\{[]a:a+b}
+        \\     ^
+    );
+
+    // TODO: Allow globals
     return error.SkipZigTest;
 }
 
 test "too many function parameters" {
-    try testError("{[x1;x2;x3;x4;x5;x6;x7;x8;x9;x10]}",
+    try testFail("{[x1;x2;x3;x4;x5;x6;x7;x8;x9;x10]}",
         \\test:1:27: error: too many function parameters
         \\{[x1;x2;x3;x4;x5;x6;x7;x8;x9;x10]}
         \\                          ^~
@@ -646,7 +761,7 @@ test "too many function parameters" {
 }
 
 test "duplicate function parameters" {
-    try testError("{[x1;x1;x1]}",
+    try testFail("{[x1;x1;x1]}",
         \\test:1:6: error: redeclaration of function parameter 'x1'
         \\{[x1;x1;x1]}
         \\     ^~
@@ -654,7 +769,7 @@ test "duplicate function parameters" {
         \\{[x1;x1;x1]}
         \\  ^~
     );
-    try testError("{[x1;x2;x1]}",
+    try testFail("{[x1;x2;x1]}",
         \\test:1:9: error: redeclaration of function parameter 'x1'
         \\{[x1;x2;x1]}
         \\        ^~
@@ -665,25 +780,41 @@ test "duplicate function parameters" {
 }
 
 test "invalid function parameter" {
-    try testError("{[`x]}",
+    try testFail("{[`x]}",
         \\test:1:3: error: invalid function parameter
         \\{[`x]}
         \\  ^~
     );
+
     // TODO: Implement 4.1 pattern matching
     return error.SkipZigTest;
 }
 
 test "too many arguments for assignment" {
-    return error.SkipZigTest;
-}
-
-test "cannot project assignment" {
-    return error.SkipZigTest;
+    try testFail("a:",
+        \\test:1:1: error: expected 2 arguments, found 1
+        \\a:
+        \\^~
+    );
+    try testFail(":[a]",
+        \\test:1:1: error: expected 2 arguments, found 1
+        \\:[a]
+        \\^~~~
+    );
+    try testFail(":[a;]",
+        \\test:1:1: error: expected 2 arguments, found 1
+        \\:[a;]
+        \\^~~~~
+    );
+    try testFail(":[a;b;c]",
+        \\test:1:1: error: expected 2 arguments, found 3
+        \\:[a;b;c]
+        \\^~~~~~~~
+    );
 }
 
 test "invalid assignment target" {
-    try testError(
+    try testFail(
         \\"test":123
     ,
         \\test:1:1: error: invalid assignment target
