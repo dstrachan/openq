@@ -16,6 +16,7 @@ extra: std.ArrayListUnmanaged(u32) = .empty,
 string_bytes: std.ArrayListUnmanaged(u8) = .empty,
 compile_errors: std.ArrayListUnmanaged(Qir.Inst.CompileErrors.Item) = .empty,
 scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Ast.Node.Index)) = .empty,
+locals: std.StringHashMapUnmanaged(Ast.Node.Index) = .empty,
 
 const InnerError = error{ OutOfMemory, AnalysisFail };
 
@@ -128,6 +129,7 @@ fn deinit(astgen: *AstGen) void {
     astgen.compile_errors.deinit(astgen.gpa);
     for (astgen.scopes.items) |*scope| scope.deinit(astgen.gpa);
     astgen.scopes.deinit(astgen.gpa);
+    astgen.locals.deinit(astgen.gpa);
 }
 
 fn visit(astgen: *AstGen) InnerError!void {
@@ -176,12 +178,24 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
 
         .function => {
             const function = tree.extraData(tree.nodeData(node).extra_and_token[0], Ast.Node.Function);
-
             const params = tree.extraDataSlice(.{
                 .start = function.params_start,
                 .end = function.body_start,
             }, Ast.Node.Index);
+            const body = tree.extraDataSlice(.{
+                .start = function.body_start,
+                .end = function.body_end,
+            }, Ast.Node.Index);
+
             if (params.len > 8) return astgen.appendErrorNode(params[8], "too many function parameters", .{});
+
+            const prev_locals = astgen.locals;
+            astgen.locals = .empty;
+            defer {
+                astgen.locals.deinit(gpa);
+                astgen.locals = prev_locals;
+            }
+            for (body) |n| try astgen.findLocals(n);
 
             try astgen.scopes.append(gpa, .empty);
             defer {
@@ -210,10 +224,6 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
                 gop.value_ptr.* = param;
             }
 
-            const body = tree.extraDataSlice(.{
-                .start = function.body_start,
-                .end = function.body_end,
-            }, Ast.Node.Index);
             for (body) |n| try astgen.visitNode(n);
         },
 
@@ -327,7 +337,17 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
 
         .identifier => {
             const slice = tree.tokenSlice(tree.nodeMainToken(node));
-            if (!astgen.scopes.getLast().contains(slice)) return astgen.appendErrorNode(node, "use of undeclared identifier '{s}'", .{slice});
+            if (astgen.locals.size == 0) {
+                if (!astgen.scopes.getLast().contains(slice)) {
+                    return astgen.appendErrorNode(node, "use of undeclared identifier '{s}'", .{slice});
+                }
+            } else if (astgen.locals.get(slice)) |local_node| {
+                if (!astgen.scopes.getLast().contains(slice)) {
+                    return astgen.appendErrorNodeNotes(node, "use of undeclared identifier '{s}'", .{slice}, &.{
+                        try astgen.errNoteNode(local_node, "initial declaration here", .{}),
+                    });
+                }
+            }
         },
 
         .select => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.Select).from),
@@ -335,6 +355,160 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
         .update => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.Update).from),
         .delete_rows => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteRows).from),
         .delete_cols => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteCols).from),
+    }
+}
+
+fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
+    const gpa = astgen.gpa;
+    const tree = astgen.tree;
+    switch (tree.nodeTag(node)) {
+        .root => unreachable,
+        .no_op => {},
+
+        .grouped_expression => try astgen.findLocals(tree.nodeData(node).node),
+        .empty_list => {},
+        .list => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            var it = std.mem.reverseIterator(nodes);
+            while (it.next()) |n| try astgen.findLocals(n);
+        },
+
+        .table_literal => {
+            const table = tree.extraData(tree.nodeData(node).extra_and_token[0], Ast.Node.Table);
+
+            inline for (&.{
+                tree.extraDataSlice(.{ .start = table.columns_start, .end = table.columns_end }, Ast.Node.Index),
+                tree.extraDataSlice(.{ .start = table.keys_start, .end = table.columns_start }, Ast.Node.Index),
+            }) |columns| {
+                var it = std.mem.reverseIterator(columns);
+                while (it.next()) |n| {
+                    if (tree.nodeTag(n) == .call) {
+                        const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Ast.Node.Index);
+                        if (nodes.len == 3 and tree.nodeTag(nodes[0]) == .colon and tree.nodeTag(nodes[1]) == .identifier) {
+                            try astgen.findLocals(nodes[2]);
+                            continue;
+                        }
+                    }
+                    try astgen.findLocals(n);
+                }
+            }
+        },
+
+        .function => {
+            const function = tree.extraData(tree.nodeData(node).extra_and_token[0], Ast.Node.Function);
+            const body = tree.extraDataSlice(.{
+                .start = function.body_start,
+                .end = function.body_end,
+            }, Ast.Node.Index);
+
+            const prev_locals = astgen.locals;
+            astgen.locals = .empty;
+            defer {
+                astgen.locals.deinit(gpa);
+                astgen.locals = prev_locals;
+            }
+            for (body) |n| try astgen.findLocals(n);
+        },
+
+        .expr_block => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            for (nodes) |n| try astgen.findLocals(n);
+        },
+
+        .colon,
+        .colon_colon,
+        .plus,
+        .plus_colon,
+        .minus,
+        .minus_colon,
+        .asterisk,
+        .asterisk_colon,
+        .percent,
+        .percent_colon,
+        .ampersand,
+        .ampersand_colon,
+        .pipe,
+        .pipe_colon,
+        .caret,
+        .caret_colon,
+        .equal,
+        .equal_colon,
+        .l_angle_bracket,
+        .l_angle_bracket_colon,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
+        .r_angle_bracket,
+        .r_angle_bracket_colon,
+        .r_angle_bracket_equal,
+        .dollar,
+        .dollar_colon,
+        .comma,
+        .comma_colon,
+        .hash,
+        .hash_colon,
+        .underscore,
+        .underscore_colon,
+        .tilde,
+        .tilde_colon,
+        .bang,
+        .bang_colon,
+        .question_mark,
+        .question_mark_colon,
+        .at,
+        .at_colon,
+        .dot,
+        .dot_colon,
+        .zero_colon,
+        .zero_colon_colon,
+        .one_colon,
+        .one_colon_colon,
+        .two_colon,
+        => {},
+
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => if (tree.nodeData(node).opt_node.unwrap()) |n| try astgen.findLocals(n),
+
+        .call => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            const func = nodes[0];
+            const args = nodes[1..];
+            switch (tree.nodeTag(func)) {
+                .colon => {
+                    try astgen.findLocals(args[1]);
+
+                    const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
+                    try astgen.locals.put(gpa, slice, args[0]);
+
+                    return;
+                },
+                else => {},
+            }
+            var it = std.mem.reverseIterator(nodes);
+            while (it.next()) |n| try astgen.findLocals(n);
+        },
+        .apply_unary => unreachable,
+        .apply_binary => unreachable,
+
+        .number_literal,
+        .number_list_literal,
+        .string_literal,
+        .symbol_literal,
+        .symbol_list_literal,
+        .builtin,
+        => {},
+
+        .identifier => {},
+
+        .select => try astgen.findLocals(tree.extraData(tree.nodeData(node).extra, Ast.Node.Select).from),
+        .exec => try astgen.findLocals(tree.extraData(tree.nodeData(node).extra, Ast.Node.Exec).from),
+        .update => try astgen.findLocals(tree.extraData(tree.nodeData(node).extra, Ast.Node.Update).from),
+        .delete_rows => try astgen.findLocals(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteRows).from),
+        .delete_cols => try astgen.findLocals(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteCols).from),
     }
 }
 
@@ -724,32 +898,21 @@ test "undeclared identifier - function" {
     try testNoFail("{ ; ; }");
 
     try testFail(
-        \\{[]x;y;z}
+        \\{[]a:a+b;{[]a:a+b}}
     ,
-        \\test:1:4: error: use of undeclared identifier 'x'
-        \\{[]x;y;z}
-        \\   ^
-        \\test:1:6: error: use of undeclared identifier 'y'
-        \\{[]x;y;z}
-        \\     ^
-        \\test:1:8: error: use of undeclared identifier 'z'
-        \\{[]x;y;z}
-        \\       ^
-    );
-
-    try testFail(
-        \\{[]a:a+b}
-    ,
-        \\test:1:8: error: use of undeclared identifier 'b'
-        \\{[]a:a+b}
-        \\       ^
         \\test:1:6: error: use of undeclared identifier 'a'
-        \\{[]a:a+b}
+        \\{[]a:a+b;{[]a:a+b}}
         \\     ^
+        \\test:1:4: note: initial declaration here
+        \\{[]a:a+b;{[]a:a+b}}
+        \\   ^
+        \\test:1:15: error: use of undeclared identifier 'a'
+        \\{[]a:a+b;{[]a:a+b}}
+        \\              ^
+        \\test:1:13: note: initial declaration here
+        \\{[]a:a+b;{[]a:a+b}}
+        \\            ^
     );
-
-    // TODO: Allow globals
-    return error.SkipZigTest;
 }
 
 test "too many function parameters" {
