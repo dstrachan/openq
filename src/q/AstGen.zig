@@ -892,14 +892,30 @@ test "undeclared identifier - table literal" {
 }
 
 test "undeclared identifier - function" {
-    try testNoFail("{x;y;z}");
-    try testNoFail("{x;y; }");
-    try testNoFail("{x; ;z}");
-    try testNoFail("{x; ; }");
-    try testNoFail("{ ;y;z}");
-    try testNoFail("{ ;y; }");
-    try testNoFail("{ ; ;z}");
-    try testNoFail("{ ; ; }");
+    try testNoFail("{x:x+y:y+z:z+1}");
+    try testFail("{a:a+b:b+c:c+1}",
+        \\test:1:12: error: use of undeclared identifier 'c'
+        \\{a:a+b:b+c:c+1}
+        \\           ^
+        \\test:1:10: note: initial declaration here
+        \\{a:a+b:b+c:c+1}
+        \\         ^
+        \\test:1:8: error: use of undeclared identifier 'b'
+        \\{a:a+b:b+c:c+1}
+        \\       ^
+        \\test:1:6: note: initial declaration here
+        \\{a:a+b:b+c:c+1}
+        \\     ^
+        \\test:1:4: error: use of undeclared identifier 'a'
+        \\{a:a+b:b+c:c+1}
+        \\   ^
+        \\test:1:2: note: initial declaration here
+        \\{a:a+b:b+c:c+1}
+        \\ ^
+    );
+
+    try testNoFail("{.ns.a}");
+    try testNoFail("{.ns.a:.ns.a+b}");
 
     try testFail(
         \\{[]a:a+b;{[]a:a+b}}
