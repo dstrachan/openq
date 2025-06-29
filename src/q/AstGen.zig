@@ -16,7 +16,7 @@ extra: std.ArrayListUnmanaged(u32) = .empty,
 string_bytes: std.ArrayListUnmanaged(u8) = .empty,
 compile_errors: std.ArrayListUnmanaged(Qir.Inst.CompileErrors.Item) = .empty,
 scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Ast.Node.Index)) = .empty,
-locals: std.StringHashMapUnmanaged(Ast.Node.Index) = .empty,
+locals: ?std.StringHashMapUnmanaged(Ast.Node.Index) = null,
 
 const InnerError = error{ OutOfMemory, AnalysisFail };
 
@@ -129,7 +129,7 @@ fn deinit(astgen: *AstGen) void {
     astgen.compile_errors.deinit(astgen.gpa);
     for (astgen.scopes.items) |*scope| scope.deinit(astgen.gpa);
     astgen.scopes.deinit(astgen.gpa);
-    astgen.locals.deinit(astgen.gpa);
+    if (astgen.locals) |*locals| locals.deinit(astgen.gpa);
 }
 
 fn visit(astgen: *AstGen) InnerError!void {
@@ -192,7 +192,7 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
             const prev_locals = astgen.locals;
             astgen.locals = .empty;
             defer {
-                astgen.locals.deinit(gpa);
+                astgen.locals.?.deinit(gpa);
                 astgen.locals = prev_locals;
             }
             for (body) |n| try astgen.findLocals(n);
@@ -337,15 +337,19 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
 
         .identifier => {
             const slice = tree.tokenSlice(tree.nodeMainToken(node));
-            if (astgen.locals.size == 0) {
-                if (!astgen.scopes.getLast().contains(slice)) {
-                    return astgen.appendErrorNode(node, "use of undeclared identifier '{s}'", .{slice});
-                }
-            } else if (astgen.locals.get(slice)) |local_node| {
-                if (!astgen.scopes.getLast().contains(slice)) {
-                    return astgen.appendErrorNodeNotes(node, "use of undeclared identifier '{s}'", .{slice}, &.{
-                        try astgen.errNoteNode(local_node, "initial declaration here", .{}),
-                    });
+            if (slice[0] != '.') {
+                if (astgen.locals) |locals| {
+                    if (locals.get(slice)) |local_node| {
+                        if (!astgen.scopes.getLast().contains(slice)) {
+                            return astgen.appendErrorNodeNotes(node, "use of undeclared identifier '{s}'", .{slice}, &.{
+                                try astgen.errNoteNode(local_node, "initial declaration here", .{}),
+                            });
+                        }
+                    }
+                } else {
+                    if (!astgen.scopes.getLast().contains(slice)) {
+                        return astgen.appendErrorNode(node, "use of undeclared identifier '{s}'", .{slice});
+                    }
                 }
             }
         },
@@ -404,7 +408,7 @@ fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
             const prev_locals = astgen.locals;
             astgen.locals = .empty;
             defer {
-                astgen.locals.deinit(gpa);
+                astgen.locals.?.deinit(gpa);
                 astgen.locals = prev_locals;
             }
             for (body) |n| try astgen.findLocals(n);
@@ -482,7 +486,7 @@ fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
                     try astgen.findLocals(args[1]);
 
                     const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
-                    try astgen.locals.put(gpa, slice, args[0]);
+                    if (slice[0] != '.') try astgen.locals.?.put(gpa, slice, args[0]);
 
                     return;
                 },
