@@ -59,7 +59,10 @@ fn tokenSlice(p: *const Parse, token_index: TokenIndex) []const u8 {
         .index = p.tokenStart(token_index),
         .next_is_minus = false,
     };
-    const token = tokenizer.next();
+    const token = token: {
+        const token = tokenizer.next();
+        break :token if (token.tag == .eos) tokenizer.next() else token;
+    };
     assert(token.tag == token_tag);
     return p.source[token.loc.start..token.loc.end];
 }
@@ -341,7 +344,7 @@ fn parseNoun(p: *Parse, comptime sql_identifier: ?SqlIdentifier) !Node.OptionalI
         .number_literal => try p.parseNumberLiteral(),
         .string_literal => try p.addNoun(.string_literal),
         .symbol_literal => try p.parseSymbolLiteral(),
-        .identifier => try p.addNoun(.identifier),
+        .identifier => try p.parseIdentifier(),
 
         // Misc.
         .system => @panic("NYI"),
@@ -827,6 +830,17 @@ fn parseSymbolLiteral(p: *Parse) !Node.Index {
             .data = .{ .token = items[items.len - 1] },
         }),
     }
+}
+
+fn parseIdentifier(p: *Parse) !Node.Index {
+    const identifier = p.assertToken(.identifier);
+
+    const slice = p.tokenSlice(identifier);
+    return p.addNode(.{
+        .tag = if (std.meta.stringToEnum(Node.Builtin, slice)) |_| .builtin else .identifier,
+        .main_token = identifier,
+        .data = undefined,
+    });
 }
 
 fn parseSelect(p: *Parse) !Node.Index {

@@ -972,6 +972,10 @@ pub const Node = struct {
         select_end: ExtraIndex,
         from: Index,
     };
+
+    pub const Builtin = enum {
+        not,
+    };
 };
 
 pub fn nodeToSpan(tree: *const Ast, node: Ast.Node.Index) Span {
