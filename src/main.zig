@@ -249,7 +249,7 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
         process.exit(1);
     } else {
         const tree = try orig_tree.normalize(arena);
-        const writer = io.getStdOut().writer().any();
+        const writer = io.getStdOut().writer();
         try utils.writeJsonNode(writer, tree, .root);
     }
 

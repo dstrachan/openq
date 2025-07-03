@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const AnyWriter = std.io.AnyWriter;
 
 const q = @import("q");
 const Ast = q.Ast;
@@ -9,7 +8,7 @@ const Node = q.Node;
 const AstGen = q.AstGen;
 const Qir = q.Qir;
 
-pub fn writeJsonNode(writer: AnyWriter, tree: Ast, node: Node.Index) !void {
+pub fn writeJsonNode(writer: anytype, tree: Ast, node: Node.Index) !void {
     switch (tree.nodeTag(node)) {
         .root => {
             try writer.writeAll(
