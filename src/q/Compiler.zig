@@ -60,8 +60,8 @@ fn replaceByte(compiler: Compiler, index: OpCode.Index, byte: u8) void {
 
 fn end(compiler: Compiler) !void {
     try compiler.emitReturn();
-    if (build_options.print_code) {
-        try compiler.current_chunk.disassemble("code");
+    if (!@import("builtin").is_test and build_options.print_code) {
+        try compiler.current_chunk.disassemble(std.io.getStdOut().writer(), "code");
     }
 }
 
@@ -164,6 +164,13 @@ fn symbol(compiler: Compiler, node: Node.Index) !void {
     }
 }
 
+inline fn unary(compiler: Compiler, op_code: OpCode, x: Node.Index) !void {
+    if (compiler.tree.nodeTag(x) == .no_op) return error.NYI;
+
+    try compiler.compileNode(x);
+    try compiler.emitByte(@intFromEnum(op_code));
+}
+
 inline fn binary(compiler: Compiler, op_code: OpCode, x: Node.Index, y: Node.Index) !void {
     if (compiler.tree.nodeTag(y) == .no_op) return error.NYI;
     if (compiler.tree.nodeTag(x) == .no_op) return error.NYI;
@@ -222,7 +229,7 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
         .underscore => @panic("NYI"),
         .underscore_colon => @panic("NYI"),
         .tilde => @panic("NYI"),
-        .tilde_colon => @panic("NYI"),
+        .tilde_colon => try compiler.emitByte(@intFromEnum(OpCode.not)),
         .bang => @panic("NYI"),
         .bang_colon => @panic("NYI"),
         .question_mark => @panic("NYI"),
@@ -277,11 +284,16 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
                     2 => try compiler.binary(.concat, args[0], args[1]),
                     else => return error.Rank,
                 },
+                .tilde_colon => switch (args.len) {
+                    1 => try compiler.unary(.not, args[0]),
+                    else => return error.Rank,
+                },
                 .at => switch (args.len) {
                     // 1 => try compiler.binary(.apply, args[0], null),
                     2 => try compiler.binary(.apply, args[0], args[1]),
                     else => return error.Rank,
                 },
+                .builtin => try compiler.builtin(func, args),
                 inline else => |t| @panic("NYI " ++ @tagName(t)),
             }
         },
@@ -309,6 +321,19 @@ fn compileNode(compiler: Compiler, node: Node.Index) Error!void {
     };
 }
 
+fn builtin(compiler: Compiler, node: Node.Index, args: []const Node.Index) !void {
+    const tree = compiler.tree;
+    const token = tree.nodeMainToken(node);
+    const slice = tree.tokenSlice(token);
+    const tag = std.meta.stringToEnum(Node.Builtin, slice) orelse unreachable;
+    switch (tag) {
+        .not => switch (args.len) {
+            1 => try compiler.unary(.not, args[0]),
+            else => return error.Rank,
+        },
+    }
+}
+
 fn fail(compiler: Compiler, node: Node.Index, message: []const u8) error{CompileError} {
     std.io.getStdErr().writer().print("[line {d}] Error at '{s}': {s}\n", .{
         123, // TODO: Line number
@@ -316,4 +341,80 @@ fn fail(compiler: Compiler, node: Node.Index, message: []const u8) error{Compile
         message,
     }) catch {};
     return error.CompileError;
+}
+
+fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected_data: []const u8) !void {
+    const gpa = std.testing.allocator;
+
+    var orig_tree: Ast = try .parse(gpa, source);
+    defer orig_tree.deinit(gpa);
+    try std.testing.expect(orig_tree.errors.len == 0);
+
+    var tree = try orig_tree.normalize(gpa);
+    defer tree.deinit(gpa);
+    try std.testing.expect(tree.errors.len == 0);
+
+    var qir = try q.AstGen.generate(gpa, tree);
+    defer qir.deinit(gpa);
+    try std.testing.expect(!qir.hasCompileErrors());
+
+    var vm: Vm = undefined;
+    try vm.init(gpa);
+    defer vm.deinit();
+
+    var actual_chunk: Chunk = .empty;
+    defer actual_chunk.deinit(gpa);
+    try compile(gpa, tree, &vm, &actual_chunk);
+    for (actual_chunk.data.items(.line)) |*line| line.* = 1;
+
+    var actual: std.ArrayListUnmanaged(u8) = .empty;
+    defer actual.deinit(gpa);
+    try actual_chunk.disassemble(actual.writer(gpa), "test");
+
+    var expected_chunk: Chunk = .empty;
+    defer expected_chunk.deinit(gpa);
+    for (expected_constants) |constant| _ = try expected_chunk.addConstant(gpa, constant);
+    for (expected_data) |code| try expected_chunk.data.append(gpa, .{ .code = code, .line = 1 });
+
+    var expected: std.ArrayListUnmanaged(u8) = .empty;
+    defer expected.deinit(gpa);
+    try expected_chunk.disassemble(expected.writer(gpa), "test");
+
+    try std.testing.expectEqualStrings(expected.items, actual.items);
+}
+
+const utils = struct {
+    fn simple(op_code: OpCode) []const u8 {
+        return &.{@intFromEnum(op_code)};
+    }
+
+    fn constant(index: u8) []const u8 {
+        return simple(.constant) ++ [_]u8{index};
+    }
+};
+
+test {
+    try testCompile(
+        "1.2",
+        &.{.{ .type = .float, .as = .{ .float = 1.2 } }},
+        comptime utils.constant(0) ++ utils.simple(.@"return"),
+    );
+    try testCompile(
+        "3*4+5",
+        &.{
+            .{ .type = .long, .as = .{ .long = 5 } },
+            .{ .type = .long, .as = .{ .long = 4 } },
+            .{ .type = .long, .as = .{ .long = 3 } },
+        },
+        comptime utils.constant(0) ++ utils.constant(1) ++ utils.simple(.add) ++
+            utils.constant(2) ++ utils.simple(.multiply) ++
+            utils.simple(.@"return"),
+    );
+    try testCompile(
+        "not 0",
+        &.{
+            .{ .type = .long, .as = .{ .long = 0 } },
+        },
+        comptime utils.constant(0) ++ utils.simple(.not) ++ utils.simple(.@"return"),
+    );
 }

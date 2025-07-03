@@ -20,6 +20,7 @@ pub const OpCode = enum(u8) {
     concat,
     apply,
 
+    not,
     flip,
     negate,
     first,
@@ -82,6 +83,7 @@ pub fn disassembleInstruction(chunk: Chunk, writer: anytype, offset: usize) !usi
         .apply,
         => |t| return simpleInstruction(writer, @tagName(t), offset),
 
+        .not,
         .flip,
         .negate,
         .first,
