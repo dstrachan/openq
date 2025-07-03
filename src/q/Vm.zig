@@ -100,14 +100,17 @@ fn run(vm: *Vm) !void {
             .subtract => try vm.binary(subtract),
             .multiply => try vm.binary(multiply),
             .divide => try vm.binary(divide),
-            .apply => @panic("NYI"),
             .concat => try vm.binary(concat),
+            .match => try vm.binary(match),
+            .apply => try vm.binary(apply),
 
-            .not => try vm.unary(not),
-            .flip => @panic("NYI"),
+            .flip => try vm.unary(flip),
             .negate => try vm.unary(negate),
-            .first => @panic("NYI"),
+            .first => try vm.unary(first),
             .reciprocal => try vm.unary(reciprocal),
+            .enlist => try vm.unary(enlist),
+            .not => try vm.unary(not),
+            .type => try vm.unary(@"type"),
 
             .@"return" => {
                 var value = vm.pop();
@@ -144,32 +147,6 @@ inline fn binary(vm: *Vm, f: *const fn (*Vm, *Value, *Value) anyerror!Value) !vo
     defer y.deref(vm.gpa);
 
     vm.push(try f(vm, &x, &y));
-}
-
-fn not(vm: *Vm, x: *Value) !Value {
-    return switch (x.type) {
-        .mixed_list => @panic("NYI"),
-        .boolean => vm.createBoolean(!x.as.boolean),
-        .boolean_list => @panic("NYI"),
-        .guid => @panic("NYI"),
-        .guid_list => @panic("NYI"),
-        .byte => @panic("NYI"),
-        .byte_list => @panic("NYI"),
-        .short => @panic("NYI"),
-        .short_list => @panic("NYI"),
-        .int => @panic("NYI"),
-        .int_list => @panic("NYI"),
-        .long => vm.createBoolean(x.as.long == 0),
-        .long_list => @panic("NYI"),
-        .real => @panic("NYI"),
-        .real_list => @panic("NYI"),
-        .float => @panic("NYI"),
-        .float_list => @panic("NYI"),
-        .char => @panic("NYI"),
-        .char_list => @panic("NYI"),
-        .symbol => @panic("NYI"),
-        .symbol_list => @panic("NYI"),
-    };
 }
 
 fn add(vm: *Vm, x: *Value, y: *Value) !Value {
@@ -542,6 +519,26 @@ fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
     };
 }
 
+fn match(vm: *Vm, x: *Value, y: *Value) !Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.NYI;
+}
+
+fn apply(vm: *Vm, x: *Value, y: *Value) !Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.NYI;
+}
+
+fn flip(vm: *Vm, x: *Value) !Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.NYI;
+}
+
 fn negate(vm: *Vm, x: *Value) !Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
@@ -568,6 +565,12 @@ fn negate(vm: *Vm, x: *Value) !Value {
     };
 }
 
+fn first(vm: *Vm, x: *Value) !Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.NYI;
+}
+
 fn reciprocal(vm: *Vm, x: *Value) !Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
@@ -592,6 +595,44 @@ fn reciprocal(vm: *Vm, x: *Value) !Value {
         .symbol => @panic("NYI"),
         .symbol_list => @panic("NYI"),
     };
+}
+
+fn enlist(vm: *Vm, x: *Value) !Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.NYI;
+}
+
+fn not(vm: *Vm, x: *Value) !Value {
+    return switch (x.type) {
+        .mixed_list => @panic("NYI"),
+        .boolean => vm.createBoolean(!x.as.boolean),
+        .boolean_list => @panic("NYI"),
+        .guid => @panic("NYI"),
+        .guid_list => @panic("NYI"),
+        .byte => @panic("NYI"),
+        .byte_list => @panic("NYI"),
+        .short => @panic("NYI"),
+        .short_list => @panic("NYI"),
+        .int => @panic("NYI"),
+        .int_list => @panic("NYI"),
+        .long => vm.createBoolean(x.as.long == 0),
+        .long_list => @panic("NYI"),
+        .real => @panic("NYI"),
+        .real_list => @panic("NYI"),
+        .float => @panic("NYI"),
+        .float_list => @panic("NYI"),
+        .char => @panic("NYI"),
+        .char_list => @panic("NYI"),
+        .symbol => @panic("NYI"),
+        .symbol_list => @panic("NYI"),
+    };
+}
+
+fn @"type"(vm: *Vm, x: *Value) !Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.NYI;
 }
 
 pub inline fn createBoolean(vm: *Vm, value: bool) Value {

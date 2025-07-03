@@ -18,13 +18,16 @@ pub const OpCode = enum(u8) {
     multiply,
     divide,
     concat,
+    match,
     apply,
 
-    not,
     flip,
     negate,
     first,
     reciprocal,
+    enlist,
+    not,
+    type,
 
     @"return",
 
@@ -80,17 +83,19 @@ pub fn disassembleInstruction(chunk: Chunk, writer: anytype, offset: usize) !usi
         .multiply,
         .divide,
         .concat,
+        .match,
         .apply,
-        => |t| return simpleInstruction(writer, @tagName(t), offset),
 
-        .not,
         .flip,
         .negate,
         .first,
         .reciprocal,
-        => |t| return simpleInstruction(writer, @tagName(t), offset),
+        .enlist,
+        .not,
+        .type,
 
-        .@"return" => return simpleInstruction(writer, @tagName(.@"return"), offset),
+        .@"return",
+        => |t| return simpleInstruction(writer, @tagName(t), offset),
     }
 }
 
