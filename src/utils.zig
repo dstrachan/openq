@@ -468,3 +468,15 @@ pub fn printAstErrorsToStderr(gpa: Allocator, tree: Ast, path: []const u8, color
     defer error_bundle.deinit(gpa);
     error_bundle.renderToStdErr(color.renderOptions());
 }
+
+pub fn printQirErrorsToStderr(gpa: Allocator, qir: Qir, tree: Ast, path: []const u8, color: std.zig.Color) !void {
+    var wip_errors: std.zig.ErrorBundle.Wip = undefined;
+    try wip_errors.init(gpa);
+    defer wip_errors.deinit();
+
+    try q.addQirErrorMessages(&wip_errors, qir, tree, path);
+
+    var error_bundle = try wip_errors.toOwnedBundle("");
+    defer error_bundle.deinit(gpa);
+    error_bundle.renderToStdErr(color.renderOptions());
+}

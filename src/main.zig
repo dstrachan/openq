@@ -243,12 +243,15 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
         };
     };
 
-    const tree: Ast = tree: {
-        const tree: Ast = try .parse(arena, source);
-        break :tree if (normalize) try tree.normalize(arena) else tree;
-    };
-    const writer = io.getStdOut().writer().any();
-    try utils.writeJsonNode(writer, tree, .root);
+    const orig_tree: Ast = try .parse(arena, source);
+    if (orig_tree.errors.len > 0) {
+        try utils.printAstErrorsToStderr(arena, orig_tree, "<repl>", color);
+        process.exit(1);
+    } else {
+        const tree = try orig_tree.normalize(arena);
+        const writer = io.getStdOut().writer().any();
+        try utils.writeJsonNode(writer, tree, .root);
+    }
 
     return cleanExit();
 }
@@ -311,61 +314,59 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
     };
 
     const orig_tree: Ast = try .parse(arena, source);
-    const tree: Ast = try orig_tree.normalize(arena);
-    if (tree.errors.len > 0) {
-        try utils.printAstErrorsToStderr(arena, tree, display_path, color);
-    } else {
-        const qir = try AstGen.generate(arena, tree);
-        if (qir.hasCompileErrors()) {
-            var wip_errors: std.zig.ErrorBundle.Wip = undefined;
-            try wip_errors.init(arena);
-            try q.addQirErrorMessages(&wip_errors, qir, tree, display_path);
-            var error_bundle = try wip_errors.toOwnedBundle("");
-            error_bundle.renderToStdErr(color.renderOptions());
-            if (qir.loweringFailed()) {
-                process.exit(1);
-            }
-        }
-
-        {
-            const token_bytes = @sizeOf(Ast.TokenList) +
-                tree.tokens.len * (@sizeOf(Token.Tag) + @sizeOf(Ast.ByteOffset));
-            const tree_bytes = @sizeOf(Ast) + tree.nodes.len * (@sizeOf(Ast.Node.Tag) + @sizeOf(Ast.TokenIndex) +
-                // Here we don't use @sizeOf(Ast.Node.Data) because it would include
-                // the debug safety tag but we want to measure release size.
-                8);
-            const instruction_bytes = qir.instructions.len *
-                // Here we don't use @sizeOf(Qir.Inst.Data) because it would include
-                // the debug safety tag but we want to measure release size.
-                (@sizeOf(Qir.Inst.Tag) + 8);
-            const extra_bytes = qir.extra.len * @sizeOf(u32);
-            const total_bytes = @sizeOf(Qir) + instruction_bytes + extra_bytes + qir.string_bytes.len * @sizeOf(u8);
-            const stdout = io.getStdOut();
-            const fmtIntSizeBin = std.fmt.fmtIntSizeBin;
-            try stdout.writer().print(
-                \\# Source bytes:       {}
-                \\# Tokens:             {} ({})
-                \\# AST nodes:          {} ({})
-                \\# Total QIR bytes:    {}
-                \\# Instructions:       {d} ({})
-                \\# String table bytes: {}
-                \\# Extra data items:   {d} ({})
-                \\
-            , .{
-                // zig fmt: off
-                fmtIntSizeBin(source.len),
-                tree.tokens.len, fmtIntSizeBin(token_bytes),
-                tree.nodes.len, fmtIntSizeBin(tree_bytes),
-                fmtIntSizeBin(total_bytes),
-                qir.instructions.len, fmtIntSizeBin(instruction_bytes),
-                fmtIntSizeBin(qir.string_bytes.len),
-                qir.extra.len, fmtIntSizeBin(extra_bytes),
-                // zig fmt: on
-            });
-        }
-
-        // TODO: Print QIR
+    if (orig_tree.errors.len > 0) {
+        try utils.printAstErrorsToStderr(arena, orig_tree, "<repl>", color);
+        process.exit(1);
     }
+
+    const tree = try orig_tree.normalize(arena);
+
+    const qir = try AstGen.generate(arena, tree);
+    if (qir.hasCompileErrors()) {
+        try utils.printQirErrorsToStderr(arena, qir, tree, "<repl>", color);
+        if (qir.loweringFailed()) {
+            process.exit(1);
+        }
+    }
+
+    {
+        const token_bytes = @sizeOf(Ast.TokenList) +
+            tree.tokens.len * (@sizeOf(Token.Tag) + @sizeOf(Ast.ByteOffset));
+        const tree_bytes = @sizeOf(Ast) + tree.nodes.len * (@sizeOf(Ast.Node.Tag) + @sizeOf(Ast.TokenIndex) +
+            // Here we don't use @sizeOf(Ast.Node.Data) because it would include
+            // the debug safety tag but we want to measure release size.
+            8);
+        const instruction_bytes = qir.instructions.len *
+            // Here we don't use @sizeOf(Qir.Inst.Data) because it would include
+            // the debug safety tag but we want to measure release size.
+            (@sizeOf(Qir.Inst.Tag) + 8);
+        const extra_bytes = qir.extra.len * @sizeOf(u32);
+        const total_bytes = @sizeOf(Qir) + instruction_bytes + extra_bytes + qir.string_bytes.len * @sizeOf(u8);
+        const stdout = io.getStdOut();
+        const fmtIntSizeBin = std.fmt.fmtIntSizeBin;
+        // zig fmt: off
+        try stdout.writer().print(
+            \\# Source bytes:       {}
+            \\# Tokens:             {} ({})
+            \\# AST nodes:          {} ({})
+            \\# Total QIR bytes:    {}
+            \\# Instructions:       {d} ({})
+            \\# String table bytes: {}
+            \\# Extra data items:   {d} ({})
+            \\
+        , .{
+            fmtIntSizeBin(source.len),
+            tree.tokens.len, fmtIntSizeBin(token_bytes),
+            tree.nodes.len, fmtIntSizeBin(tree_bytes),
+            fmtIntSizeBin(total_bytes),
+            qir.instructions.len, fmtIntSizeBin(instruction_bytes),
+            fmtIntSizeBin(qir.string_bytes.len),
+            qir.extra.len, fmtIntSizeBin(extra_bytes),
+        });
+        // zig fmt: on
+    }
+
+    // TODO: Print QIR
 
     return cleanExit();
 }
@@ -417,7 +418,8 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
 
     try stderr.writeAll(banner);
 
-    const vm: *Vm = try .init(gpa);
+    var vm: Vm = undefined;
+    try vm.init(gpa);
     defer vm.deinit();
 
     var buffer: std.ArrayList(u8) = .init(gpa);
@@ -432,12 +434,23 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         if (mem.eql(u8, buffer.items, "\\\\")) break;
 
         try buffer.append(0);
+
         var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
         defer orig_tree.deinit(gpa);
+        if (orig_tree.errors.len > 0) {
+            try utils.printAstErrorsToStderr(gpa, orig_tree, "<repl>", color);
+            continue;
+        }
+
         var tree = try orig_tree.normalize(gpa);
         defer tree.deinit(gpa);
 
-        if (tree.errors.len > 0) continue;
+        var qir = try AstGen.generate(gpa, tree);
+        defer qir.deinit(gpa);
+        if (qir.hasCompileErrors()) {
+            try utils.printQirErrorsToStderr(gpa, qir, tree, "<repl>", color);
+            continue;
+        }
 
         vm.interpret(tree) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
