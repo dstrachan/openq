@@ -54,26 +54,25 @@ pub fn opCode(chunk: Chunk, index: OpCode.Index) OpCode {
     return @enumFromInt(chunk.data.items(.code)[@intFromEnum(index)]);
 }
 
-pub fn disassemble(chunk: Chunk, name: []const u8) !void {
-    try std.io.getStdOut().writer().print("== {s} ==\n", .{name});
+pub fn disassemble(chunk: Chunk, writer: anytype, name: []const u8) !void {
+    try writer.print("== {s} ==\n", .{name});
 
     var offset: usize = 0;
     while (offset < chunk.data.len) {
-        offset = try chunk.disassembleInstruction(offset);
+        offset = try chunk.disassembleInstruction(writer, offset);
     }
 }
 
-pub fn disassembleInstruction(chunk: Chunk, offset: usize) !usize {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print("{d:04} ", .{offset});
+pub fn disassembleInstruction(chunk: Chunk, writer: anytype, offset: usize) !usize {
+    try writer.print("{d:04} ", .{offset});
     if (offset > 0 and chunk.data.items(.line)[offset] == chunk.data.items(.line)[offset - 1]) {
-        try stdout.writeAll("   | ");
+        try writer.writeAll("   | ");
     } else {
-        try stdout.print("{d:4} ", .{chunk.data.items(.line)[offset]});
+        try writer.print("{d:4} ", .{chunk.data.items(.line)[offset]});
     }
 
     switch (chunk.opCode(@enumFromInt(offset))) {
-        .constant => return chunk.constantInstruction(@tagName(.constant), offset),
+        .constant => return chunk.constantInstruction(writer, @tagName(.constant), offset),
 
         .add,
         .subtract,
@@ -81,28 +80,25 @@ pub fn disassembleInstruction(chunk: Chunk, offset: usize) !usize {
         .divide,
         .concat,
         .apply,
-        => |t| return simpleInstruction(@tagName(t), offset),
+        => |t| return simpleInstruction(writer, @tagName(t), offset),
 
         .flip,
         .negate,
         .first,
         .reciprocal,
-        => |t| return simpleInstruction(@tagName(t), offset),
+        => |t| return simpleInstruction(writer, @tagName(t), offset),
 
-        .@"return" => return simpleInstruction(@tagName(.@"return"), offset),
+        .@"return" => return simpleInstruction(writer, @tagName(.@"return"), offset),
     }
 }
 
-fn simpleInstruction(name: []const u8, offset: usize) !usize {
-    try std.io.getStdOut().writer().print("{s}\n", .{name});
+fn simpleInstruction(writer: anytype, name: []const u8, offset: usize) !usize {
+    try writer.print("{s}\n", .{name});
     return offset + 1;
 }
 
-fn constantInstruction(chunk: Chunk, name: []const u8, offset: usize) !usize {
-    const stdout = std.io.getStdOut().writer();
+fn constantInstruction(chunk: Chunk, writer: anytype, name: []const u8, offset: usize) !usize {
     const constant = chunk.data.items(.code)[offset + 1];
-    try stdout.print("{s: <16} {d:4} '", .{ name, constant });
-    try chunk.constants.items[constant].print();
-    try stdout.writeAll("'\n");
+    try writer.print("{s: <16} {d:4} '{}'\n", .{ name, constant, chunk.constants.items[constant] });
     return offset + 2;
 }
