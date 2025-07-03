@@ -27,8 +27,7 @@ pub const Error = Allocator.Error || error{
     UndeclaredIdentifier,
 };
 
-pub fn init(gpa: Allocator) !*Vm {
-    const vm = try gpa.create(Vm);
+pub fn init(vm: *Vm, gpa: Allocator) !void {
     vm.* = .{
         .gpa = gpa,
         .chunk = undefined,
@@ -37,14 +36,12 @@ pub fn init(gpa: Allocator) !*Vm {
         .stack_top = undefined,
     };
     vm.resetStack();
-    return vm;
 }
 
 pub fn deinit(vm: *Vm) void {
     var it = vm.symbols.keyIterator();
     while (it.next()) |entry| vm.gpa.free(entry.*);
     vm.symbols.deinit(vm.gpa);
-    vm.gpa.destroy(vm);
 }
 
 fn resetStack(vm: *Vm) void {
@@ -89,12 +86,10 @@ fn run(vm: *Vm) !void {
             try stdout.writeAll("          ");
             var slot: [*]Value = &vm.stack;
             while (@intFromPtr(slot) < @intFromPtr(vm.stack_top)) : (slot += 1) {
-                try stdout.writeAll("[ ");
-                try slot[0].print();
-                try stdout.print(" ({d}) ]", .{slot[0].ref_count});
+                try stdout.print("[ {} ({d}) ]", .{ slot[0], slot[0].ref_count });
             }
             try stdout.writeByte('\n');
-            _ = try vm.chunk.disassembleInstruction(vm.ip - vm.chunk.data.items(.code).ptr);
+            _ = try vm.chunk.disassembleInstruction(stdout, vm.ip - vm.chunk.data.items(.code).ptr);
         }
 
         const instruction: OpCode = @enumFromInt(vm.readByte());
@@ -117,8 +112,7 @@ fn run(vm: *Vm) !void {
                 var value = vm.pop();
                 defer value.deref(vm.gpa);
 
-                try value.print();
-                try stdout.writeByte('\n');
+                try stdout.print("{}\n", .{value});
                 return;
             },
         }

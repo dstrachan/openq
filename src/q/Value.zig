@@ -4,7 +4,7 @@ const assert = std.debug.assert;
 
 const Value = @This();
 
-pub const ValueType = enum {
+pub const Type = enum {
     mixed_list,
     boolean,
     boolean_list,
@@ -28,7 +28,7 @@ pub const ValueType = enum {
     symbol_list,
 };
 
-pub const ValueUnion = union {
+pub const Union = union {
     mixed_list: []Value,
     boolean: bool,
     boolean_list: []bool,
@@ -52,9 +52,9 @@ pub const ValueUnion = union {
     symbol_list: [][]u8,
 };
 
-type: ValueType,
+type: Type,
 ref_count: u32 = 1,
-as: ValueUnion,
+as: Union,
 
 pub fn ref(value: *Value) void {
     value.ref_count += 1;
@@ -80,42 +80,41 @@ pub fn deref(value: *Value, gpa: Allocator) void {
     };
 }
 
-pub fn print(value: Value) !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn format(value: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
     switch (value.type) {
         .mixed_list => @panic("NYI"),
-        .boolean => try stdout.writeAll(if (value.as.boolean) "1b" else "0b"),
+        .boolean => try writer.writeAll(if (value.as.boolean) "1b" else "0b"),
         .boolean_list => if (value.as.boolean_list.len == 0) {
-            try stdout.writeAll("`boolean$()");
+            try writer.writeAll("`boolean$()");
         } else {
-            for (value.as.boolean_list) |b| try stdout.writeByte(if (b) '1' else '0');
-            try stdout.writeByte('b');
+            for (value.as.boolean_list) |b| try writer.writeByte(if (b) '1' else '0');
+            try writer.writeByte('b');
         },
         .guid => @panic("NYI"),
         .guid_list => @panic("NYI"),
-        .byte => try stdout.print("0x{d}", .{std.fmt.fmtSliceHexLower(&.{value.as.byte})}),
+        .byte => try writer.print("0x{d}", .{std.fmt.fmtSliceHexLower(&.{value.as.byte})}),
         .byte_list => if (value.as.byte_list.len == 0) {
-            try stdout.writeAll("`byte$()");
+            try writer.writeAll("`byte$()");
         } else {
-            try stdout.print("0x{d}", .{std.fmt.fmtSliceHexLower(value.as.byte_list)});
+            try writer.print("0x{d}", .{std.fmt.fmtSliceHexLower(value.as.byte_list)});
         },
-        .short => try stdout.print("{d}h", .{value.as.short}),
+        .short => try writer.print("{d}h", .{value.as.short}),
         .short_list => @panic("NYI"),
-        .int => try stdout.print("{d}i", .{value.as.int}),
+        .int => try writer.print("{d}i", .{value.as.int}),
         .int_list => @panic("NYI"),
-        .long => try stdout.print("{d}", .{value.as.long}),
+        .long => try writer.print("{d}", .{value.as.long}),
         .long_list => @panic("NYI"),
-        .real => try stdout.print("{d}e", .{value.as.real}),
+        .real => try writer.print("{d}e", .{value.as.real}),
         .real_list => @panic("NYI"),
-        .float => try stdout.print("{d}f", .{value.as.float}),
+        .float => try writer.print("{d}f", .{value.as.float}),
         .float_list => @panic("NYI"),
-        .char => try stdout.print("\"{}\"", .{std.zig.fmtEscapes(&.{value.as.char})}),
+        .char => try writer.print("\"{}\"", .{std.zig.fmtEscapes(&.{value.as.char})}),
         .char_list => if (value.as.char_list.len == 1) {
-            try stdout.print(",\"{}\"", .{std.zig.fmtEscapes(value.as.char_list)});
+            try writer.print(",\"{}\"", .{std.zig.fmtEscapes(value.as.char_list)});
         } else {
-            try stdout.print("\"{}\"", .{std.zig.fmtEscapes(value.as.char_list)});
+            try writer.print("\"{}\"", .{std.zig.fmtEscapes(value.as.char_list)});
         },
-        .symbol => try stdout.print("`{s}", .{value.as.symbol}),
+        .symbol => try writer.print("`{s}", .{value.as.symbol}),
         .symbol_list => @panic("NYI"),
     }
 }
