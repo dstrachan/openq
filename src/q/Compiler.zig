@@ -356,8 +356,32 @@ fn builtin(compiler: Compiler, node: Node.Index, args: []const Node.Index) !void
     const slice = tree.tokenSlice(token);
     const tag = std.meta.stringToEnum(Node.Builtin, slice) orelse unreachable;
     switch (tag) {
+        .flip => switch (args.len) {
+            1 => try compiler.unary(.flip, args[0]),
+            else => return error.Rank,
+        },
+        .neg => switch (args.len) {
+            1 => try compiler.unary(.negate, args[0]),
+            else => return error.Rank,
+        },
+        .first => switch (args.len) {
+            1 => try compiler.unary(.first, args[0]),
+            else => return error.Rank,
+        },
+        .reciprocal => switch (args.len) {
+            1 => try compiler.unary(.reciprocal, args[0]),
+            else => return error.Rank,
+        },
+        .enlist => switch (args.len) {
+            1 => try compiler.unary(.enlist, args[0]),
+            else => return error.Rank,
+        },
         .not => switch (args.len) {
             1 => try compiler.unary(.not, args[0]),
+            else => return error.Rank,
+        },
+        .type => switch (args.len) {
+            1 => try compiler.unary(.type, args[0]),
             else => return error.Rank,
         },
     }
