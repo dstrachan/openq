@@ -8,7 +8,7 @@ const Value = q.Value;
 const Chunk = @This();
 
 data: std.MultiArrayList(struct { code: u8, line: u32 }) = .empty,
-constants: std.ArrayListUnmanaged(Value) = .empty,
+constants: std.ArrayListUnmanaged(*Value) = .empty,
 
 pub const OpCode = enum(u8) {
     constant,
@@ -49,7 +49,7 @@ pub fn replace(chunk: *Chunk, index: OpCode.Index, byte: u8) void {
     chunk.data.items(.code)[@intFromEnum(index)] = byte;
 }
 
-pub fn addConstant(chunk: *Chunk, gpa: Allocator, value: Value) !usize {
+pub fn addConstant(chunk: *Chunk, gpa: Allocator, value: *Value) !usize {
     try chunk.constants.append(gpa, value);
     return chunk.constants.items.len - 1;
 }
