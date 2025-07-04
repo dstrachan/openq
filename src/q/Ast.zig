@@ -974,7 +974,13 @@ pub const Node = struct {
     };
 
     pub const Builtin = enum {
+        flip,
+        neg,
+        first,
+        reciprocal,
+        enlist,
         not,
+        type,
     };
 };
 
