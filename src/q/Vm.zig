@@ -19,8 +19,7 @@ pub const StackMax = 256;
 gpa: Allocator,
 chunk: *Chunk,
 ip: [*]u8,
-stack: [StackMax]Value,
-stack_top: [*]Value,
+stack: std.ArrayListUnmanaged(*Value),
 symbols: std.StringHashMapUnmanaged(void) = .empty,
 
 pub const Error = Allocator.Error || error{
@@ -28,34 +27,34 @@ pub const Error = Allocator.Error || error{
 };
 
 pub fn init(vm: *Vm, gpa: Allocator) !void {
+    const buf = try gpa.alloc(*Value, StackMax);
+    errdefer comptime unreachable;
+
     vm.* = .{
         .gpa = gpa,
         .chunk = undefined,
         .ip = undefined,
-        .stack = undefined,
-        .stack_top = undefined,
+        .stack = .initBuffer(buf),
     };
-    vm.resetStack();
 }
 
 pub fn deinit(vm: *Vm) void {
+    vm.stack.deinit(vm.gpa);
     var it = vm.symbols.keyIterator();
     while (it.next()) |entry| vm.gpa.free(entry.*);
     vm.symbols.deinit(vm.gpa);
 }
 
-fn resetStack(vm: *Vm) void {
-    vm.stack_top = &vm.stack;
+fn push(vm: *Vm, value: *Value) void {
+    if (vm.stack.items.len == vm.stack.capacity) {
+        // TODO: print stack trace.
+        @panic("stack");
+    }
+    vm.stack.appendAssumeCapacity(value);
 }
 
-fn push(vm: *Vm, value: Value) void {
-    vm.stack_top[0] = value;
-    vm.stack_top += 1;
-}
-
-fn pop(vm: *Vm) Value {
-    vm.stack_top -= 1;
-    return vm.stack_top[0];
+fn pop(vm: *Vm) *Value {
+    return vm.stack.pop().?;
 }
 
 pub fn interpret(vm: *Vm, tree: Ast) !void {
@@ -84,9 +83,8 @@ fn run(vm: *Vm) !void {
     while (true) {
         if (build_options.trace_execution) {
             try stdout.writeAll("          ");
-            var slot: [*]Value = &vm.stack;
-            while (@intFromPtr(slot) < @intFromPtr(vm.stack_top)) : (slot += 1) {
-                try stdout.print("[ {} ({d}) ]", .{ slot[0], slot[0].ref_count });
+            for (vm.stack.items) |slot| {
+                try stdout.print("[ {} ({d}) ]", .{ slot, slot.ref_count });
             }
             try stdout.writeByte('\n');
             _ = try vm.chunk.disassembleInstruction(stdout, vm.ip - vm.chunk.data.items(.code).ptr);
@@ -129,27 +127,27 @@ inline fn readByte(vm: *Vm) u8 {
     return byte;
 }
 
-inline fn readConstant(vm: *Vm) Value {
+inline fn readConstant(vm: *Vm) *Value {
     return vm.chunk.constants.items[vm.readByte()];
 }
 
-inline fn unary(vm: *Vm, f: *const fn (*Vm, *Value) anyerror!Value) !void {
+inline fn unary(vm: *Vm, f: *const fn (*Vm, *Value) anyerror!*Value) !void {
     var x = vm.pop();
     defer x.deref(vm.gpa);
 
-    vm.push(try f(vm, &x));
+    vm.push(try f(vm, x));
 }
 
-inline fn binary(vm: *Vm, f: *const fn (*Vm, *Value, *Value) anyerror!Value) !void {
+inline fn binary(vm: *Vm, f: *const fn (*Vm, *Value, *Value) anyerror!*Value) !void {
     var x = vm.pop();
     defer x.deref(vm.gpa);
     var y = vm.pop();
     defer y.deref(vm.gpa);
 
-    vm.push(try f(vm, &x, &y));
+    vm.push(try f(vm, x, y));
 }
 
-fn add(vm: *Vm, x: *Value, y: *Value) !Value {
+fn add(vm: *Vm, x: *Value, y: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -219,7 +217,7 @@ fn add(vm: *Vm, x: *Value, y: *Value) !Value {
     };
 }
 
-fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
+fn subtract(vm: *Vm, x: *Value, y: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -289,7 +287,7 @@ fn subtract(vm: *Vm, x: *Value, y: *Value) !Value {
     };
 }
 
-fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
+fn multiply(vm: *Vm, x: *Value, y: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -359,7 +357,7 @@ fn multiply(vm: *Vm, x: *Value, y: *Value) !Value {
     };
 }
 
-fn divide(vm: *Vm, x: *Value, y: *Value) !Value {
+fn divide(vm: *Vm, x: *Value, y: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -429,7 +427,7 @@ fn divide(vm: *Vm, x: *Value, y: *Value) !Value {
     };
 }
 
-fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
+fn concat(vm: *Vm, x: *Value, y: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -519,27 +517,27 @@ fn concat(vm: *Vm, x: *Value, y: *Value) !Value {
     };
 }
 
-fn match(vm: *Vm, x: *Value, y: *Value) !Value {
+fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
     return error.NYI;
 }
 
-fn apply(vm: *Vm, x: *Value, y: *Value) !Value {
+fn apply(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
     return error.NYI;
 }
 
-fn flip(vm: *Vm, x: *Value) !Value {
+fn flip(vm: *Vm, x: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     return error.NYI;
 }
 
-fn negate(vm: *Vm, x: *Value) !Value {
+fn negate(vm: *Vm, x: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -565,13 +563,13 @@ fn negate(vm: *Vm, x: *Value) !Value {
     };
 }
 
-fn first(vm: *Vm, x: *Value) !Value {
+fn first(vm: *Vm, x: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     return error.NYI;
 }
 
-fn reciprocal(vm: *Vm, x: *Value) !Value {
+fn reciprocal(vm: *Vm, x: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => @panic("NYI"),
@@ -597,13 +595,13 @@ fn reciprocal(vm: *Vm, x: *Value) !Value {
     };
 }
 
-fn enlist(vm: *Vm, x: *Value) !Value {
+fn enlist(vm: *Vm, x: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     return error.NYI;
 }
 
-fn not(vm: *Vm, x: *Value) !Value {
+fn not(vm: *Vm, x: *Value) !*Value {
     return switch (x.type) {
         .mixed_list => @panic("NYI"),
         .boolean => vm.createBoolean(!x.as.boolean),
@@ -629,63 +627,74 @@ fn not(vm: *Vm, x: *Value) !Value {
     };
 }
 
-fn @"type"(vm: *Vm, x: *Value) !Value {
+fn @"type"(vm: *Vm, x: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     return error.NYI;
 }
 
-pub inline fn createBoolean(vm: *Vm, value: bool) Value {
-    _ = vm; // autofix
-    return .{ .type = .boolean, .as = .{ .boolean = value } };
+pub inline fn createBoolean(vm: *Vm, value: bool) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .boolean, .as = .{ .boolean = value } };
+    return v;
 }
 
-pub inline fn createGuid(vm: *Vm, value: [16]u8) Value {
-    _ = vm; // autofix
-    return .{ .type = .guid, .as = .{ .guid = value } };
+pub inline fn createGuid(vm: *Vm, value: [16]u8) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .guid, .as = .{ .guid = value } };
+    return v;
 }
 
-pub inline fn createByte(vm: *Vm, value: u8) Value {
-    _ = vm; // autofix
-    return .{ .type = .byte, .as = .{ .byte = value } };
+pub inline fn createByte(vm: *Vm, value: u8) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .byte, .as = .{ .byte = value } };
+    return v;
 }
 
-pub inline fn createShort(vm: *Vm, value: i16) Value {
-    _ = vm; // autofix
-    return .{ .type = .short, .as = .{ .short = value } };
+pub inline fn createShort(vm: *Vm, value: i16) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .short, .as = .{ .short = value } };
+    return v;
 }
 
-pub inline fn createInt(vm: *Vm, value: i32) Value {
-    _ = vm; // autofix
-    return .{ .type = .int, .as = .{ .int = value } };
+pub inline fn createInt(vm: *Vm, value: i32) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .int, .as = .{ .int = value } };
+    return v;
 }
 
-pub inline fn createLong(vm: *Vm, value: i64) Value {
-    _ = vm; // autofix
-    return .{ .type = .long, .as = .{ .long = value } };
+pub inline fn createLong(vm: *Vm, value: i64) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .long, .as = .{ .long = value } };
+    return v;
 }
 
-pub inline fn createReal(vm: *Vm, value: f32) Value {
-    _ = vm; // autofix
-    return .{ .type = .real, .as = .{ .real = value } };
+pub inline fn createReal(vm: *Vm, value: f32) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .real, .as = .{ .real = value } };
+    return v;
 }
 
-pub inline fn createFloat(vm: *Vm, value: f64) Value {
-    _ = vm; // autofix
-    return .{ .type = .float, .as = .{ .float = value } };
+pub inline fn createFloat(vm: *Vm, value: f64) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .float, .as = .{ .float = value } };
+    return v;
 }
 
-pub inline fn createChar(vm: *Vm, value: u8) Value {
-    _ = vm; // autofix
-    return .{ .type = .char, .as = .{ .char = value } };
+pub inline fn createChar(vm: *Vm, value: u8) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .char, .as = .{ .char = value } };
+    return v;
 }
 
-pub inline fn createCharList(vm: *Vm, value: []u8) Value {
-    _ = vm; // autofix
-    return .{ .type = .char_list, .as = .{ .char_list = value } };
+pub inline fn createCharList(vm: *Vm, value: []u8) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .char_list, .as = .{ .char_list = value } };
+    return v;
 }
 
-pub inline fn createSymbol(vm: *Vm, value: []u8) Value {
-    _ = vm; // autofix
-    return .{ .type = .symbol, .as = .{ .symbol = value } };
+pub inline fn createSymbol(vm: *Vm, value: []u8) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .symbol, .as = .{ .symbol = value } };
+    return v;
 }

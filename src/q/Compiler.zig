@@ -65,13 +65,13 @@ fn end(compiler: Compiler) !void {
     }
 }
 
-fn makeConstant(compiler: Compiler, value: Value) !u8 {
+fn makeConstant(compiler: Compiler, value: *Value) !u8 {
     const constant = try compiler.current_chunk.addConstant(compiler.gpa, value);
     if (constant > std.math.maxInt(u8)) return error.TooManyConstants;
     return @intCast(constant);
 }
 
-fn emitConstant(compiler: Compiler, value: Value) !void {
+fn emitConstant(compiler: Compiler, value: *Value) !void {
     const constant = try compiler.makeConstant(value);
     try compiler.emitBytes(@intFromEnum(OpCode.constant), constant);
 }

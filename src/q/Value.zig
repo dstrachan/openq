@@ -56,28 +56,32 @@ type: Type,
 ref_count: u32 = 1,
 as: Union,
 
-pub fn ref(value: *Value) void {
+pub fn ref(value: *Value) *Value {
     value.ref_count += 1;
+    return value;
 }
 
 pub fn deref(value: *Value, gpa: Allocator) void {
     assert(value.ref_count > 0);
     value.ref_count -= 1;
-    if (value.ref_count == 0) switch (value.type) {
-        .mixed_list => gpa.free(value.as.mixed_list),
-        .boolean_list => gpa.free(value.as.boolean_list),
-        .guid_list => gpa.free(value.as.guid_list),
-        .byte_list => gpa.free(value.as.byte_list),
-        .short_list => gpa.free(value.as.short_list),
-        .int_list => gpa.free(value.as.int_list),
-        .long_list => gpa.free(value.as.long_list),
-        .real_list => gpa.free(value.as.real_list),
-        .float_list => gpa.free(value.as.float_list),
-        .char_list => gpa.free(value.as.char_list),
-        .symbol => if (value.as.symbol.len > 0) gpa.free(value.as.symbol),
-        .symbol_list => gpa.free(value.as.symbol_list),
-        else => {},
-    };
+    if (value.ref_count == 0) {
+        switch (value.type) {
+            .mixed_list => gpa.free(value.as.mixed_list),
+            .boolean_list => gpa.free(value.as.boolean_list),
+            .guid_list => gpa.free(value.as.guid_list),
+            .byte_list => gpa.free(value.as.byte_list),
+            .short_list => gpa.free(value.as.short_list),
+            .int_list => gpa.free(value.as.int_list),
+            .long_list => gpa.free(value.as.long_list),
+            .real_list => gpa.free(value.as.real_list),
+            .float_list => gpa.free(value.as.float_list),
+            .char_list => gpa.free(value.as.char_list),
+            .symbol => if (value.as.symbol.len > 0) gpa.free(value.as.symbol),
+            .symbol_list => gpa.free(value.as.symbol_list),
+            else => {},
+        }
+        gpa.destroy(value);
+    }
 }
 
 pub fn format(value: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
