@@ -38,6 +38,7 @@ pub const empty: Chunk = .{};
 
 pub fn deinit(chunk: *Chunk, gpa: Allocator) void {
     chunk.data.deinit(gpa);
+    for (chunk.constants.items) |constant| if (constant.ref_count > 0) constant.deref(gpa);
     chunk.constants.deinit(gpa);
 }
 
