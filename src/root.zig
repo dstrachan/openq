@@ -14,10 +14,13 @@ pub const Vm = @import("q/Vm.zig");
 pub const Value = @import("q/Value.zig");
 pub const Chunk = @import("q/Chunk.zig");
 pub const OpCode = Chunk.OpCode;
-pub const Compiler = @import("q/Compiler.zig");
 
 pub fn putAstErrorsIntoBundle(gpa: Allocator, tree: Ast, path: []const u8, wip_errors: *std.zig.ErrorBundle.Wip) !void {
-    var qir = try AstGen.generate(gpa, tree);
+    var vm: Vm = undefined;
+    try Vm.init(&vm, gpa);
+    defer vm.deinit();
+
+    var qir = try AstGen.generate(gpa, tree, &vm);
     defer qir.deinit(gpa);
 
     try addQirErrorMessages(wip_errors, qir, tree, path);

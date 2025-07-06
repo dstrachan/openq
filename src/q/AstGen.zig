@@ -5,6 +5,12 @@ const assert = std.debug.assert;
 const q = @import("../root.zig");
 const Ast = q.Ast;
 const Qir = q.Qir;
+const Chunk = q.Chunk;
+const Vm = q.Vm;
+const Value = q.Value;
+const OpCode = q.OpCode;
+
+const build_options = @import("build_options");
 
 const AstGen = @This();
 
@@ -17,8 +23,17 @@ string_bytes: std.ArrayListUnmanaged(u8) = .empty,
 compile_errors: std.ArrayListUnmanaged(Qir.Inst.CompileErrors.Item) = .empty,
 scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Ast.Node.Index)) = .empty,
 locals: ?std.StringHashMapUnmanaged(Ast.Node.Index) = null,
+vm: *Vm,
+current_chunk: *Chunk,
 
-const InnerError = error{ OutOfMemory, AnalysisFail };
+const Error = error{ OutOfMemory, AnalysisFail };
+const InnerError = error{
+    OutOfMemory,
+    NYI,
+    Rank,
+    Number,
+    TooManyConstants,
+};
 
 fn addExtra(astgen: *AstGen, extra: anytype) Allocator.Error!u32 {
     const fields = std.meta.fields(@TypeOf(extra));
@@ -61,14 +76,18 @@ fn setExtra(astgen: *AstGen, index: usize, extra: anytype) void {
     }
 }
 
-pub fn generate(gpa: Allocator, tree: Ast) !Qir {
+pub fn generate(gpa: Allocator, tree: Ast, vm: *Vm) !Qir {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
+    var chunk: Chunk = .empty;
+    errdefer chunk.deinit(gpa);
     var astgen: AstGen = .{
         .gpa = gpa,
         .arena = arena.allocator(),
         .tree = &tree,
+        .vm = vm,
+        .current_chunk = &chunk,
     };
     defer astgen.deinit();
 
@@ -119,6 +138,7 @@ pub fn generate(gpa: Allocator, tree: Ast) !Qir {
         .instructions = if (fatal) .empty else astgen.instructions.toOwnedSlice(),
         .string_bytes = try astgen.string_bytes.toOwnedSlice(gpa),
         .extra = try astgen.extra.toOwnedSlice(gpa),
+        .chunk = chunk,
     };
 }
 
@@ -132,15 +152,20 @@ fn deinit(astgen: *AstGen) void {
     if (astgen.locals) |*locals| locals.deinit(astgen.gpa);
 }
 
-fn visit(astgen: *AstGen) InnerError!void {
+fn visit(astgen: *AstGen) Error!void {
     // TODO: Remove once instructions are implemented.
     try astgen.instructions.append(astgen.gpa, .{ .tag = .dummy, .data = undefined });
     for (astgen.tree.rootStatements()) |node| {
-        try astgen.visitNode(node);
+        astgen.visitNode(node) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.AnalysisFail,
+        };
     }
+
+    try astgen.end();
 }
 
-fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
+fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
     const gpa = astgen.gpa;
     const tree = astgen.tree;
     switch (tree.nodeTag(node)) {
@@ -292,8 +317,11 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
 
         .call => {
             const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            assert(nodes.len > 0);
+
             const func = nodes[0];
             const args = nodes[1..];
+
             switch (tree.nodeTag(func)) {
                 .colon => {
                     if (args.len != 2) return astgen.appendErrorNode(
@@ -319,15 +347,28 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
 
                     return;
                 },
-                else => {},
+                .plus => try astgen.binary(node, .add, args),
+                .plus_colon => try astgen.unary(node, .flip, args),
+                .minus => try astgen.binary(node, .subtract, args),
+                .minus_colon => try astgen.unary(node, .negate, args),
+                .asterisk => try astgen.binary(node, .multiply, args),
+                .asterisk_colon => try astgen.unary(node, .first, args),
+                .percent => try astgen.binary(node, .divide, args),
+                .percent_colon => try astgen.unary(node, .reciprocal, args),
+                .comma => try astgen.binary(node, .concat, args),
+                .comma_colon => try astgen.unary(node, .enlist, args),
+                .tilde => try astgen.binary(node, .match, args),
+                .tilde_colon => try astgen.unary(node, .not, args),
+                .at => try astgen.binary(node, .apply, args),
+                .at_colon => try astgen.unary(node, .type, args),
+                .builtin => try astgen.builtin(func, args),
+                inline else => |t| @panic("NYI " ++ @tagName(t)),
             }
-            var it = std.mem.reverseIterator(nodes);
-            while (it.next()) |n| try astgen.visitNode(n);
         },
         .apply_unary => unreachable,
         .apply_binary => unreachable,
 
-        .number_literal,
+        .number_literal => try astgen.visitNumber(node),
         .number_list_literal,
         .string_literal,
         .symbol_literal,
@@ -360,6 +401,118 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) !void {
         .delete_rows => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteRows).from),
         .delete_cols => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.DeleteCols).from),
     }
+}
+
+fn unary(astgen: *AstGen, node: Ast.Node.Index, op_code: OpCode, args: []const Ast.Node.Index) !void {
+    if (args.len != 1) return astgen.appendErrorNode(node, "expected 1 argument, found {d}", .{args.len});
+
+    const x = args[0];
+    if (astgen.tree.nodeTag(x) == .no_op) return error.NYI;
+
+    try astgen.visitNode(x);
+    try astgen.emitByte(@intFromEnum(op_code));
+}
+
+fn binary(astgen: *AstGen, node: Ast.Node.Index, op_code: OpCode, args: []const Ast.Node.Index) !void {
+    if (args.len != 2) return astgen.appendErrorNode(node, "expected 2 arguments, found {d}", .{args.len});
+
+    const x = args[0];
+    const y = args[1];
+    if (astgen.tree.nodeTag(y) == .no_op) return error.NYI;
+    if (astgen.tree.nodeTag(x) == .no_op) return error.NYI;
+
+    try astgen.visitNode(y);
+    try astgen.visitNode(x);
+    try astgen.emitByte(@intFromEnum(op_code));
+}
+
+fn builtin(astgen: *AstGen, node: Ast.Node.Index, args: []const Ast.Node.Index) !void {
+    const tree = astgen.tree;
+    const token = tree.nodeMainToken(node);
+    const slice = tree.tokenSlice(token);
+    const tag = std.meta.stringToEnum(Ast.Node.Builtin, slice) orelse unreachable;
+    switch (tag) {
+        .flip => try astgen.unary(node, .flip, args),
+        .neg => try astgen.unary(node, .negate, args),
+        .first => try astgen.unary(node, .first, args),
+        .reciprocal => try astgen.unary(node, .reciprocal, args),
+        .enlist => try astgen.unary(node, .enlist, args),
+        .not => try astgen.unary(node, .not, args),
+        .type => try astgen.unary(node, .type, args),
+    }
+}
+
+fn visitNumber(astgen: *AstGen, node: Ast.Node.Index) !void {
+    assert(astgen.tree.nodeTag(node) == .number_literal);
+
+    const vm = astgen.vm;
+    const tree = astgen.tree;
+
+    const bytes = tree.tokenSlice(tree.nodeMainToken(node));
+    if (std.mem.startsWith(u8, bytes, "0x")) {
+        return error.NYI;
+    } else {
+        try astgen.emitConstant(switch (bytes[bytes.len - 1]) {
+            'b' => blk: {
+                if (bytes.len > 2) return error.NYI;
+                break :blk vm.createBoolean(bytes[0] == '1');
+            },
+            'h' => vm.createShort(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+                .int => |i| @intCast(i),
+                else => return error.Number,
+            }),
+            'i' => vm.createInt(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+                .int => |i| @intCast(i),
+                else => return error.Number,
+            }),
+            'j' => vm.createLong(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+                .int => |i| @intCast(i),
+                else => return error.Number,
+            }),
+            'e' => vm.createReal(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+                .int => |i| @floatFromInt(i),
+                .float => std.fmt.parseFloat(f32, bytes[0 .. bytes.len - 1]) catch return error.Number,
+                else => return error.Number,
+            }),
+            'f' => vm.createFloat(switch (std.zig.parseNumberLiteral(bytes[0 .. bytes.len - 1])) {
+                .int => |i| @floatFromInt(i),
+                .float => std.fmt.parseFloat(f64, bytes[0 .. bytes.len - 1]) catch return error.Number,
+                else => return error.Number,
+            }),
+            else => switch (std.zig.parseNumberLiteral(bytes)) {
+                .int => |i| vm.createLong(@intCast(i)),
+                .float => vm.createFloat(std.fmt.parseFloat(f64, bytes) catch return error.Number),
+                else => return error.Number,
+            },
+        });
+    }
+}
+
+fn emitByte(astgen: *AstGen, byte: u8) !void {
+    try astgen.current_chunk.write(astgen.gpa, byte, 123); // TODO: Line number
+}
+
+fn emitBytes(astgen: *AstGen, byte1: u8, byte2: u8) !void {
+    try astgen.emitByte(byte1);
+    try astgen.emitByte(byte2);
+}
+
+fn end(astgen: *AstGen) !void {
+    try astgen.emitByte(@intFromEnum(OpCode.@"return"));
+    if (!@import("builtin").is_test and build_options.print_code) {
+        astgen.current_chunk.disassemble(std.io.getStdOut().writer(), "code") catch @panic("disassemble");
+    }
+}
+
+fn makeConstant(astgen: *AstGen, value: *Value) !u8 {
+    const constant = try astgen.current_chunk.addConstant(astgen.gpa, value);
+    if (constant > std.math.maxInt(u8)) return error.TooManyConstants;
+    return @intCast(constant);
+}
+
+fn emitConstant(astgen: *AstGen, value: *Value) !void {
+    const constant = try astgen.makeConstant(value);
+    try astgen.emitBytes(@intFromEnum(OpCode.constant), constant);
 }
 
 fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
@@ -771,7 +924,11 @@ fn testNoFail(source: [:0]const u8) !void {
     var tree = try orig_tree.normalize(gpa);
     defer tree.deinit(gpa);
 
-    var qir = try generate(gpa, tree);
+    var vm: Vm = undefined;
+    try Vm.init(&vm, gpa);
+    defer vm.deinit();
+
+    var qir = try generate(gpa, tree, &vm);
     defer qir.deinit(gpa);
     try std.testing.expect(!qir.hasCompileErrors());
 }
@@ -784,7 +941,11 @@ fn testFail(source: [:0]const u8, expected: []const u8) !void {
     var tree = try orig_tree.normalize(gpa);
     defer tree.deinit(gpa);
 
-    var qir = try generate(gpa, tree);
+    var vm: Vm = undefined;
+    try Vm.init(&vm, gpa);
+    defer vm.deinit();
+
+    var qir = try generate(gpa, tree, &vm);
     defer qir.deinit(gpa);
     try std.testing.expect(qir.hasCompileErrors());
 
@@ -1003,5 +1164,82 @@ test "invalid assignment target" {
         \\test:1:1: error: invalid assignment target
         \\"test":123
         \\^~~~~~
+    );
+}
+
+fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected_data: []const u8) !void {
+    const gpa = std.testing.allocator;
+
+    var orig_tree: Ast = try .parse(gpa, source);
+    defer orig_tree.deinit(gpa);
+    try std.testing.expect(orig_tree.errors.len == 0);
+
+    var tree = try orig_tree.normalize(gpa);
+    defer tree.deinit(gpa);
+    try std.testing.expect(tree.errors.len == 0);
+
+    var vm: Vm = undefined;
+    try Vm.init(&vm, gpa);
+    defer vm.deinit();
+
+    var qir = try q.AstGen.generate(gpa, tree, &vm);
+    defer qir.deinit(gpa);
+    try std.testing.expect(!qir.hasCompileErrors());
+
+    const actual_chunk = qir.chunk;
+    for (actual_chunk.data.items(.line)) |*line| line.* = 1;
+
+    var actual: std.ArrayListUnmanaged(u8) = .empty;
+    defer actual.deinit(gpa);
+    try qir.chunk.disassemble(actual.writer(gpa), "test");
+
+    var expected_chunk: Chunk = .empty;
+    defer {
+        expected_chunk.data.deinit(gpa);
+        expected_chunk.constants.deinit(gpa);
+    }
+    for (expected_constants) |*constant| _ = try expected_chunk.addConstant(gpa, @constCast(constant));
+    for (expected_data) |code| try expected_chunk.data.append(gpa, .{ .code = code, .line = 1 });
+
+    var expected: std.ArrayListUnmanaged(u8) = .empty;
+    defer expected.deinit(gpa);
+    try expected_chunk.disassemble(expected.writer(gpa), "test");
+
+    try std.testing.expectEqualStrings(expected.items, actual.items);
+}
+
+const utils = struct {
+    fn simple(op_code: OpCode) []const u8 {
+        return &.{@intFromEnum(op_code)};
+    }
+
+    fn constant(index: u8) []const u8 {
+        return simple(.constant) ++ [_]u8{index};
+    }
+};
+
+test {
+    try testCompile(
+        "1.2",
+        &.{.{ .type = .float, .as = .{ .float = 1.2 } }},
+        comptime utils.constant(0) ++ utils.simple(.@"return"),
+    );
+    try testCompile(
+        "3*4+5",
+        &.{
+            .{ .type = .long, .as = .{ .long = 5 } },
+            .{ .type = .long, .as = .{ .long = 4 } },
+            .{ .type = .long, .as = .{ .long = 3 } },
+        },
+        comptime utils.constant(0) ++ utils.constant(1) ++ utils.simple(.add) ++
+            utils.constant(2) ++ utils.simple(.multiply) ++
+            utils.simple(.@"return"),
+    );
+    try testCompile(
+        "not 0",
+        &.{
+            .{ .type = .long, .as = .{ .long = 0 } },
+        },
+        comptime utils.constant(0) ++ utils.simple(.not) ++ utils.simple(.@"return"),
     );
 }

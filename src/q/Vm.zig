@@ -8,7 +8,7 @@ const Node = Ast.Node;
 const Value = q.Value;
 const Chunk = q.Chunk;
 const OpCode = Chunk.OpCode;
-const Compiler = q.Compiler;
+const Qir = q.Qir;
 
 const build_options = @import("build_options");
 
@@ -57,22 +57,11 @@ fn pop(vm: *Vm) *Value {
     return vm.stack.pop().?;
 }
 
-pub fn interpret(vm: *Vm, tree: Ast) !void {
-    assert(tree.errors.len == 0);
+pub fn interpret(vm: *Vm, qir: *Qir) !void {
+    assert(!qir.hasCompileErrors());
 
-    var chunk: Chunk = .empty;
-    defer chunk.deinit(vm.gpa);
-
-    Compiler.compile(vm.gpa, tree, vm, &chunk) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.NYI => return error.NYI,
-        error.Rank => return error.Rank,
-        error.Type => return error.Type,
-        else => return error.CompileError,
-    };
-
-    vm.chunk = &chunk;
-    vm.ip = chunk.data.items(.code).ptr;
+    vm.chunk = &qir.chunk;
+    vm.ip = qir.chunk.data.items(.code).ptr;
 
     vm.run() catch return error.RunError;
 }

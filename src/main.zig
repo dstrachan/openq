@@ -321,7 +321,10 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
 
     const tree = try orig_tree.normalize(arena);
 
-    const qir = try AstGen.generate(arena, tree);
+    var vm: Vm = undefined;
+    try Vm.init(&vm, arena);
+
+    const qir = try AstGen.generate(arena, tree, &vm);
     if (qir.hasCompileErrors()) {
         try utils.printQirErrorsToStderr(arena, qir, tree, "<repl>", color);
         if (qir.loweringFailed()) {
@@ -445,19 +448,14 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
         var tree = try orig_tree.normalize(gpa);
         defer tree.deinit(gpa);
 
-        var qir = try AstGen.generate(gpa, tree);
+        var qir = try AstGen.generate(gpa, tree, &vm);
         defer qir.deinit(gpa);
         if (qir.hasCompileErrors()) {
             try utils.printQirErrorsToStderr(gpa, qir, tree, "<repl>", color);
             continue;
         }
 
-        vm.interpret(tree) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.NYI => try stderr.writeAll("'nyi\n"),
-            error.Rank => try stderr.writeAll("'rank\n"),
-            error.Type => try stderr.writeAll("'type\n"),
-            error.CompileError => try stderr.writeAll("'compile\n"),
+        vm.interpret(&qir) catch |err| switch (err) {
             error.RunError => try stderr.writeAll("'run\n"),
         };
     }

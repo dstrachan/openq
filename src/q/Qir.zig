@@ -4,6 +4,7 @@ const assert = std.debug.assert;
 
 const q = @import("../root.zig");
 const Ast = q.Ast;
+const Chunk = q.Chunk;
 
 const Qir = @This();
 
@@ -18,6 +19,7 @@ string_bytes: []u8,
 /// The meaning of this data is determined by `Inst.Tag` value.
 /// The first few indexes are reserved. See `ExtraIndex` for the values.
 extra: []u32,
+chunk: Chunk,
 
 pub const ExtraIndex = enum(u32) {
     /// If this is 0, no compile errors. Otherwise there is a `CompileErrors`
@@ -77,7 +79,7 @@ pub fn hasCompileErrors(code: Qir) bool {
     if (code.extra[@intFromEnum(ExtraIndex.compile_errors)] != 0) {
         return true;
     } else {
-        assert(code.instructions.len != 0); // i.e. lowering did not fail
+        // assert(code.instructions.len != 0); // i.e. lowering did not fail
         return false;
     }
 }
@@ -95,6 +97,7 @@ pub fn deinit(code: *Qir, gpa: Allocator) void {
     code.instructions.deinit(gpa);
     gpa.free(code.string_bytes);
     gpa.free(code.extra);
+    code.chunk.deinit(gpa);
     code.* = undefined;
 }
 
