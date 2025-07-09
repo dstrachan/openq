@@ -92,7 +92,7 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     } else if (mem.eql(u8, cmd, "validate")) {
         try cmdValidate(arena, cmd_args);
     } else if (mem.eql(u8, cmd, "repl")) {
-        try cmdRepl(gpa, cmd_args);
+        try cmdRepl(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "version")) {
         try io.getStdOut().writeAll(build_options.version ++ "\n");
     } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
@@ -387,9 +387,9 @@ const usage_repl =
 ;
 
 const banner = "OpenQ " ++ build_options.version ++ " " ++
-    @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n\n";
+    @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n";
 
-fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
+fn cmdRepl(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     var color: std.zig.Color = .auto;
 
     var i: usize = 0;
@@ -419,40 +419,71 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
     const stdin = io.getStdIn().reader();
     const stderr = io.getStdErr().writer();
 
-    try stderr.writeAll(banner);
-
     var vm: Vm = undefined;
     try vm.init(gpa);
     defer vm.deinit();
 
     var buffer: std.ArrayList(u8) = .init(gpa);
     defer buffer.deinit();
-    while (true) {
-        try stderr.writeAll("q)");
 
-        buffer.shrinkRetainingCapacity(0);
-        try stdin.streamUntilDelimiter(buffer.writer(), '\n', null);
+    if (std.posix.isatty(stdin.context.handle)) {
+        try stderr.writeAll(banner);
 
-        if (buffer.getLast() == '\r') _ = buffer.shrinkRetainingCapacity(buffer.items.len - 1);
-        if (mem.eql(u8, buffer.items, "\\\\")) break;
+        while (true) {
+            try stderr.writeAll("\nq)");
 
+            buffer.shrinkRetainingCapacity(0);
+            stdin.streamUntilDelimiter(buffer.writer(), '\n', null) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+
+            _ = buffer.shrinkRetainingCapacity(std.mem.trimEnd(u8, buffer.items, &std.ascii.whitespace).len);
+            if (mem.eql(u8, buffer.items, "\\\\")) break;
+            try buffer.append(0);
+
+            var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
+            defer orig_tree.deinit(gpa);
+            if (orig_tree.errors.len > 0) {
+                try utils.printAstErrorsToStderr(gpa, orig_tree, "<repl>", color);
+                continue;
+            }
+
+            var tree = try orig_tree.normalize(gpa);
+            defer tree.deinit(gpa);
+
+            var qir = try AstGen.generate(gpa, tree, &vm);
+            defer qir.deinit(gpa);
+            if (qir.hasCompileErrors()) {
+                try utils.printQirErrorsToStderr(gpa, qir, tree, "<repl>", color);
+                continue;
+            }
+
+            vm.interpret(&qir) catch |err| switch (err) {
+                error.RunError => try stderr.writeAll("'run\n"),
+            };
+        }
+    } else {
+        stdin.streamUntilDelimiter(buffer.writer(), 0, null) catch |err| switch (err) {
+            error.EndOfStream => {},
+            else => return err,
+        };
+
+        _ = buffer.shrinkRetainingCapacity(std.mem.trimEnd(u8, buffer.items, &std.ascii.whitespace).len);
         try buffer.append(0);
 
-        var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
-        defer orig_tree.deinit(gpa);
+        var orig_tree: Ast = try .parse(arena, buffer.items[0 .. buffer.items.len - 1 :0]);
         if (orig_tree.errors.len > 0) {
-            try utils.printAstErrorsToStderr(gpa, orig_tree, "<repl>", color);
-            continue;
+            try utils.printAstErrorsToStderr(arena, orig_tree, "<repl>", color);
+            std.process.exit(1);
         }
 
-        var tree = try orig_tree.normalize(gpa);
-        defer tree.deinit(gpa);
+        const tree = try orig_tree.normalize(arena);
 
-        var qir = try AstGen.generate(gpa, tree, &vm);
-        defer qir.deinit(gpa);
+        var qir = try AstGen.generate(arena, tree, &vm);
         if (qir.hasCompileErrors()) {
-            try utils.printQirErrorsToStderr(gpa, qir, tree, "<repl>", color);
-            continue;
+            try utils.printQirErrorsToStderr(arena, qir, tree, "<repl>", color);
+            std.process.exit(1);
         }
 
         vm.interpret(&qir) catch |err| switch (err) {
