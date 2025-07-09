@@ -103,7 +103,7 @@ fn run(vm: *Vm) !void {
                 var value = vm.pop();
                 defer value.deref(vm.gpa);
 
-                try stdout.print("{}\n", .{value});
+                try stdout.print("{}", .{value});
                 return;
             },
         }
