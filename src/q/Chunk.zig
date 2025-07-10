@@ -38,7 +38,10 @@ pub const empty: Chunk = .{};
 
 pub fn deinit(chunk: *Chunk, gpa: Allocator) void {
     chunk.data.deinit(gpa);
-    for (chunk.constants.items) |constant| if (constant.ref_count > 0) constant.deref(gpa);
+    for (chunk.constants.items) |constant| {
+        assert(constant.ref_count == 1);
+        constant.deref(gpa);
+    }
     chunk.constants.deinit(gpa);
 }
 
@@ -51,7 +54,8 @@ pub fn replace(chunk: *Chunk, index: OpCode.Index, byte: u8) void {
 }
 
 pub fn addConstant(chunk: *Chunk, gpa: Allocator, value: *Value) !usize {
-    try chunk.constants.append(gpa, value);
+    try chunk.constants.append(gpa, value.ref());
+    assert(value.ref_count == 2);
     return chunk.constants.items.len - 1;
 }
 
