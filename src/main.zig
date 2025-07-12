@@ -32,6 +32,9 @@ var wasi_preopens: fs.wasi.Preopens = undefined;
 const fatal = process.fatal;
 const cleanExit = process.cleanExit;
 
+/// This can be global since stdout is a singleton.
+var stdio_buffer: [4096]u8 = undefined;
+
 const usage =
     \\Usage: openq [command] [options]
     \\
@@ -94,9 +97,9 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     } else if (mem.eql(u8, cmd, "repl")) {
         try cmdRepl(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "version")) {
-        try io.getStdOut().writeAll(build_options.version ++ "\n");
+        try fs.File.stdout().writeAll(build_options.version ++ "\n");
     } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
-        try io.getStdOut().writeAll(usage);
+        try fs.File.stdout().writeAll(usage);
     } else {
         debug.print("{s}\n", .{usage});
         fatal("unknown command: {s}", .{cmd});
@@ -126,7 +129,7 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (mem.startsWith(u8, arg, "-")) {
             if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                try io.getStdOut().writeAll(usage_tokenize);
+                try fs.File.stdout().writeAll(usage_tokenize);
                 return cleanExit();
             } else if (mem.eql(u8, arg, "--color")) {
                 if (i + 1 >= args.len) {
@@ -153,7 +156,7 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
             break :file fs.cwd().openFile(p, .{}) catch |err| {
                 fatal("unable to open file '{s}' for tokenize: {s}", .{ display_path, @errorName(err) });
             };
-        } else io.getStdIn();
+        } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
         break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
             fatal("unable to load file '{s}' for tokenize: {s}", .{ display_path, @errorName(err) });
@@ -169,15 +172,17 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
         if (token.tag == .eof) break;
     }
 
-    const writer = io.getStdOut().writer();
-    try writer.writeByte('[');
+    var stdout_writer = fs.File.stdout().writerStreaming(&stdio_buffer);
+    const stdout_bw = &stdout_writer.interface;
+    try stdout_bw.writeByte('[');
     for (tokens.items, 0..) |token, index| {
-        try writer.print(
-            \\{{"{s}":"{}"}}
-        , .{ @tagName(token.tag), std.zig.fmtEscapes(source[token.loc.start..token.loc.end]) });
-        if (index < tokens.items.len - 1) try writer.writeByte(',');
+        try stdout_bw.print(
+            \\{{"{s}":"{f}"}}
+        , .{ @tagName(token.tag), std.zig.fmtString(source[token.loc.start..token.loc.end]) });
+        if (index < tokens.items.len - 1) try stdout_bw.writeByte(',');
     }
-    try writer.writeByte(']');
+    try stdout_bw.writeByte(']');
+    try stdout_bw.flush();
 
     return cleanExit();
 }
@@ -207,7 +212,7 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (mem.startsWith(u8, arg, "-")) {
             if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                try io.getStdOut().writeAll(usage_parse);
+                try fs.File.stdout().writeAll(usage_parse);
                 return cleanExit();
             } else if (mem.eql(u8, arg, "--color")) {
                 if (i + 1 >= args.len) {
@@ -236,7 +241,7 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
             break :file fs.cwd().openFile(p, .{}) catch |err| {
                 fatal("unable to open file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
             };
-        } else io.getStdIn();
+        } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
         break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
             fatal("unable to load file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
@@ -249,8 +254,10 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
         process.exit(1);
     } else {
         const tree = try orig_tree.normalize(arena);
-        const writer = io.getStdOut().writer();
-        try utils.writeJsonNode(writer, tree, .root);
+        var stdout_writer = fs.File.stdout().writerStreaming(&stdio_buffer);
+        const stdout_bw = &stdout_writer.interface;
+        try utils.writeJsonNode(stdout_bw, tree, .root);
+        try stdout_bw.flush();
     }
 
     return cleanExit();
@@ -279,7 +286,7 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (mem.startsWith(u8, arg, "-")) {
             if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                try io.getStdOut().writeAll(usage_parse);
+                try fs.File.stdout().writeAll(usage_parse);
                 return cleanExit();
             } else if (mem.eql(u8, arg, "--color")) {
                 if (i + 1 >= args.len) {
@@ -306,7 +313,7 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
             break :file fs.cwd().openFile(p, .{}) catch |err| {
                 fatal("unable to open file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
             };
-        } else io.getStdIn();
+        } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
         break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
             fatal("unable to load file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
@@ -332,6 +339,9 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
         }
     }
 
+    var stdout_writer = fs.File.stdout().writerStreaming(&stdio_buffer);
+    const stdout_bw = &stdout_writer.interface;
+
     {
         const token_bytes = @sizeOf(Ast.TokenList) +
             tree.tokens.len * (@sizeOf(Token.Tag) + @sizeOf(Ast.ByteOffset));
@@ -345,31 +355,30 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
             (@sizeOf(Qir.Inst.Tag) + 8);
         const extra_bytes = qir.extra.len * @sizeOf(u32);
         const total_bytes = @sizeOf(Qir) + instruction_bytes + extra_bytes + qir.string_bytes.len * @sizeOf(u8);
-        const stdout = io.getStdOut();
-        const fmtIntSizeBin = std.fmt.fmtIntSizeBin;
         // zig fmt: off
-        try stdout.writer().print(
-            \\# Source bytes:       {}
-            \\# Tokens:             {} ({})
-            \\# AST nodes:          {} ({})
-            \\# Total QIR bytes:    {}
-            \\# Instructions:       {d} ({})
-            \\# String table bytes: {}
-            \\# Extra data items:   {d} ({})
+        try stdout_bw.print(
+            \\# Source bytes:       {Bi}
+            \\# Tokens:             {} ({Bi})
+            \\# AST nodes:          {} ({Bi})
+            \\# Total QIR bytes:    {Bi}
+            \\# Instructions:       {d} ({Bi})
+            \\# String table bytes: {Bi}
+            \\# Extra data items:   {d} ({Bi})
             \\
         , .{
-            fmtIntSizeBin(source.len),
-            tree.tokens.len, fmtIntSizeBin(token_bytes),
-            tree.nodes.len, fmtIntSizeBin(tree_bytes),
-            fmtIntSizeBin(total_bytes),
-            qir.instructions.len, fmtIntSizeBin(instruction_bytes),
-            fmtIntSizeBin(qir.string_bytes.len),
-            qir.extra.len, fmtIntSizeBin(extra_bytes),
+            source.len,
+            tree.tokens.len, token_bytes,
+            tree.nodes.len, tree_bytes,
+            total_bytes,
+            qir.instructions.len, instruction_bytes,
+            qir.string_bytes.len,
+            qir.extra.len, extra_bytes,
         });
         // zig fmt: on
     }
 
     // TODO: Print QIR
+    try stdout_bw.flush();
 
     return cleanExit();
 }
@@ -397,7 +406,7 @@ fn cmdRepl(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (mem.startsWith(u8, arg, "-")) {
             if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                try io.getStdOut().writeAll(usage_parse);
+                try fs.File.stdout().writeAll(usage_parse);
                 return cleanExit();
             } else if (mem.eql(u8, arg, "--color")) {
                 if (i + 1 >= args.len) {
@@ -416,8 +425,8 @@ fn cmdRepl(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         }
     }
 
-    const stdin = io.getStdIn().reader();
-    const stderr = io.getStdErr().writer();
+    const stdin = fs.File.stdin().deprecatedReader();
+    const stderr = fs.File.stderr().deprecatedWriter();
 
     var vm: Vm = undefined;
     try vm.init(gpa);
