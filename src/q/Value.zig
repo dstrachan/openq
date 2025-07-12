@@ -84,7 +84,7 @@ pub fn deref(value: *Value, gpa: Allocator) void {
     }
 }
 
-pub fn format(value: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+pub fn format(value: Value, writer: *std.io.Writer) !void {
     switch (value.type) {
         .mixed_list => @panic("NYI"),
         .boolean => try writer.writeAll(if (value.as.boolean) "1b" else "0b"),
@@ -96,11 +96,11 @@ pub fn format(value: Value, comptime _: []const u8, _: std.fmt.FormatOptions, wr
         },
         .guid => @panic("NYI"),
         .guid_list => @panic("NYI"),
-        .byte => try writer.print("0x{d}", .{std.fmt.fmtSliceHexLower(&.{value.as.byte})}),
+        .byte => try writer.print("0x{x}", .{value.as.byte}),
         .byte_list => if (value.as.byte_list.len == 0) {
             try writer.writeAll("`byte$()");
         } else {
-            try writer.print("0x{d}", .{std.fmt.fmtSliceHexLower(value.as.byte_list)});
+            try writer.print("0x{x}", .{value.as.byte_list});
         },
         .short => try writer.print("{d}h", .{value.as.short}),
         .short_list => @panic("NYI"),
@@ -112,11 +112,11 @@ pub fn format(value: Value, comptime _: []const u8, _: std.fmt.FormatOptions, wr
         .real_list => @panic("NYI"),
         .float => try writer.print("{d}f", .{value.as.float}),
         .float_list => @panic("NYI"),
-        .char => try writer.print("\"{}\"", .{std.zig.fmtEscapes(&.{value.as.char})}),
+        .char => try writer.print("\"{f}\"", .{std.zig.fmtString(&.{value.as.char})}),
         .char_list => if (value.as.char_list.len == 1) {
-            try writer.print(",\"{}\"", .{std.zig.fmtEscapes(value.as.char_list)});
+            try writer.print(",\"{f}\"", .{std.zig.fmtString(value.as.char_list)});
         } else {
-            try writer.print("\"{}\"", .{std.zig.fmtEscapes(value.as.char_list)});
+            try writer.print("\"{f}\"", .{std.zig.fmtString(value.as.char_list)});
         },
         .symbol => try writer.print("`{s}", .{value.as.symbol}),
         .symbol_list => @panic("NYI"),

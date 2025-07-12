@@ -26,6 +26,8 @@ locals: ?std.StringHashMapUnmanaged(Ast.Node.Index) = null,
 vm: *Vm,
 current_chunk: *Chunk,
 
+var stdio_buffer: [4096]u8 = undefined;
+
 const Error = error{ OutOfMemory, AnalysisFail };
 const InnerError = error{
     OutOfMemory,
@@ -500,7 +502,9 @@ fn emitBytes(astgen: *AstGen, byte1: u8, byte2: u8) !void {
 fn end(astgen: *AstGen) !void {
     try astgen.emitByte(@intFromEnum(OpCode.@"return"));
     if (!@import("builtin").is_test and build_options.print_code) {
-        astgen.current_chunk.disassemble(std.io.getStdOut().writer(), "code") catch @panic("disassemble");
+        var stdout_writer = std.fs.File.stdout().writerStreaming(&stdio_buffer);
+        const stdout_bw = &stdout_writer.interface;
+        astgen.current_chunk.disassemble(stdout_bw, "code") catch @panic("disassemble");
     }
 }
 
@@ -677,6 +681,9 @@ fn lowerAstErrors(astgen: *AstGen) !void {
     var msg: std.ArrayListUnmanaged(u8) = .empty;
     defer msg.deinit(gpa);
 
+    var msg_writer = msg.writer(gpa).adaptToNewApi();
+    const msg_bw = &msg_writer.new_interface;
+
     var notes: std.ArrayListUnmanaged(u32) = .empty;
     defer notes.deinit(gpa);
 
@@ -706,17 +713,17 @@ fn lowerAstErrors(astgen: *AstGen) !void {
             .extra = .{ .offset = bad_off },
         };
         msg.clearRetainingCapacity();
-        try tree.renderError(err, msg.writer(gpa));
+        try tree.renderError(err, msg_bw);
         return astgen.appendErrorTokNotesOff(tok, bad_off, "{s}", .{msg.items}, notes.items);
     }
 
     var cur_err = tree.errors[0];
     for (tree.errors[1..]) |err| {
         if (err.is_note) {
-            try tree.renderError(err, msg.writer(gpa));
+            try tree.renderError(err, msg_bw);
             try notes.append(gpa, try astgen.errNoteTok(err.token, "{s}", .{msg.items}));
         } else {
-            try tree.renderError(cur_err, msg.writer(gpa));
+            try tree.renderError(cur_err, msg_bw);
             try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.items}, notes.items);
             notes.clearRetainingCapacity();
             cur_err = err;
@@ -727,7 +734,7 @@ fn lowerAstErrors(astgen: *AstGen) !void {
         msg.clearRetainingCapacity();
     }
 
-    try tree.renderError(cur_err, msg.writer(gpa));
+    try tree.renderError(cur_err, msg_bw);
     try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.items}, notes.items);
 }
 
@@ -959,7 +966,9 @@ fn testFail(source: [:0]const u8, expected: []const u8) !void {
 
     var output: std.ArrayListUnmanaged(u8) = .empty;
     defer output.deinit(gpa);
-    try error_bundle.renderToWriter(.{ .ttyconf = .no_color }, output.writer(gpa));
+    var output_writer = output.writer(gpa).adaptToNewApi();
+    const output_bw = &output_writer.new_interface;
+    try error_bundle.renderToWriter(.{ .ttyconf = .no_color }, output_bw);
 
     try std.testing.expectEqualStrings(expected, std.mem.trim(u8, output.items, &std.ascii.whitespace));
 }
@@ -1191,7 +1200,9 @@ fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected
 
     var actual: std.ArrayListUnmanaged(u8) = .empty;
     defer actual.deinit(gpa);
-    try qir.chunk.disassemble(actual.writer(gpa), "test");
+    var actual_writer = actual.writer(gpa).adaptToNewApi();
+    const actual_bw = &actual_writer.new_interface;
+    try qir.chunk.disassemble(actual_bw, "test");
 
     var expected_chunk: Chunk = .empty;
     defer {
@@ -1203,7 +1214,9 @@ fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected
 
     var expected: std.ArrayListUnmanaged(u8) = .empty;
     defer expected.deinit(gpa);
-    try expected_chunk.disassemble(expected.writer(gpa), "test");
+    var expected_writer = expected.writer(gpa).adaptToNewApi();
+    const expected_bw = &expected_writer.new_interface;
+    try expected_chunk.disassemble(expected_bw, "test");
 
     try std.testing.expectEqualStrings(expected.items, actual.items);
 }

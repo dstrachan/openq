@@ -211,15 +211,15 @@ pub fn rootStatements(tree: Ast) []const Node.Index {
     return tree.extraDataSlice(tree.nodeData(.root).extra_range, Node.Index);
 }
 
-pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
+pub fn renderError(tree: Ast, parse_error: Error, writer: *std.io.Writer) !void {
     switch (parse_error.tag) {
         .expected_expr => {
-            return stream.print("expected expression, found '{s}'", .{
+            return writer.print("expected expression, found '{s}'", .{
                 tree.tokenTag(parse_error.token).symbol(),
             });
         },
         .expected_infix_expr => {
-            return stream.print("expected infix expression, found '{s}'", .{
+            return writer.print("expected infix expression, found '{s}'", .{
                 tree.tokenTag(parse_error.token).symbol(),
             });
         },
@@ -227,10 +227,10 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
             const found_tag = tree.tokenTag(parse_error.token);
             const expected_symbol = parse_error.extra.expected_tag.symbol();
             switch (found_tag) {
-                .invalid => return stream.print("expected '{s}', found invalid bytes", .{
+                .invalid => return writer.print("expected '{s}', found invalid bytes", .{
                     expected_symbol,
                 }),
-                else => return stream.print("expected '{s}', found '{s}'", .{
+                else => return writer.print("expected '{s}', found '{s}'", .{
                     expected_symbol, found_tag.symbol(),
                 }),
             }
@@ -239,23 +239,23 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
             const found_tag = tree.tokenTag(parse_error.token);
             const expected_string = parse_error.extra.expected_string;
             switch (found_tag) {
-                .invalid => return stream.print("expected '{s}', found invalid bytes", .{
+                .invalid => return writer.print("expected '{s}', found invalid bytes", .{
                     expected_string,
                 }),
-                else => return stream.print("expected '{s}', found '{s}'", .{
+                else => return writer.print("expected '{s}', found '{s}'", .{
                     expected_string, found_tag.symbol(),
                 }),
             }
         },
         .invalid_byte => {
             const tok_slice = tree.source[tree.tokenStart(parse_error.token)..];
-            return stream.print("{s} contains invalid byte: '{'}'", .{
+            return writer.print("{s} contains invalid byte: '{f}'", .{
                 switch (tok_slice[0]) {
                     '"' => "string literal",
                     '/' => "comment",
                     else => "token",
                 },
-                std.zig.fmtEscapes(tok_slice[parse_error.extra.offset..][0..1]),
+                std.zig.fmtChar(tok_slice[parse_error.extra.offset..][0..1]),
             });
         },
     }

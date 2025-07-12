@@ -8,7 +8,7 @@ const Node = q.Node;
 const AstGen = q.AstGen;
 const Qir = q.Qir;
 
-pub fn writeJsonNode(writer: anytype, tree: Ast, node: Node.Index) !void {
+pub fn writeJsonNode(writer: *std.io.Writer, tree: Ast, node: Node.Index) !void {
     switch (tree.nodeTag(node)) {
         .root => {
             try writer.writeAll(
@@ -249,8 +249,8 @@ pub fn writeJsonNode(writer: anytype, tree: Ast, node: Node.Index) !void {
         ),
         .string_literal,
         => try writer.print(
-            \\{{"string_literal":"{}"}}
-        , .{std.zig.fmtEscapes(tree.tokenSlice(tree.nodeMainToken(node)))}),
+            \\{{"string_literal":"{f}"}}
+        , .{std.zig.fmtString(tree.tokenSlice(tree.nodeMainToken(node)))}),
         inline .number_list_literal,
         .symbol_list_literal,
         => |t| {
