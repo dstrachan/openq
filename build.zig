@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) !void {
                 const ancestor_ver = try std.SemanticVersion.parse(tagged_ancestor);
                 if (openq_version.order(ancestor_ver) != .gt) {
                     std.process.fatal(
-                        "OpenQ version '{}' must be greater than tagged ancestor '{}'",
+                        "OpenQ version '{f}' must be greater than tagged ancestor '{f}'",
                         .{ openq_version, ancestor_ver },
                     );
                 }

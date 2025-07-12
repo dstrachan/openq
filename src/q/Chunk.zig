@@ -63,7 +63,7 @@ pub fn opCode(chunk: Chunk, index: OpCode.Index) OpCode {
     return @enumFromInt(chunk.data.items(.code)[@intFromEnum(index)]);
 }
 
-pub fn disassemble(chunk: Chunk, writer: anytype, name: []const u8) !void {
+pub fn disassemble(chunk: Chunk, writer: *std.io.Writer, name: []const u8) !void {
     try writer.print("== {s} ==\n", .{name});
 
     var offset: usize = 0;
@@ -72,7 +72,7 @@ pub fn disassemble(chunk: Chunk, writer: anytype, name: []const u8) !void {
     }
 }
 
-pub fn disassembleInstruction(chunk: Chunk, writer: anytype, offset: usize) !usize {
+pub fn disassembleInstruction(chunk: Chunk, writer: *std.io.Writer, offset: usize) !usize {
     try writer.print("{d:04} ", .{offset});
     if (offset > 0 and chunk.data.items(.line)[offset] == chunk.data.items(.line)[offset - 1]) {
         try writer.writeAll("   | ");
@@ -104,13 +104,13 @@ pub fn disassembleInstruction(chunk: Chunk, writer: anytype, offset: usize) !usi
     }
 }
 
-fn simpleInstruction(writer: anytype, name: []const u8, offset: usize) !usize {
+fn simpleInstruction(writer: *std.io.Writer, name: []const u8, offset: usize) !usize {
     try writer.print("{s}\n", .{name});
     return offset + 1;
 }
 
-fn constantInstruction(chunk: Chunk, writer: anytype, name: []const u8, offset: usize) !usize {
+fn constantInstruction(chunk: Chunk, writer: *std.io.Writer, name: []const u8, offset: usize) !usize {
     const constant = chunk.data.items(.code)[offset + 1];
-    try writer.print("{s: <16} {d:4} '{}'\n", .{ name, constant, chunk.constants.items[constant] });
+    try writer.print("{s: <16} {d:4} '{f}'\n", .{ name, constant, chunk.constants.items[constant] });
     return offset + 2;
 }

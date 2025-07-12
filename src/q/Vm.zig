@@ -22,6 +22,8 @@ ip: [*]u8,
 stack: std.ArrayListUnmanaged(*Value),
 symbols: std.StringHashMapUnmanaged(void) = .empty,
 
+var stdio_buffer: [4096]u8 = undefined;
+
 pub const Error = Allocator.Error || error{
     UndeclaredIdentifier,
 };
@@ -67,17 +69,19 @@ pub fn interpret(vm: *Vm, qir: *Qir) !void {
 }
 
 fn run(vm: *Vm) !void {
-    const stdout = std.io.getStdOut().writer();
+    var stdout_writer = std.fs.File.stdout().writerStreaming(&stdio_buffer);
+    const stdout_bw = &stdout_writer.interface;
 
     while (true) {
         if (build_options.trace_execution) {
-            try stdout.writeAll("          ");
+            try stdout_bw.writeAll("          ");
             for (vm.stack.items) |slot| {
-                try stdout.print("[ {} ({d}) ]", .{ slot, slot.ref_count });
+                try stdout_bw.print("[ {f} ({d}) ]", .{ slot, slot.ref_count });
             }
-            try stdout.writeByte('\n');
-            _ = try vm.chunk.disassembleInstruction(stdout, vm.ip - vm.chunk.data.items(.code).ptr);
+            try stdout_bw.writeByte('\n');
+            _ = try vm.chunk.disassembleInstruction(stdout_bw, vm.ip - vm.chunk.data.items(.code).ptr);
         }
+        try stdout_bw.flush();
 
         const instruction: OpCode = @enumFromInt(vm.readByte());
         switch (instruction) {
@@ -103,7 +107,8 @@ fn run(vm: *Vm) !void {
                 var value = vm.pop();
                 defer value.deref(vm.gpa);
 
-                try stdout.print("{}", .{value});
+                try stdout_bw.print("{f}", .{value});
+                try stdout_bw.flush();
                 return;
             },
         }
