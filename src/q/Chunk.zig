@@ -80,7 +80,7 @@ pub fn disassembleInstruction(chunk: Chunk, writer: *std.io.Writer, offset: usiz
     }
 
     switch (chunk.opCode(@enumFromInt(offset))) {
-        .constant => return chunk.constantInstruction(writer, @tagName(.constant), offset),
+        .constant => return chunk.constantInstruction(writer, .constant, offset),
 
         .add,
         .subtract,
@@ -99,17 +99,17 @@ pub fn disassembleInstruction(chunk: Chunk, writer: *std.io.Writer, offset: usiz
         .type,
 
         .@"return",
-        => |t| return simpleInstruction(writer, @tagName(t), offset),
+        => |t| return simpleInstruction(writer, t, offset),
     }
 }
 
-fn simpleInstruction(writer: *std.io.Writer, name: []const u8, offset: usize) !usize {
-    try writer.print("{s}\n", .{name});
+fn simpleInstruction(writer: *std.io.Writer, op_code: OpCode, offset: usize) !usize {
+    try writer.print("{t}\n", .{op_code});
     return offset + 1;
 }
 
-fn constantInstruction(chunk: Chunk, writer: *std.io.Writer, name: []const u8, offset: usize) !usize {
+fn constantInstruction(chunk: Chunk, writer: *std.io.Writer, op_code: OpCode, offset: usize) !usize {
     const constant = chunk.data.items(.code)[offset + 1];
-    try writer.print("{s: <16} {d:4} '{f}'\n", .{ name, constant, chunk.constants.items[constant] });
+    try writer.print("{t: <16} {d:4} '{f}'\n", .{ op_code, constant, chunk.constants.items[constant] });
     return offset + 2;
 }
