@@ -64,6 +64,10 @@ pub fn interpret(vm: *Vm, qir: *Qir) !void {
 
     vm.chunk = &qir.chunk;
     vm.ip = qir.chunk.data.items(.code).ptr;
+    for (vm.chunk.constants.items) |constant| {
+        _ = constant.ref();
+        assert(constant.ref_count == 2);
+    }
 
     vm.run() catch return error.RunError;
 }

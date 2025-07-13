@@ -54,8 +54,7 @@ pub fn replace(chunk: *Chunk, index: OpCode.Index, byte: u8) void {
 }
 
 pub fn addConstant(chunk: *Chunk, gpa: Allocator, value: *Value) !usize {
-    try chunk.constants.append(gpa, value.ref());
-    assert(value.ref_count == 2);
+    try chunk.constants.append(gpa, value);
     return chunk.constants.items.len - 1;
 }
 
