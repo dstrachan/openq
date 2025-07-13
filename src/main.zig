@@ -311,12 +311,12 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
     const source: [:0]const u8 = s: {
         var f = if (q_source_path) |p| file: {
             break :file fs.cwd().openFile(p, .{}) catch |err| {
-                fatal("unable to open file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
+                fatal("unable to open file '{s}' for validate: {s}", .{ display_path, @errorName(err) });
             };
         } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
         break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
-            fatal("unable to load file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
+            fatal("unable to load file '{s}' for validate: {s}", .{ display_path, @errorName(err) });
         };
     };
 
