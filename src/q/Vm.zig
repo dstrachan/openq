@@ -111,8 +111,11 @@ fn run(vm: *Vm) !void {
                 var value = vm.pop();
                 defer value.deref(vm.gpa);
 
-                try stdout_bw.print("{f}", .{value});
-                try stdout_bw.flush();
+                if (value.type != .nil) {
+                    try stdout_bw.print("{f}", .{value});
+                    try stdout_bw.flush();
+                }
+
                 return;
             },
         }
@@ -694,5 +697,11 @@ pub inline fn createCharList(vm: *Vm, value: []u8) *Value {
 pub inline fn createSymbol(vm: *Vm, value: []u8) *Value {
     const v = vm.gpa.create(Value) catch @panic("oom");
     v.* = .{ .type = .symbol, .as = .{ .symbol = value } };
+    return v;
+}
+
+pub inline fn createSymbolList(vm: *Vm, value: [][]u8) *Value {
+    const v = vm.gpa.create(Value) catch @panic("oom");
+    v.* = .{ .type = .symbol_list, .as = .{ .symbol_list = value } };
     return v;
 }

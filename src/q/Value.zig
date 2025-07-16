@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 const Value = @This();
 
 pub const Type = enum {
+    nil,
     mixed_list,
     boolean,
     boolean_list,
@@ -29,6 +30,7 @@ pub const Type = enum {
 };
 
 pub const Union = union {
+    nil: void,
     mixed_list: []Value,
     boolean: bool,
     boolean_list: []bool,
@@ -76,8 +78,11 @@ pub fn deref(value: *Value, gpa: Allocator) void {
             .real_list => gpa.free(value.as.real_list),
             .float_list => gpa.free(value.as.float_list),
             .char_list => gpa.free(value.as.char_list),
-            .symbol => if (value.as.symbol.len > 0) gpa.free(value.as.symbol),
-            .symbol_list => gpa.free(value.as.symbol_list),
+            .symbol => gpa.free(value.as.symbol),
+            .symbol_list => {
+                for (value.as.symbol_list) |symbol| gpa.free(symbol);
+                gpa.free(value.as.symbol_list);
+            },
             else => {},
         }
         gpa.destroy(value);
@@ -86,6 +91,7 @@ pub fn deref(value: *Value, gpa: Allocator) void {
 
 pub fn format(value: Value, writer: *std.io.Writer) !void {
     switch (value.type) {
+        .nil => try writer.writeAll("::"),
         .mixed_list => @panic("NYI"),
         .boolean => try writer.writeAll(if (value.as.boolean) "1b" else "0b"),
         .boolean_list => if (value.as.boolean_list.len == 0) {
@@ -119,6 +125,8 @@ pub fn format(value: Value, writer: *std.io.Writer) !void {
             try writer.print("\"{f}\"", .{std.zig.fmtString(value.as.char_list)});
         },
         .symbol => try writer.print("`{s}", .{value.as.symbol}),
-        .symbol_list => @panic("NYI"),
+        .symbol_list => for (value.as.symbol_list) |symbol| {
+            try writer.print("`{s}", .{symbol});
+        },
     }
 }
