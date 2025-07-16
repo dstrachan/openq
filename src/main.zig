@@ -95,7 +95,7 @@ fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     } else if (mem.eql(u8, cmd, "validate")) {
         try cmdValidate(arena, cmd_args);
     } else if (mem.eql(u8, cmd, "repl")) {
-        try cmdRepl(gpa, arena, cmd_args);
+        try cmdRepl(gpa, cmd_args);
     } else if (mem.eql(u8, cmd, "version")) {
         try fs.File.stdout().writeAll(build_options.version ++ "\n");
     } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
@@ -398,7 +398,7 @@ const usage_repl =
 const banner = "OpenQ " ++ build_options.version ++ " " ++
     @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n";
 
-fn cmdRepl(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
     var color: std.zig.Color = .auto;
 
     var i: usize = 0;
@@ -481,18 +481,21 @@ fn cmdRepl(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         _ = buffer.shrinkRetainingCapacity(std.mem.trimEnd(u8, buffer.items, &std.ascii.whitespace).len);
         try buffer.append(0);
 
-        var orig_tree: Ast = try .parse(arena, buffer.items[0 .. buffer.items.len - 1 :0]);
+        var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
+        defer orig_tree.deinit(gpa);
         if (orig_tree.errors.len > 0) {
-            try utils.printAstErrorsToStderr(arena, orig_tree, "<repl>", color);
-            std.process.exit(1);
+            try utils.printAstErrorsToStderr(gpa, orig_tree, "<repl>", color);
+            process.exit(1);
         }
 
-        const tree = try orig_tree.normalize(arena);
+        var tree = try orig_tree.normalize(gpa);
+        defer tree.deinit(gpa);
 
-        var qir = try AstGen.generate(arena, tree, &vm);
+        var qir = try AstGen.generate(gpa, tree, &vm);
+        defer qir.deinit(gpa);
         if (qir.hasCompileErrors()) {
-            try utils.printQirErrorsToStderr(arena, qir, tree, "<repl>", color);
-            std.process.exit(1);
+            try utils.printQirErrorsToStderr(gpa, qir, tree, "<repl>", color);
+            process.exit(1);
         }
 
         vm.interpret(&qir) catch |err| switch (err) {
