@@ -164,6 +164,13 @@ fn visit(astgen: *AstGen) Error!void {
         };
     }
 
+    if (astgen.current_chunk.data.len == 0) {
+        astgen.emitConstant(astgen.vm.createNil()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.AnalysisFail,
+        };
+    }
+
     try astgen.end();
 }
 
@@ -371,12 +378,11 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
         .apply_binary => unreachable,
 
         .number_literal => try astgen.visitNumber(node),
-        .number_list_literal,
-        .string_literal,
-        .symbol_literal,
-        .symbol_list_literal,
-        .builtin,
-        => {},
+        .number_list_literal => {},
+        .string_literal => try astgen.visitString(node),
+        .symbol_literal => try astgen.visitSymbol(node),
+        .symbol_list_literal => try astgen.visitSymbolList(node),
+        .builtin => {},
 
         .identifier => {
             const slice = tree.tokenSlice(tree.nodeMainToken(node));
@@ -488,6 +494,48 @@ fn visitNumber(astgen: *AstGen, node: Ast.Node.Index) !void {
             },
         });
     }
+}
+
+fn visitString(astgen: *AstGen, node: Ast.Node.Index) !void {
+    assert(astgen.tree.nodeTag(node) == .string_literal);
+
+    const vm = astgen.vm;
+    const tree = astgen.tree;
+
+    const bytes = tree.tokenSlice(tree.nodeMainToken(node));
+    const char_list = vm.createCharList(@constCast(bytes[1 .. bytes.len - 1]));
+    try astgen.emitConstant(char_list);
+}
+
+fn visitSymbol(astgen: *AstGen, node: Ast.Node.Index) !void {
+    assert(astgen.tree.nodeTag(node) == .symbol_literal);
+
+    const vm = astgen.vm;
+    const tree = astgen.tree;
+
+    const slice = tree.tokenSlice(tree.nodeMainToken(node));
+    const bytes = try vm.gpa.dupe(u8, slice[1..]);
+    const symbol = vm.createSymbol(bytes);
+    try astgen.emitConstant(symbol);
+}
+
+fn visitSymbolList(astgen: *AstGen, node: Ast.Node.Index) !void {
+    assert(astgen.tree.nodeTag(node) == .symbol_list_literal);
+
+    const vm = astgen.vm;
+    const gpa = astgen.gpa;
+    const tree = astgen.tree;
+
+    const slice = tree.nodeSlice(node);
+    var list: std.ArrayListUnmanaged([]u8) = .empty;
+    defer list.deinit(gpa);
+    errdefer for (list.items) |bytes| gpa.free(bytes);
+    var it = std.mem.splitScalar(u8, slice[1..], '`');
+    while (it.next()) |bytes| {
+        try list.append(gpa, try gpa.dupe(u8, bytes));
+    }
+    const symbol_list = vm.createSymbolList(try list.toOwnedSlice(gpa));
+    try astgen.emitConstant(symbol_list);
 }
 
 fn emitByte(astgen: *AstGen, byte: u8) !void {
