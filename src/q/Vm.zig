@@ -164,80 +164,80 @@ const enlist = @import("vm/enlist.zig").impl;
 const not = @import("vm/not.zig").impl;
 const @"type" = @import("vm/type.zig").impl;
 
-pub inline fn createNil(vm: *Vm) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createNil(vm: *Vm) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .nil, .as = .{ .nil = {} } };
     return v;
 }
 
-pub inline fn createBoolean(vm: *Vm, value: bool) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createBoolean(vm: *Vm, value: bool) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .boolean, .as = .{ .boolean = value } };
     return v;
 }
 
-pub inline fn createGuid(vm: *Vm, value: [16]u8) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createGuid(vm: *Vm, value: [16]u8) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .guid, .as = .{ .guid = value } };
     return v;
 }
 
-pub inline fn createByte(vm: *Vm, value: u8) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createByte(vm: *Vm, value: u8) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .byte, .as = .{ .byte = value } };
     return v;
 }
 
-pub inline fn createShort(vm: *Vm, value: i16) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createShort(vm: *Vm, value: i16) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .short, .as = .{ .short = value } };
     return v;
 }
 
-pub inline fn createInt(vm: *Vm, value: i32) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createInt(vm: *Vm, value: i32) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .int, .as = .{ .int = value } };
     return v;
 }
 
-pub inline fn createLong(vm: *Vm, value: i64) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createLong(vm: *Vm, value: i64) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .long, .as = .{ .long = value } };
     return v;
 }
 
-pub inline fn createReal(vm: *Vm, value: f32) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createReal(vm: *Vm, value: f32) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .real, .as = .{ .real = value } };
     return v;
 }
 
-pub inline fn createFloat(vm: *Vm, value: f64) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createFloat(vm: *Vm, value: f64) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .float, .as = .{ .float = value } };
     return v;
 }
 
-pub inline fn createChar(vm: *Vm, value: u8) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createChar(vm: *Vm, value: u8) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .char, .as = .{ .char = value } };
     return v;
 }
 
-pub inline fn createCharList(vm: *Vm, value: []u8) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createCharList(vm: *Vm, value: []u8) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .char_list, .as = .{ .char_list = value } };
     return v;
 }
 
-pub inline fn createSymbol(vm: *Vm, value: []u8) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createSymbol(vm: *Vm, value: []u8) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .symbol, .as = .{ .symbol = value } };
     return v;
 }
 
-pub inline fn createSymbolList(vm: *Vm, value: [][]u8) *Value {
-    const v = vm.gpa.create(Value) catch @panic("oom");
+pub inline fn createSymbolList(vm: *Vm, value: [][]u8) !*Value {
+    const v = try vm.gpa.create(Value);
     v.* = .{ .type = .symbol_list, .as = .{ .symbol_list = value } };
     return v;
 }
