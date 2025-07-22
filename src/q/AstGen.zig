@@ -166,7 +166,7 @@ fn visit(astgen: *AstGen) Error!void {
 
     if (astgen.current_chunk.data.len == 0) {
         const value = try astgen.vm.createNil();
-        errdefer value.deref(astgen.vm.gpa);
+        errdefer value.deref(astgen.gpa);
         astgen.emitConstant(value) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.AnalysisFail,
@@ -456,7 +456,7 @@ fn visitNumber(astgen: *AstGen, node: Ast.Node.Index) !void {
     assert(astgen.tree.nodeTag(node) == .number_literal);
 
     const vm = astgen.vm;
-    const gpa = vm.gpa;
+    const gpa = astgen.gpa;
     const tree = astgen.tree;
 
     const bytes = tree.tokenSlice(tree.nodeMainToken(node));
@@ -505,11 +505,16 @@ fn visitString(astgen: *AstGen, node: Ast.Node.Index) !void {
     assert(astgen.tree.nodeTag(node) == .string_literal);
 
     const vm = astgen.vm;
+    const gpa = astgen.gpa;
     const tree = astgen.tree;
 
-    const bytes = tree.tokenSlice(tree.nodeMainToken(node));
-    const char_list = try vm.createCharList(@constCast(bytes[1 .. bytes.len - 1]));
-    errdefer char_list.deref(vm.gpa);
+    const slice = tree.tokenSlice(tree.nodeMainToken(node));
+    const char_list = blk: {
+        const bytes = try gpa.dupe(u8, slice[1 .. slice.len - 1]);
+        errdefer gpa.free(bytes);
+        break :blk try vm.createCharList(bytes);
+    };
+    errdefer char_list.deref(gpa);
     try astgen.emitConstant(char_list);
 }
 
@@ -517,12 +522,16 @@ fn visitSymbol(astgen: *AstGen, node: Ast.Node.Index) !void {
     assert(astgen.tree.nodeTag(node) == .symbol_literal);
 
     const vm = astgen.vm;
+    const gpa = astgen.gpa;
     const tree = astgen.tree;
 
     const slice = tree.tokenSlice(tree.nodeMainToken(node));
-    const bytes = try vm.gpa.dupe(u8, slice[1..]);
-    const symbol = try vm.createSymbol(bytes);
-    errdefer symbol.deref(vm.gpa);
+    const symbol = blk: {
+        const bytes = try gpa.dupe(u8, slice[1..]);
+        errdefer gpa.free(bytes);
+        break :blk try vm.createSymbol(bytes);
+    };
+    errdefer symbol.deref(gpa);
     try astgen.emitConstant(symbol);
 }
 
