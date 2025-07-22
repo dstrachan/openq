@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Writer = std.Io.Writer;
 const assert = std.debug.assert;
 
 const q = @import("../root.zig");
@@ -211,7 +212,7 @@ pub fn rootStatements(tree: Ast) []const Node.Index {
     return tree.extraDataSlice(tree.nodeData(.root).extra_range, Node.Index);
 }
 
-pub fn renderError(tree: Ast, parse_error: Error, writer: *std.io.Writer) !void {
+pub fn renderError(tree: Ast, parse_error: Error, writer: *Writer) !void {
     switch (parse_error.tag) {
         .expected_expr => {
             return writer.print("expected expression, found '{s}'", .{
@@ -255,7 +256,7 @@ pub fn renderError(tree: Ast, parse_error: Error, writer: *std.io.Writer) !void 
                     '/' => "comment",
                     else => "token",
                 },
-                std.zig.fmtChar(tok_slice[parse_error.extra.offset..][0..1]),
+                std.zig.fmtChar(tok_slice[parse_error.extra.offset]),
             });
         },
     }
