@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const debug = std.debug;
 const fs = std.fs;
-const io = std.io;
 const mem = std.mem;
 const process = std.process;
 const Allocator = mem.Allocator;
@@ -32,8 +31,10 @@ var wasi_preopens: fs.wasi.Preopens = undefined;
 const fatal = process.fatal;
 const cleanExit = process.cleanExit;
 
+/// This can be global since stdin is a singleton.
+var stdin_buffer: [4096]u8 align(std.heap.page_size_min) = undefined;
 /// This can be global since stdout is a singleton.
-var stdio_buffer: [4096]u8 = undefined;
+var stdout_buffer: [4096]u8 align(std.heap.page_size_min) = undefined;
 
 const usage =
     \\Usage: openq [command] [options]
@@ -158,7 +159,8 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
             };
         } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
-        break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
+        var file_reader = f.reader(&stdin_buffer);
+        break :s std.zig.readSourceFileToEndAlloc(arena, &file_reader) catch |err| {
             fatal("unable to load file '{s}' for tokenize: {s}", .{ display_path, @errorName(err) });
         };
     };
@@ -172,7 +174,7 @@ fn cmdTokenize(arena: Allocator, args: []const []const u8) !void {
         if (token.tag == .eof) break;
     }
 
-    var stdout_writer = fs.File.stdout().writerStreaming(&stdio_buffer);
+    var stdout_writer = fs.File.stdout().writerStreaming(&stdout_buffer);
     const stdout_bw = &stdout_writer.interface;
     try stdout_bw.writeByte('[');
     for (tokens.items, 0..) |token, index| {
@@ -243,7 +245,8 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
             };
         } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
-        break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
+        var file_reader = f.reader(&stdin_buffer);
+        break :s std.zig.readSourceFileToEndAlloc(arena, &file_reader) catch |err| {
             fatal("unable to load file '{s}' for parse: {s}", .{ display_path, @errorName(err) });
         };
     };
@@ -254,7 +257,7 @@ fn cmdParse(arena: Allocator, args: []const []const u8) !void {
         process.exit(1);
     } else {
         const tree = try orig_tree.normalize(arena);
-        var stdout_writer = fs.File.stdout().writerStreaming(&stdio_buffer);
+        var stdout_writer = fs.File.stdout().writerStreaming(&stdout_buffer);
         const stdout_bw = &stdout_writer.interface;
         try utils.writeJsonNode(stdout_bw, tree, .root);
         try stdout_bw.flush();
@@ -315,7 +318,8 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
             };
         } else fs.File.stdin();
         defer if (q_source_path != null) f.close();
-        break :s std.zig.readSourceFileToEndAlloc(arena, f, null) catch |err| {
+        var file_reader = f.reader(&stdin_buffer);
+        break :s std.zig.readSourceFileToEndAlloc(arena, &file_reader) catch |err| {
             fatal("unable to load file '{s}' for validate: {s}", .{ display_path, @errorName(err) });
         };
     };
@@ -339,7 +343,7 @@ fn cmdValidate(arena: Allocator, args: []const []const u8) !void {
         }
     }
 
-    var stdout_writer = fs.File.stdout().writerStreaming(&stdio_buffer);
+    var stdout_writer = fs.File.stdout().writerStreaming(&stdout_buffer);
     const stdout_bw = &stdout_writer.interface;
 
     {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Writer = std.Io.Writer;
 const assert = std.debug.assert;
 
 const q = @import("../root.zig");
@@ -62,7 +63,7 @@ pub fn opCode(chunk: Chunk, index: OpCode.Index) OpCode {
     return @enumFromInt(chunk.data.items(.code)[@intFromEnum(index)]);
 }
 
-pub fn disassemble(chunk: Chunk, writer: *std.io.Writer, name: []const u8) !void {
+pub fn disassemble(chunk: Chunk, writer: *Writer, name: []const u8) !void {
     try writer.print("== {s} ==\n", .{name});
 
     var offset: usize = 0;
@@ -71,7 +72,7 @@ pub fn disassemble(chunk: Chunk, writer: *std.io.Writer, name: []const u8) !void
     }
 }
 
-pub fn disassembleInstruction(chunk: Chunk, writer: *std.io.Writer, offset: usize) !usize {
+pub fn disassembleInstruction(chunk: Chunk, writer: *Writer, offset: usize) !usize {
     try writer.print("{d:04} ", .{offset});
     if (offset > 0 and chunk.data.items(.line)[offset] == chunk.data.items(.line)[offset - 1]) {
         try writer.writeAll("   | ");
@@ -103,12 +104,12 @@ pub fn disassembleInstruction(chunk: Chunk, writer: *std.io.Writer, offset: usiz
     }
 }
 
-fn simpleInstruction(writer: *std.io.Writer, op_code: OpCode, offset: usize) !usize {
+fn simpleInstruction(writer: *Writer, op_code: OpCode, offset: usize) !usize {
     try writer.print("{t}\n", .{op_code});
     return offset + 1;
 }
 
-fn constantInstruction(chunk: Chunk, writer: *std.io.Writer, op_code: OpCode, offset: usize) !usize {
+fn constantInstruction(chunk: Chunk, writer: *Writer, op_code: OpCode, offset: usize) !usize {
     const constant = chunk.data.items(.code)[offset + 1];
     try writer.print("{t: <16} {d:4} '{f}'\n", .{ op_code, constant, chunk.constants.items[constant] });
     return offset + 2;

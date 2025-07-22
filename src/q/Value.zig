@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Writer = std.Io.Writer;
 const assert = std.debug.assert;
 
 const Value = @This();
@@ -89,7 +90,7 @@ pub fn deref(value: *Value, gpa: Allocator) void {
     }
 }
 
-pub fn format(value: Value, writer: *std.io.Writer) !void {
+pub fn format(value: Value, writer: *Writer) !void {
     switch (value.type) {
         .nil => try writer.writeAll("::"),
         .mixed_list => @panic("NYI"),
