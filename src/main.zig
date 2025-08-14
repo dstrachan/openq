@@ -436,8 +436,8 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
     try vm.init(gpa);
     defer vm.deinit();
 
-    var buffer: std.ArrayList(u8) = .init(gpa);
-    defer buffer.deinit();
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(gpa);
 
     if (std.posix.isatty(stdin.context.handle)) {
         try stderr.writeAll(banner);
@@ -446,14 +446,14 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
             try stderr.writeAll("\nq)");
 
             buffer.shrinkRetainingCapacity(0);
-            stdin.streamUntilDelimiter(buffer.writer(), '\n', null) catch |err| switch (err) {
+            stdin.streamUntilDelimiter(buffer.writer(gpa), '\n', null) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
 
             _ = buffer.shrinkRetainingCapacity(std.mem.trimEnd(u8, buffer.items, &std.ascii.whitespace).len);
             if (mem.eql(u8, buffer.items, "\\\\")) break;
-            try buffer.append(0);
+            try buffer.append(gpa, 0);
 
             var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
             defer orig_tree.deinit(gpa);
@@ -477,13 +477,13 @@ fn cmdRepl(gpa: Allocator, args: []const []const u8) !void {
             };
         }
     } else {
-        stdin.streamUntilDelimiter(buffer.writer(), 0, null) catch |err| switch (err) {
+        stdin.streamUntilDelimiter(buffer.writer(gpa), 0, null) catch |err| switch (err) {
             error.EndOfStream => {},
             else => return err,
         };
 
         _ = buffer.shrinkRetainingCapacity(std.mem.trimEnd(u8, buffer.items, &std.ascii.whitespace).len);
-        try buffer.append(0);
+        try buffer.append(gpa, 0);
 
         var orig_tree: Ast = try .parse(gpa, buffer.items[0 .. buffer.items.len - 1 :0]);
         defer orig_tree.deinit(gpa);
