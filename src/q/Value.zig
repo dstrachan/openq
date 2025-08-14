@@ -110,15 +110,54 @@ pub fn format(value: Value, writer: *Writer) !void {
             try writer.print("0x{x}", .{value.as.byte_list});
         },
         .short => try writer.print("{d}h", .{value.as.short}),
-        .short_list => @panic("NYI"),
+        .short_list => if (value.as.short_list.len == 0) {
+            try writer.writeAll("`short$()");
+        } else {
+            for (value.as.short_list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(' ');
+                try writer.print("{d}", .{item});
+            }
+            try writer.writeByte('h');
+        },
         .int => try writer.print("{d}i", .{value.as.int}),
-        .int_list => @panic("NYI"),
+        .int_list => if (value.as.int_list.len == 0) {
+            try writer.writeAll("`int$()");
+        } else {
+            for (value.as.int_list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(' ');
+                try writer.print("{d}", .{item});
+            }
+            try writer.writeByte('i');
+        },
         .long => try writer.print("{d}", .{value.as.long}),
-        .long_list => @panic("NYI"),
+        .long_list => if (value.as.long_list.len == 0) {
+            try writer.writeAll("`long$()");
+        } else {
+            for (value.as.long_list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(' ');
+                try writer.print("{d}", .{item});
+            }
+        },
         .real => try writer.print("{d}e", .{value.as.real}),
-        .real_list => @panic("NYI"),
+        .real_list => if (value.as.real_list.len == 0) {
+            try writer.writeAll("`real$()");
+        } else {
+            for (value.as.real_list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(' ');
+                try writer.print("{d}", .{item});
+            }
+            try writer.writeByte('e');
+        },
         .float => try writer.print("{d}f", .{value.as.float}),
-        .float_list => @panic("NYI"),
+        .float_list => if (value.as.float_list.len == 0) {
+            try writer.writeAll("`float$()");
+        } else {
+            for (value.as.float_list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(' ');
+                try writer.print("{d}", .{item});
+            }
+            try writer.writeByte('f');
+        },
         .char => try writer.print("\"{f}\"", .{std.zig.fmtString(&.{value.as.char})}),
         .char_list => if (value.as.char_list.len == 1) {
             try writer.print(",\"{f}\"", .{std.zig.fmtString(value.as.char_list)});

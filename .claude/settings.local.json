@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(zig build)",
+      "Bash(zig build run:*)",
+      "Bash(zig build:*)",
+      "Bash(grep:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

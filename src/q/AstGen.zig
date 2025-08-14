@@ -35,6 +35,8 @@ const InnerError = error{
     Rank,
     Number,
     TooManyConstants,
+    Overflow,
+    InvalidCharacter,
 };
 
 fn addExtra(astgen: *AstGen, extra: anytype) Allocator.Error!u32 {
@@ -121,7 +123,7 @@ pub fn generate(gpa: Allocator, tree: Ast, vm: *Vm) !Qir {
     };
 
     const err_index = @intFromEnum(Qir.ExtraIndex.compile_errors);
-    if (astgen.compile_errors.items.len == 0) {
+    if (!fatal and astgen.compile_errors.items.len == 0) {
         astgen.extra.items[err_index] = 0;
     } else {
         try astgen.extra.ensureUnusedCapacity(gpa, 1 + astgen.compile_errors.items.len *
@@ -380,7 +382,7 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
         .apply_binary => unreachable,
 
         .number_literal => try astgen.visitNumber(node),
-        .number_list_literal => {},
+        .number_list_literal => try astgen.visitNumberList(node),
         .string_literal => try astgen.visitString(node),
         .symbol_literal => try astgen.visitSymbol(node),
         .symbol_list_literal => try astgen.visitSymbolList(node),
@@ -461,7 +463,10 @@ fn visitNumber(astgen: *AstGen, node: Ast.Node.Index) !void {
 
     const bytes = tree.tokenSlice(tree.nodeMainToken(node));
     if (std.mem.startsWith(u8, bytes, "0x")) {
-        return error.NYI;
+        if (bytes.len > 4) return error.NYI;
+        const value = try vm.createByte(try std.fmt.parseInt(u8, bytes[2..], 16));
+        errdefer value.deref(gpa);
+        try astgen.emitConstant(value);
     } else {
         const value = try switch (bytes[bytes.len - 1]) {
             'b' => blk: {
@@ -499,6 +504,95 @@ fn visitNumber(astgen: *AstGen, node: Ast.Node.Index) !void {
         errdefer value.deref(gpa);
         try astgen.emitConstant(value);
     }
+}
+
+fn visitNumberList(astgen: *AstGen, node: Ast.Node.Index) !void {
+    assert(astgen.tree.nodeTag(node) == .number_list_literal);
+
+    const vm = astgen.vm;
+    const gpa = astgen.gpa;
+    const tree = astgen.tree;
+
+    const main_token = tree.nodeMainToken(node);
+    const last_token = tree.nodeData(node).token;
+
+    // Determine the list type from the last token's suffix
+    const last_token_bytes = tree.tokenSlice(last_token);
+    const list_type: Value.Type = switch (last_token_bytes[last_token_bytes.len - 1]) {
+        '0'...'9' => .long_list,
+        'h' => .short_list,
+        'i' => .int_list,
+        'j' => .long_list,
+        'e' => .real_list,
+        'f' => .float_list,
+        else => return error.InvalidCharacter,
+    };
+
+    // Collect all number values
+    var values: std.ArrayListUnmanaged(f64) = try .initCapacity(gpa, last_token - main_token + 1);
+    defer values.deinit(gpa);
+
+    var token = main_token;
+    while (token <= last_token) : (token += 1) {
+        assert(tree.tokenTag(token) == .number_literal);
+
+        const bytes = tree.tokenSlice(token);
+        // For the last token, handle suffix; for others, parse as-is
+        const clean_bytes = if (token == last_token) blk: {
+            const last_char = bytes[bytes.len - 1];
+            if (last_char == 'h' or last_char == 'i' or last_char == 'j' or
+                last_char == 'e' or last_char == 'f')
+            {
+                break :blk bytes[0 .. bytes.len - 1];
+            } else {
+                break :blk bytes;
+            }
+        } else bytes;
+
+        const parsed_value: f64 = switch (std.zig.parseNumberLiteral(clean_bytes)) {
+            .int => |i| @floatFromInt(i),
+            .float => std.fmt.parseFloat(f64, clean_bytes) catch return error.Number,
+            else => return error.Number,
+        };
+
+        values.appendAssumeCapacity(parsed_value);
+    }
+
+    // Create the appropriate list type
+    const list_value = switch (list_type) {
+        .short_list => blk: {
+            const list = try gpa.alloc(i16, values.items.len);
+            for (values.items, list) |val, *dest| {
+                dest.* = @intFromFloat(val);
+            }
+            break :blk try vm.createShortList(list);
+        },
+        .int_list => blk: {
+            const list = try gpa.alloc(i32, values.items.len);
+            for (values.items, list) |val, *dest| {
+                dest.* = @intFromFloat(val);
+            }
+            break :blk try vm.createIntList(list);
+        },
+        .long_list => blk: {
+            const list = try gpa.alloc(i64, values.items.len);
+            for (values.items, list) |val, *dest| {
+                dest.* = @intFromFloat(val);
+            }
+            break :blk try vm.createLongList(list);
+        },
+        .real_list => blk: {
+            const list = try gpa.alloc(f32, values.items.len);
+            for (values.items, list) |val, *dest| {
+                dest.* = @floatCast(val);
+            }
+            break :blk try vm.createRealList(list);
+        },
+        .float_list => try vm.createFloatList(try values.toOwnedSlice(gpa)),
+        else => unreachable,
+    };
+    errdefer list_value.deref(gpa);
+    try astgen.emitConstant(list_value);
 }
 
 fn visitString(astgen: *AstGen, node: Ast.Node.Index) !void {
@@ -747,11 +841,9 @@ fn lowerAstErrors(astgen: *AstGen) !void {
     const tree = astgen.tree;
     assert(tree.errors.len > 0);
 
-    var msg: std.ArrayListUnmanaged(u8) = .empty;
-    defer msg.deinit(gpa);
-
-    var msg_writer = msg.writer(gpa).adaptToNewApi();
-    const msg_bw = &msg_writer.new_interface;
+    var msg: std.io.Writer.Allocating = .init(gpa);
+    defer msg.deinit();
+    const msg_w = &msg.writer;
 
     var notes: std.ArrayListUnmanaged(u32) = .empty;
     defer notes.deinit(gpa);
@@ -782,18 +874,18 @@ fn lowerAstErrors(astgen: *AstGen) !void {
             .extra = .{ .offset = bad_off },
         };
         msg.clearRetainingCapacity();
-        try tree.renderError(err, msg_bw);
-        return astgen.appendErrorTokNotesOff(tok, bad_off, "{s}", .{msg.items}, notes.items);
+        try tree.renderError(err, msg_w);
+        return astgen.appendErrorTokNotesOff(tok, bad_off, "{s}", .{msg.getWritten()}, notes.items);
     }
 
     var cur_err = tree.errors[0];
     for (tree.errors[1..]) |err| {
         if (err.is_note) {
-            try tree.renderError(err, msg_bw);
-            try notes.append(gpa, try astgen.errNoteTok(err.token, "{s}", .{msg.items}));
+            try tree.renderError(err, msg_w);
+            try notes.append(gpa, try astgen.errNoteTok(err.token, "{s}", .{msg.getWritten()}));
         } else {
-            try tree.renderError(cur_err, msg_bw);
-            try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.items}, notes.items);
+            try tree.renderError(cur_err, msg_w);
+            try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.getWritten()}, notes.items);
             notes.clearRetainingCapacity();
             cur_err = err;
 
@@ -803,8 +895,8 @@ fn lowerAstErrors(astgen: *AstGen) !void {
         msg.clearRetainingCapacity();
     }
 
-    try tree.renderError(cur_err, msg_bw);
-    try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.items}, notes.items);
+    try tree.renderError(cur_err, msg_w);
+    try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.getWritten()}, notes.items);
 }
 
 fn failNode(
@@ -1033,13 +1125,12 @@ fn testFail(source: [:0]const u8, expected: []const u8) !void {
     var error_bundle = try wip_errors.toOwnedBundle("");
     defer error_bundle.deinit(gpa);
 
-    var output: std.ArrayListUnmanaged(u8) = .empty;
-    defer output.deinit(gpa);
-    var output_writer = output.writer(gpa).adaptToNewApi();
-    const output_bw = &output_writer.new_interface;
-    try error_bundle.renderToWriter(.{ .ttyconf = .no_color }, output_bw);
+    var output: std.io.Writer.Allocating = .init(gpa);
+    defer output.deinit();
+    const output_w = &output.writer;
+    try error_bundle.renderToWriter(.{ .ttyconf = .no_color }, output_w);
 
-    try std.testing.expectEqualStrings(expected, std.mem.trim(u8, output.items, &std.ascii.whitespace));
+    try std.testing.expectEqualStrings(expected, std.mem.trim(u8, output.getWritten(), &std.ascii.whitespace));
 }
 
 test "undeclared identifier - identifier" {
@@ -1267,11 +1358,10 @@ fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected
     const actual_chunk = qir.chunk;
     for (actual_chunk.data.items(.line)) |*line| line.* = 1;
 
-    var actual: std.ArrayListUnmanaged(u8) = .empty;
-    defer actual.deinit(gpa);
-    var actual_writer = actual.writer(gpa).adaptToNewApi();
-    const actual_bw = &actual_writer.new_interface;
-    try qir.chunk.disassemble(actual_bw, "test");
+    var actual: std.io.Writer.Allocating = .init(gpa);
+    defer actual.deinit();
+    const actual_w = &actual.writer;
+    try qir.chunk.disassemble(actual_w, "test");
 
     var expected_chunk: Chunk = .empty;
     defer {
@@ -1281,13 +1371,12 @@ fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected
     for (expected_constants) |*constant| _ = try expected_chunk.addConstant(gpa, @constCast(constant));
     for (expected_data) |code| try expected_chunk.data.append(gpa, .{ .code = code, .line = 1 });
 
-    var expected: std.ArrayListUnmanaged(u8) = .empty;
-    defer expected.deinit(gpa);
-    var expected_writer = expected.writer(gpa).adaptToNewApi();
-    const expected_bw = &expected_writer.new_interface;
-    try expected_chunk.disassemble(expected_bw, "test");
+    var expected: std.io.Writer.Allocating = .init(gpa);
+    defer expected.deinit();
+    const expected_w = &expected.writer;
+    try expected_chunk.disassemble(expected_w, "test");
 
-    try std.testing.expectEqualStrings(expected.items, actual.items);
+    try std.testing.expectEqualStrings(expected.getWritten(), actual.getWritten());
 }
 
 const utils = struct {

@@ -164,6 +164,33 @@ const enlist = @import("vm/enlist.zig").impl;
 const not = @import("vm/not.zig").impl;
 const @"type" = @import("vm/type.zig").impl;
 
+pub fn create(vm: *Vm, comptime value_type: Value.Type, value: anytype) !*Value {
+    return switch (value_type) {
+        .nil => vm.createNil(),
+        .boolean => vm.createBoolean(value),
+        .boolean_list => vm.createBooleanList(value),
+        .guid => vm.createGuid(value),
+        .guid_list => vm.createGuidList(value),
+        .byte => vm.createByte(value),
+        .byte_list => vm.createByteList(value),
+        .short => vm.createShort(value),
+        .short_list => vm.createShortList(value),
+        .int => vm.createInt(value),
+        .int_list => vm.createIntList(value),
+        .long => vm.createLong(value),
+        .long_list => vm.createLongList(value),
+        .real => vm.createReal(value),
+        .real_list => vm.createRealList(value),
+        .float => vm.createFloat(value),
+        .float_list => vm.createFloatList(value),
+        .char => vm.createChar(value),
+        .char_list => vm.createCharList(value),
+        .symbol => vm.createSymbol(value),
+        .symbol_list => vm.createSymbolList(value),
+        else => comptime unreachable,
+    };
+}
+
 pub inline fn createNil(vm: *Vm) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .nil, .as = .{ .nil = {} } };
@@ -176,9 +203,21 @@ pub inline fn createBoolean(vm: *Vm, value: bool) !*Value {
     return v;
 }
 
+pub inline fn createBooleanList(vm: *Vm, value: []bool) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .boolean_list, .as = .{ .boolean_list = value } };
+    return v;
+}
+
 pub inline fn createGuid(vm: *Vm, value: [16]u8) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .guid, .as = .{ .guid = value } };
+    return v;
+}
+
+pub inline fn createGuidList(vm: *Vm, value: [][16]u8) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .guid_list, .as = .{ .guid_list = value } };
     return v;
 }
 
@@ -188,9 +227,21 @@ pub inline fn createByte(vm: *Vm, value: u8) !*Value {
     return v;
 }
 
+pub inline fn createByteList(vm: *Vm, value: []u8) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .byte_list, .as = .{ .byte_list = value } };
+    return v;
+}
+
 pub inline fn createShort(vm: *Vm, value: i16) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .short, .as = .{ .short = value } };
+    return v;
+}
+
+pub inline fn createShortList(vm: *Vm, value: []i16) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .short_list, .as = .{ .short_list = value } };
     return v;
 }
 
@@ -200,9 +251,21 @@ pub inline fn createInt(vm: *Vm, value: i32) !*Value {
     return v;
 }
 
+pub inline fn createIntList(vm: *Vm, value: []i32) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .int_list, .as = .{ .int_list = value } };
+    return v;
+}
+
 pub inline fn createLong(vm: *Vm, value: i64) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .long, .as = .{ .long = value } };
+    return v;
+}
+
+pub inline fn createLongList(vm: *Vm, value: []i64) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .long_list, .as = .{ .long_list = value } };
     return v;
 }
 
@@ -212,9 +275,21 @@ pub inline fn createReal(vm: *Vm, value: f32) !*Value {
     return v;
 }
 
+pub inline fn createRealList(vm: *Vm, value: []f32) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .real_list, .as = .{ .real_list = value } };
+    return v;
+}
+
 pub inline fn createFloat(vm: *Vm, value: f64) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .float, .as = .{ .float = value } };
+    return v;
+}
+
+pub inline fn createFloatList(vm: *Vm, value: []f64) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .float_list, .as = .{ .float_list = value } };
     return v;
 }
 
@@ -240,4 +315,8 @@ pub inline fn createSymbolList(vm: *Vm, value: [][]u8) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .symbol_list, .as = .{ .symbol_list = value } };
     return v;
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }
