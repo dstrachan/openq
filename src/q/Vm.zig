@@ -21,11 +21,13 @@ chunk: *Chunk,
 ip: [*]u8,
 stack: std.ArrayListUnmanaged(*Value),
 symbols: std.StringHashMapUnmanaged(void) = .empty,
+globals: std.StringHashMapUnmanaged(*Value) = .empty,
 
 var stdio_buffer: [4096]u8 = undefined;
 
 pub const Error = Allocator.Error || error{
     UndeclaredIdentifier,
+    UndefinedGlobal,
 };
 
 pub fn init(vm: *Vm, gpa: Allocator) !void {
@@ -42,9 +44,19 @@ pub fn init(vm: *Vm, gpa: Allocator) !void {
 
 pub fn deinit(vm: *Vm) void {
     vm.stack.deinit(vm.gpa);
+
     var it = vm.symbols.keyIterator();
     while (it.next()) |entry| vm.gpa.free(entry.*);
     vm.symbols.deinit(vm.gpa);
+
+    var global_it = vm.globals.iterator();
+    while (global_it.next()) |entry| {
+        vm.gpa.free(entry.key_ptr.*);
+        assert(entry.value_ptr.*.ref_count == 1);
+        entry.value_ptr.*.deref(vm.gpa);
+    }
+
+    vm.globals.deinit(vm.gpa);
 }
 
 fn push(vm: *Vm, value: *Value) void {
@@ -53,6 +65,18 @@ fn push(vm: *Vm, value: *Value) void {
         @panic("stack");
     }
     vm.stack.appendAssumeCapacity(value);
+}
+
+fn tryPeek(vm: *Vm) ?*Value {
+    return vm.stack.getLastOrNull();
+}
+
+fn peek(vm: *Vm) *Value {
+    return vm.stack.getLast();
+}
+
+fn tryPop(vm: *Vm) ?*Value {
+    return vm.stack.pop();
 }
 
 fn pop(vm: *Vm) *Value {
@@ -90,6 +114,10 @@ fn run(vm: *Vm) !void {
         const instruction: OpCode = @enumFromInt(vm.readByte());
         switch (instruction) {
             .constant => vm.push(vm.readConstant()),
+            .get_local => unreachable,
+            .set_local => unreachable,
+            .get_global => try vm.getGlobal(),
+            .set_global => try vm.setGlobal(),
 
             .add => try vm.binary(add),
             .subtract => try vm.binary(subtract),
@@ -146,6 +174,37 @@ inline fn binary(vm: *Vm, f: *const fn (*Vm, *Value, *Value) anyerror!*Value) !v
     defer y.deref(vm.gpa);
 
     vm.push(try f(vm, x, y));
+}
+
+fn getGlobal(vm: *Vm) !void {
+    const name_value = vm.readConstant();
+    defer name_value.deref(vm.gpa); // TODO: intern string
+    assert(name_value.type == .symbol);
+    const name = name_value.as.symbol;
+
+    if (vm.globals.get(name)) |value| {
+        vm.push(value.ref());
+    } else {
+        return error.UndefinedGlobal;
+    }
+}
+
+fn setGlobal(vm: *Vm) !void {
+    const name_value = vm.readConstant();
+    defer name_value.deref(vm.gpa); // TODO: intern string
+    assert(name_value.type == .symbol);
+    const name = name_value.as.symbol;
+
+    const value = vm.peek();
+
+    const duped_name = try vm.gpa.dupe(u8, name);
+    errdefer vm.gpa.free(duped_name);
+    const result = try vm.globals.getOrPut(vm.gpa, duped_name);
+    if (result.found_existing) {
+        vm.gpa.free(duped_name);
+        result.value_ptr.*.deref(vm.gpa);
+    }
+    result.value_ptr.* = value.ref();
 }
 
 const add = @import("vm/add.zig").impl;

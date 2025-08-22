@@ -13,6 +13,10 @@ constants: std.ArrayListUnmanaged(*Value) = .empty,
 
 pub const OpCode = enum(u8) {
     constant,
+    get_local,
+    set_local,
+    get_global,
+    set_global,
 
     add,
     subtract,
@@ -40,7 +44,6 @@ pub const empty: Chunk = .{};
 pub fn deinit(chunk: *Chunk, gpa: Allocator) void {
     chunk.data.deinit(gpa);
     for (chunk.constants.items) |constant| {
-        assert(constant.ref_count == 1);
         constant.deref(gpa);
     }
     chunk.constants.deinit(gpa);
@@ -82,6 +85,11 @@ pub fn disassembleInstruction(chunk: Chunk, writer: *Writer, offset: usize) !usi
 
     switch (chunk.opCode(@enumFromInt(offset))) {
         .constant => return chunk.constantInstruction(writer, .constant, offset),
+
+        .get_local => unreachable,
+        .set_local => unreachable,
+        .get_global => return chunk.constantInstruction(writer, .get_global, offset),
+        .set_global => return chunk.constantInstruction(writer, .set_global, offset),
 
         .add,
         .subtract,
