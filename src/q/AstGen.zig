@@ -875,17 +875,17 @@ fn lowerAstErrors(astgen: *AstGen) !void {
         };
         msg.clearRetainingCapacity();
         try tree.renderError(err, msg_w);
-        return astgen.appendErrorTokNotesOff(tok, bad_off, "{s}", .{msg.getWritten()}, notes.items);
+        return astgen.appendErrorTokNotesOff(tok, bad_off, "{s}", .{msg.written()}, notes.items);
     }
 
     var cur_err = tree.errors[0];
     for (tree.errors[1..]) |err| {
         if (err.is_note) {
             try tree.renderError(err, msg_w);
-            try notes.append(gpa, try astgen.errNoteTok(err.token, "{s}", .{msg.getWritten()}));
+            try notes.append(gpa, try astgen.errNoteTok(err.token, "{s}", .{msg.written()}));
         } else {
             try tree.renderError(cur_err, msg_w);
-            try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.getWritten()}, notes.items);
+            try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.written()}, notes.items);
             notes.clearRetainingCapacity();
             cur_err = err;
 
@@ -896,7 +896,7 @@ fn lowerAstErrors(astgen: *AstGen) !void {
     }
 
     try tree.renderError(cur_err, msg_w);
-    try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.getWritten()}, notes.items);
+    try astgen.appendErrorTokNotes(cur_err.token, "{s}", .{msg.written()}, notes.items);
 }
 
 fn failNode(
@@ -1130,7 +1130,7 @@ fn testFail(source: [:0]const u8, expected: []const u8) !void {
     const output_w = &output.writer;
     try error_bundle.renderToWriter(.{ .ttyconf = .no_color }, output_w);
 
-    try std.testing.expectEqualStrings(expected, std.mem.trim(u8, output.getWritten(), &std.ascii.whitespace));
+    try std.testing.expectEqualStrings(expected, std.mem.trim(u8, output.written(), &std.ascii.whitespace));
 }
 
 test "undeclared identifier - identifier" {
@@ -1376,7 +1376,7 @@ fn testCompile(source: [:0]const u8, expected_constants: []const Value, expected
     const expected_w = &expected.writer;
     try expected_chunk.disassemble(expected_w, "test");
 
-    try std.testing.expectEqualStrings(expected.getWritten(), actual.getWritten());
+    try std.testing.expectEqualStrings(expected.written(), actual.written());
 }
 
 const utils = struct {
