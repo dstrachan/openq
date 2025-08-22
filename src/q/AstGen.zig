@@ -358,6 +358,19 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
                     const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
                     try astgen.scopes.items[astgen.scopes.items.len - 1].put(gpa, slice, args[0]);
 
+                    if (slice[0] != '.' and astgen.locals != null) {
+                        const locals = astgen.locals.?;
+                        _ = locals; // autofix
+                    } else {
+                        // TODO: intern string instead of creating value.
+                        const duped_slice = try astgen.gpa.dupe(u8, slice);
+                        errdefer astgen.gpa.free(duped_slice);
+                        const value = try astgen.vm.createSymbol(duped_slice);
+                        errdefer value.deref(gpa);
+                        const variable = try astgen.makeConstant(value);
+                        try astgen.emitBytes(.{ OpCode.set_global, variable });
+                    }
+
                     return;
                 },
                 .plus => try astgen.binary(node, .add, args),
@@ -657,9 +670,16 @@ fn emitByte(astgen: *AstGen, byte: u8) !void {
     try astgen.current_chunk.write(astgen.gpa, byte, 123); // TODO: Line number
 }
 
-fn emitBytes(astgen: *AstGen, byte1: u8, byte2: u8) !void {
-    try astgen.emitByte(byte1);
-    try astgen.emitByte(byte2);
+fn emitBytes(astgen: *AstGen, bytes: anytype) !void {
+    comptime assert(@typeInfo(@TypeOf(bytes)).@"struct".is_tuple);
+    inline for (@typeInfo(@TypeOf(bytes)).@"struct".fields) |field| {
+        const value = @field(bytes, field.name);
+        try astgen.emitByte(switch (@typeInfo(field.type)) {
+            .int, .comptime_int => value,
+            .@"enum" => @intFromEnum(value),
+            else => @compileError(@typeName(field.type)),
+        });
+    }
 }
 
 fn end(astgen: *AstGen) !void {
@@ -679,7 +699,7 @@ fn makeConstant(astgen: *AstGen, value: *Value) !u8 {
 
 fn emitConstant(astgen: *AstGen, value: *Value) !void {
     const constant = try astgen.makeConstant(value);
-    try astgen.emitBytes(@intFromEnum(OpCode.constant), constant);
+    try astgen.emitBytes(.{ OpCode.constant, constant });
 }
 
 fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
