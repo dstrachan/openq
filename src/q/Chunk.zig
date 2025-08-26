@@ -86,8 +86,8 @@ pub fn disassembleInstruction(chunk: Chunk, writer: *Writer, offset: usize) !usi
     switch (chunk.opCode(@enumFromInt(offset))) {
         .constant => return chunk.constantInstruction(writer, .constant, offset),
 
-        .get_local => unreachable,
-        .set_local => unreachable,
+        .get_local => return chunk.constantInstruction(writer, .get_local, offset),
+        .set_local => return chunk.constantInstruction(writer, .set_local, offset),
         .get_global => return chunk.constantInstruction(writer, .get_global, offset),
         .set_global => return chunk.constantInstruction(writer, .set_global, offset),
 
