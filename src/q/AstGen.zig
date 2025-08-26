@@ -37,6 +37,7 @@ const InnerError = error{
     TooManyConstants,
     Overflow,
     InvalidCharacter,
+    AnalysisFail,
 };
 
 fn addExtra(astgen: *AstGen, extra: anytype) Allocator.Error!u32 {
@@ -336,18 +337,18 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
             const args = nodes[1..];
 
             switch (tree.nodeTag(func)) {
-                .colon => {
-                    if (args.len != 2) return astgen.appendErrorNode(
+                inline .colon, .colon_colon => |tag| {
+                    if (args.len != 2) return astgen.failNode(
                         node,
                         "expected 2 arguments, found {d}",
                         .{args.len},
                     );
-                    if (tree.nodeTag(args[1]) == .no_op) return astgen.appendErrorNode(
+                    if (tree.nodeTag(args[1]) == .no_op) return astgen.failNode(
                         node,
                         "expected 2 arguments, found 1",
                         .{},
                     );
-                    if (tree.nodeTag(args[0]) != .identifier) return astgen.appendErrorNode(
+                    if (tree.nodeTag(args[0]) != .identifier) return astgen.failNode(
                         args[0],
                         "invalid assignment target",
                         .{},
@@ -358,20 +359,17 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
                     const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
                     try astgen.scopes.items[astgen.scopes.items.len - 1].put(gpa, slice, args[0]);
 
-                    if (slice[0] != '.' and astgen.locals != null) {
-                        const locals = astgen.locals.?;
-                        _ = locals; // autofix
-                    } else {
-                        // TODO: intern string instead of creating value.
-                        const duped_slice = try astgen.gpa.dupe(u8, slice);
-                        errdefer astgen.gpa.free(duped_slice);
-                        const value = try astgen.vm.createSymbol(duped_slice);
-                        errdefer value.deref(gpa);
-                        const variable = try astgen.makeConstant(value);
-                        try astgen.emitBytes(.{ OpCode.set_global, variable });
-                    }
-
-                    return;
+                    const duped_slice = try astgen.gpa.dupe(u8, slice);
+                    errdefer astgen.gpa.free(duped_slice);
+                    const value = try astgen.vm.createSymbol(duped_slice);
+                    errdefer value.deref(gpa);
+                    const variable = try astgen.makeConstant(value);
+                    const op_code: OpCode = switch (tag) {
+                        .colon => if (slice[0] == '.' or astgen.locals == null) .set_global else .set_local,
+                        .colon_colon => if (astgen.locals == null) unreachable else .set_global, // TODO: set_view
+                        else => comptime unreachable,
+                    };
+                    try astgen.emitBytes(.{ op_code, variable });
                 },
                 .plus => try astgen.binary(node, .add, args),
                 .plus_colon => try astgen.unary(node, .flip, args),
@@ -407,17 +405,21 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
                 if (astgen.locals) |locals| {
                     if (locals.get(slice)) |local_node| {
                         if (!astgen.scopes.getLast().contains(slice)) {
-                            return astgen.appendErrorNodeNotes(node, "use of undeclared identifier '{s}'", .{slice}, &.{
+                            return astgen.failNodeNotes(node, "use of undeclared identifier '{s}'", .{slice}, &.{
                                 try astgen.errNoteNode(local_node, "initial declaration here", .{}),
                             });
                         }
                     }
-                } else {
-                    if (!astgen.scopes.getLast().contains(slice)) {
-                        return astgen.appendErrorNode(node, "use of undeclared identifier '{s}'", .{slice});
-                    }
                 }
             }
+
+            const duped_slice = try astgen.gpa.dupe(u8, slice);
+            errdefer astgen.gpa.free(duped_slice);
+            const value = try astgen.vm.createSymbol(duped_slice);
+            errdefer value.deref(gpa);
+            const variable = try astgen.makeConstant(value);
+            const op_code: OpCode = if (slice[0] == '.' or astgen.locals == null) .get_global else .get_local;
+            try astgen.emitBytes(.{ op_code, variable });
         },
 
         .select => try astgen.visitNode(tree.extraData(tree.nodeData(node).extra, Ast.Node.Select).from),
