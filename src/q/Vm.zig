@@ -14,12 +14,14 @@ const build_options = @import("build_options");
 
 const Vm = @This();
 
-pub const StackMax = 256;
+pub const stack_max = 256;
+pub const locals_max = 256;
 
 gpa: Allocator,
 chunk: *Chunk,
 ip: [*]u8,
 stack: std.ArrayListUnmanaged(*Value),
+locals: std.ArrayListUnmanaged(*Value),
 symbols: std.StringHashMapUnmanaged(void) = .empty,
 globals: std.StringHashMapUnmanaged(*Value) = .empty,
 
@@ -31,19 +33,23 @@ pub const Error = Allocator.Error || error{
 };
 
 pub fn init(vm: *Vm, gpa: Allocator) !void {
-    const buf = try gpa.alloc(*Value, StackMax);
+    const stack_buf = try gpa.alloc(*Value, stack_max);
+    errdefer gpa.free(stack_buf);
+    const locals_buf = try gpa.alloc(*Value, locals_max);
     errdefer comptime unreachable;
 
     vm.* = .{
         .gpa = gpa,
         .chunk = undefined,
         .ip = undefined,
-        .stack = .initBuffer(buf),
+        .stack = .initBuffer(stack_buf),
+        .locals = .initBuffer(locals_buf),
     };
 }
 
 pub fn deinit(vm: *Vm) void {
     vm.stack.deinit(vm.gpa);
+    vm.locals.deinit(vm.gpa);
 
     var it = vm.symbols.keyIterator();
     while (it.next()) |entry| vm.gpa.free(entry.*);
@@ -55,7 +61,6 @@ pub fn deinit(vm: *Vm) void {
         assert(entry.value_ptr.*.ref_count == 1);
         entry.value_ptr.*.deref(vm.gpa);
     }
-
     vm.globals.deinit(vm.gpa);
 }
 
@@ -114,8 +119,8 @@ fn run(vm: *Vm) !void {
         const instruction: OpCode = @enumFromInt(vm.readByte());
         switch (instruction) {
             .constant => vm.push(vm.readConstant()),
-            .get_local => unreachable,
-            .set_local => unreachable,
+            .get_local => vm.getLocal(),
+            .set_local => try vm.setLocal(),
             .get_global => try vm.getGlobal(),
             .set_global => try vm.setGlobal(),
 
@@ -205,6 +210,19 @@ fn setGlobal(vm: *Vm) !void {
         result.value_ptr.*.deref(vm.gpa);
     }
     result.value_ptr.* = value.ref();
+}
+
+fn getLocal(vm: *Vm) void {
+    const slot = vm.readByte();
+    assert(slot < vm.locals.items.len);
+    vm.push(vm.locals.items[slot].ref()); // TODO: Do we need to ref here?
+}
+
+fn setLocal(vm: *Vm) !void {
+    const slot = vm.readByte();
+    assert(slot < vm.locals.items.len);
+    const value = vm.peek();
+    vm.locals.items[slot] = value.ref(); // TODO: Do we need to ref here?
 }
 
 const add = @import("vm/add.zig").impl;
