@@ -35,8 +35,12 @@ pub const Type = enum {
 
 pub const Function = struct {
     arity: u8,
-    chunk: Chunk,
+    chunk: *Chunk,
     source: []const u8,
+
+    pub fn deinit(function: *Function, gpa: Allocator) void {
+        function.chunk.deinit(gpa);
+    }
 };
 
 pub const Union = union {
@@ -94,9 +98,7 @@ pub fn deref(value: *Value, gpa: Allocator) void {
                 for (value.as.symbol_list) |symbol| gpa.free(symbol);
                 gpa.free(value.as.symbol_list);
             },
-            .function => {
-                value.as.function.chunk.deinit(gpa);
-            },
+            .function => value.as.function.deinit(gpa),
             else => {},
         }
         gpa.destroy(value);

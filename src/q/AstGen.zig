@@ -22,9 +22,25 @@ extra: std.ArrayListUnmanaged(u32) = .empty,
 string_bytes: std.ArrayListUnmanaged(u8) = .empty,
 compile_errors: std.ArrayListUnmanaged(Qir.Inst.CompileErrors.Item) = .empty,
 scopes: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Ast.Node.Index)) = .empty,
-locals: ?std.StringHashMapUnmanaged(Ast.Node.Index) = null,
+local_decls: ?std.StringHashMapUnmanaged(Ast.Node.Index) = null,
 vm: *Vm,
-current_chunk: *Chunk,
+
+// Compiler
+function: *q.Value.Function,
+function_type: FunctionType,
+locals: [std.math.maxInt(u8) + 1]Local = undefined,
+local_count: u32 = 0,
+scope_depth: u32 = 0,
+
+const Local = struct {
+    name: q.Token,
+    depth: u32,
+};
+
+const FunctionType = enum {
+    function,
+    script,
+};
 
 var stdio_buffer: [4096]u8 = undefined;
 
@@ -87,12 +103,20 @@ pub fn generate(gpa: Allocator, tree: Ast, vm: *Vm) !Qir {
 
     var chunk: Chunk = .empty;
     errdefer chunk.deinit(gpa);
+    const function = try gpa.create(q.Value.Function);
+    errdefer gpa.destroy(function);
+    function.* = .{
+        .arity = 0,
+        .chunk = &chunk,
+        .source = "",
+    };
     var astgen: AstGen = .{
         .gpa = gpa,
         .arena = arena.allocator(),
         .tree = &tree,
         .vm = vm,
-        .current_chunk = &chunk,
+        .function = function,
+        .function_type = .script,
     };
     defer astgen.deinit();
 
@@ -154,7 +178,9 @@ fn deinit(astgen: *AstGen) void {
     astgen.compile_errors.deinit(astgen.gpa);
     for (astgen.scopes.items) |*scope| scope.deinit(astgen.gpa);
     astgen.scopes.deinit(astgen.gpa);
-    if (astgen.locals) |*locals| locals.deinit(astgen.gpa);
+    if (astgen.local_decls) |*locals| locals.deinit(astgen.gpa);
+    // Don't deinit the chunk as this will be cleaned up in Qir.
+    astgen.gpa.destroy(astgen.function);
 }
 
 fn visit(astgen: *AstGen) Error!void {
@@ -167,7 +193,7 @@ fn visit(astgen: *AstGen) Error!void {
         };
     }
 
-    if (astgen.current_chunk.data.len == 0) {
+    if (astgen.currentChunk().data.len == 0) {
         const value = try astgen.vm.createNil();
         errdefer value.deref(astgen.gpa);
         astgen.emitConstant(value) catch |err| switch (err) {
@@ -228,11 +254,11 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
 
             if (params.len > 8) return astgen.appendErrorNode(params[8], "too many function parameters", .{});
 
-            const prev_locals = astgen.locals;
-            astgen.locals = .empty;
+            const prev_locals = astgen.local_decls;
+            astgen.local_decls = .empty;
             defer {
-                astgen.locals.?.deinit(gpa);
-                astgen.locals = prev_locals;
+                astgen.local_decls.?.deinit(gpa);
+                astgen.local_decls = prev_locals;
             }
             for (body) |n| try astgen.findLocals(n);
 
@@ -365,8 +391,8 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
                     errdefer value.deref(gpa);
                     const variable = try astgen.makeConstant(value);
                     const op_code: OpCode = switch (tag) {
-                        .colon => if (slice[0] == '.' or astgen.locals == null) .set_global else .set_local,
-                        .colon_colon => if (astgen.locals == null) unreachable else .set_global, // TODO: set_view
+                        .colon => if (slice[0] == '.' or astgen.local_decls == null) .set_global else .set_local,
+                        .colon_colon => if (astgen.local_decls == null) unreachable else .set_global, // TODO: set_view
                         else => comptime unreachable,
                     };
                     try astgen.emitBytes(.{ op_code, variable });
@@ -402,7 +428,7 @@ fn visitNode(astgen: *AstGen, node: Ast.Node.Index) InnerError!void {
         .identifier => {
             const slice = tree.tokenSlice(tree.nodeMainToken(node));
             if (slice[0] != '.') {
-                if (astgen.locals) |locals| {
+                if (astgen.local_decls) |locals| {
                     if (locals.get(slice)) |local_node| {
                         if (!astgen.scopes.getLast().contains(slice)) {
                             return astgen.appendErrorNodeNotes(node, "use of undeclared identifier '{s}'", .{slice}, &.{
@@ -668,8 +694,12 @@ fn visitSymbolList(astgen: *AstGen, node: Ast.Node.Index) !void {
     try astgen.emitConstant(symbol_list);
 }
 
+fn currentChunk(astgen: *AstGen) *Chunk {
+    return astgen.function.chunk;
+}
+
 fn emitByte(astgen: *AstGen, byte: u8) !void {
-    try astgen.current_chunk.write(astgen.gpa, byte, 123); // TODO: Line number
+    try astgen.currentChunk().write(astgen.gpa, byte, 123); // TODO: Line number
 }
 
 fn emitBytes(astgen: *AstGen, bytes: anytype) !void {
@@ -689,12 +719,12 @@ fn end(astgen: *AstGen) !void {
     if (!@import("builtin").is_test and build_options.print_code) {
         var stdout_writer = std.fs.File.stdout().writerStreaming(&stdio_buffer);
         const stdout_bw = &stdout_writer.interface;
-        astgen.current_chunk.disassemble(stdout_bw, "code") catch @panic("disassemble");
+        astgen.currentChunk().disassemble(stdout_bw, "code") catch @panic("disassemble");
     }
 }
 
 fn makeConstant(astgen: *AstGen, value: *Value) !u8 {
-    const constant = try astgen.current_chunk.addConstant(astgen.gpa, value);
+    const constant = try astgen.currentChunk().addConstant(astgen.gpa, value);
     if (constant > std.math.maxInt(u8)) return error.TooManyConstants;
     return @intCast(constant);
 }
@@ -747,11 +777,11 @@ fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
                 .end = function.body_end,
             }, Ast.Node.Index);
 
-            const prev_locals = astgen.locals;
-            astgen.locals = .empty;
+            const prev_locals = astgen.local_decls;
+            astgen.local_decls = .empty;
             defer {
-                astgen.locals.?.deinit(gpa);
-                astgen.locals = prev_locals;
+                astgen.local_decls.?.deinit(gpa);
+                astgen.local_decls = prev_locals;
             }
             for (body) |n| try astgen.findLocals(n);
         },
@@ -828,7 +858,7 @@ fn findLocals(astgen: *AstGen, node: Ast.Node.Index) !void {
                     try astgen.findLocals(args[1]);
 
                     const slice = tree.tokenSlice(tree.nodeMainToken(args[0]));
-                    if (slice[0] != '.') try astgen.locals.?.put(gpa, slice, args[0]);
+                    if (slice[0] != '.') try astgen.local_decls.?.put(gpa, slice, args[0]);
 
                     return;
                 },
