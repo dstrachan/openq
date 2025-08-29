@@ -86,8 +86,8 @@ pub fn disassembleInstruction(chunk: Chunk, writer: *Writer, offset: usize) !usi
     switch (chunk.opCode(@enumFromInt(offset))) {
         .constant => return chunk.constantInstruction(writer, .constant, offset),
 
-        .get_local => return chunk.constantInstruction(writer, .get_local, offset),
-        .set_local => return chunk.constantInstruction(writer, .set_local, offset),
+        .get_local => return chunk.byteInstruction(writer, .get_local, offset),
+        .set_local => return chunk.byteInstruction(writer, .set_local, offset),
         .get_global => return chunk.constantInstruction(writer, .get_global, offset),
         .set_global => return chunk.constantInstruction(writer, .set_global, offset),
 
@@ -120,5 +120,11 @@ fn simpleInstruction(writer: *Writer, op_code: OpCode, offset: usize) !usize {
 fn constantInstruction(chunk: Chunk, writer: *Writer, op_code: OpCode, offset: usize) !usize {
     const constant = chunk.data.items(.code)[offset + 1];
     try writer.print("{t: <16} {d:4} '{f}'\n", .{ op_code, constant, chunk.constants.items[constant] });
+    return offset + 2;
+}
+
+fn byteInstruction(chunk: Chunk, writer: *Writer, op_code: OpCode, offset: usize) !usize {
+    const slot = chunk.data.items(.code)[offset + 1];
+    try writer.print("{t: <16} {d:4}\n", .{ op_code, slot });
     return offset + 2;
 }

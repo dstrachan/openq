@@ -55,6 +55,7 @@ pub fn impl(vm: *Vm, x: *Value, y: *Value) !*Value {
             },
             .symbol => @panic("NYI"),
             .symbol_list => @panic("NYI"),
+            .function => @panic("NYI"),
         },
         .char_list => switch (y.type) {
             .nil => @panic("NYI"),
@@ -89,6 +90,7 @@ pub fn impl(vm: *Vm, x: *Value, y: *Value) !*Value {
             },
             .symbol => @panic("NYI"),
             .symbol_list => @panic("NYI"),
+            .function => @panic("NYI"),
         },
         .symbol => switch (y.type) {
             .nil => @panic("NYI"),
@@ -125,6 +127,7 @@ pub fn impl(vm: *Vm, x: *Value, y: *Value) !*Value {
                 }
                 break :blk vm.createSymbolList(list);
             },
+            .function => @panic("NYI"),
         },
         .symbol_list => switch (y.type) {
             .nil => @panic("NYI"),
@@ -165,6 +168,8 @@ pub fn impl(vm: *Vm, x: *Value, y: *Value) !*Value {
                 }
                 break :blk vm.createSymbolList(list);
             },
+            .function => @panic("NYI"),
         },
+        .function => @panic("NYI"),
     };
 }

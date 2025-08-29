@@ -3,6 +3,8 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const assert = std.debug.assert;
 
+const Chunk = @import("Chunk.zig");
+
 const Value = @This();
 
 pub const Type = enum {
@@ -28,6 +30,13 @@ pub const Type = enum {
     char_list,
     symbol,
     symbol_list,
+    function,
+};
+
+pub const Function = struct {
+    arity: u8,
+    chunk: Chunk,
+    source: []const u8,
 };
 
 pub const Union = union {
@@ -53,6 +62,7 @@ pub const Union = union {
     char_list: []u8,
     symbol: []u8,
     symbol_list: [][]u8,
+    function: Function,
 };
 
 type: Type,
@@ -83,6 +93,9 @@ pub fn deref(value: *Value, gpa: Allocator) void {
             .symbol_list => {
                 for (value.as.symbol_list) |symbol| gpa.free(symbol);
                 gpa.free(value.as.symbol_list);
+            },
+            .function => {
+                value.as.function.chunk.deinit(gpa);
             },
             else => {},
         }
@@ -168,5 +181,6 @@ pub fn format(value: Value, writer: *Writer) !void {
         .symbol_list => for (value.as.symbol_list) |symbol| {
             try writer.print("`{s}", .{symbol});
         },
+        .function => try writer.writeAll(value.as.function.source),
     }
 }

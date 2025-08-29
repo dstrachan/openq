@@ -264,6 +264,7 @@ pub fn create(vm: *Vm, comptime value_type: Value.Type, value: anytype) !*Value 
         .char_list => vm.createCharList(value),
         .symbol => vm.createSymbol(value),
         .symbol_list => vm.createSymbolList(value),
+        .function => vm.createFunction(value.chunk, value.arity, value.source),
         else => comptime unreachable,
     };
 }
@@ -391,6 +392,16 @@ pub inline fn createSymbol(vm: *Vm, value: []u8) !*Value {
 pub inline fn createSymbolList(vm: *Vm, value: [][]u8) !*Value {
     const v = try vm.gpa.create(Value);
     v.* = .{ .type = .symbol_list, .as = .{ .symbol_list = value } };
+    return v;
+}
+
+pub inline fn createFunction(vm: *Vm, arity: u8, chunk: *Chunk, source: []const u8) !*Value {
+    const v = try vm.gpa.create(Value);
+    v.* = .{ .type = .function, .as = .{ .function = .{
+        .arity = arity,
+        .chunk = chunk,
+        .source = source,
+    } } };
     return v;
 }
 
