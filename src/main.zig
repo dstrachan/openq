@@ -6,6 +6,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
+const q = @import("q.zig");
+const Ast = q.Ast;
+
 const build_options = @import("build_options");
 
 const thread_stack_size = 60 << 20;
@@ -100,6 +103,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         preopens = try .init(arena);
     }
 
+    if (args.len <= 1) return cmdRepl(gpa, io, &environ_map);
     return mainArgs(gpa, arena, io, args, &environ_map);
 }
 
@@ -121,8 +125,6 @@ fn mainArgs(
     _ = gpa; // autofix
     _ = arena; // autofix
     _ = environ_map; // autofix
-    if (args.len <= 1) return;
-
     const cmd = args[1];
     const cmd_args = args[2..];
     _ = cmd_args; // autofix
@@ -136,6 +138,53 @@ fn mainArgs(
         .help, .@"-h", .@"--help" => {
             try Io.File.stdout().writeStreamingAll(io, usage);
         },
+    }
+}
+
+const banner = "OpenQ " ++ build_options.version ++ " " ++
+    @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n";
+
+fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void {
+    _ = environ_map; // autofix
+    std.debug.print("{s}\n", .{banner});
+
+    var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
+    const stdin = &stdin_reader.interface;
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    var buffer: Io.Writer.Allocating = .init(gpa);
+    defer buffer.deinit();
+
+    var mode: Ast.Mode = .q;
+    while (true) {
+        std.debug.print("{t})", .{mode});
+
+        buffer.shrinkRetainingCapacity(0);
+        _ = try stdin.streamDelimiterEnding(&buffer.writer, '\n');
+        defer _ = stdin.takeByte() catch {};
+
+        const written = buffer.written();
+        const slice = std.mem.trimEnd(u8, written, "\t\r ");
+        const source: [:0]u8 = if (written.len == slice.len) source: {
+            try buffer.writer.writeByte(0);
+            break :source buffer.written()[0..slice.len :0];
+        } else source: {
+            written[slice.len] = 0;
+            break :source written[0..slice.len :0];
+        };
+
+        switch (source.len) {
+            0 => continue,
+            1 => if (source[0] == '\\') {
+                mode = if (mode == .q) .k else .q;
+            },
+            2 => if (source[0] == '\\' and source[1] == '\\') break,
+            else => {
+                try stdout.print("{s}\n", .{source});
+                try stdout.flush();
+            },
+        }
     }
 }
 
