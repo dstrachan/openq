@@ -2,9 +2,23 @@ const std = @import("std");
 
 const openq_version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 0 };
 
+const IoMode = enum { threaded, evented };
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode");
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable thread-sanitization");
+    const strip = b.option(bool, "strip", "Omit debug information");
+    const valgrind = b.option(bool, "valgrind", "Enable valgrind integration");
+    const debug_gpa = b.option(bool, "debug-allocator", "Force the runtime to use SafeAllocator") orelse false;
+    const io_mode = b.option(IoMode, "io-mode", "How the runtime performs IO") orelse .threaded;
+    const mem_leak_frames = b.option(u32, "mem-leak-frames", "How many stack frames to print when a memory leak occurs. Tests get 2x this amount.") orelse blk: {
+        if (strip == true) break :blk 0;
+        if (optimize != .Debug) break :blk @as(u32, 0);
+        break :blk 4;
+    };
 
     const exe = b.addExecutable(.{
         .name = "openq",
@@ -12,12 +26,20 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
+            .sanitize_thread = sanitize_thread,
+            .single_threaded = single_threaded,
+            .valgrind = valgrind,
         }),
     });
     b.installArtifact(exe);
 
-    const options = b.addOptions();
-    exe.root_module.addOptions("build_options", options);
+    const exe_options = b.addOptions();
+    exe.root_module.addOptions("build_options", exe_options);
+
+    exe_options.addOption(u32, "mem_leak_frames", mem_leak_frames);
+    exe_options.addOption(bool, "debug_gpa", debug_gpa);
+    exe_options.addOption(IoMode, "io_mode", io_mode);
 
     const opt_version_string = b.option(
         []const u8,
@@ -86,10 +108,12 @@ pub fn build(b: *std.Build) !void {
                 break :v version_string;
             },
         }
-        break :v "TODO";
     };
     const version = try b.allocator.dupeSentinel(u8, version_slice, 0);
-    options.addOption([:0]const u8, "version", version);
+    exe_options.addOption([:0]const u8, "version", version);
+
+    const semver: std.SemanticVersion = try .parse(version);
+    exe_options.addOption(std.SemanticVersion, "semver", semver);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
