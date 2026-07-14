@@ -1,0 +1,14 @@
+.{
+    .name = .openq,
+    .version = "0.0.0",
+    .fingerprint = 0x241fb955f1959309, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0-dev.387+31f157d80",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
