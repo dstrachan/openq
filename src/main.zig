@@ -6,7 +6,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const q = @import("q.zig");
+const q = @import("openq");
 const Ast = q.Ast;
 
 const build_options = @import("build_options");
@@ -152,6 +152,7 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
     const stdin = &stdin_reader.interface;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
+    _ = stdout; // autofix
 
     var buffer: Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();
@@ -181,8 +182,11 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             },
             2 => if (source[0] == '\\' and source[1] == '\\') break,
             else => {
-                try stdout.print("{s}\n", .{source});
-                try stdout.flush();
+                var tree: Ast = try .parse(gpa, source, .{
+                    .skip_comments = false,
+                    .mode = mode,
+                });
+                defer tree.deinit(gpa);
             },
         }
     }

@@ -3,12 +3,19 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const q = @import("q.zig");
+const q = @import("root.zig");
 const Token = q.Token;
+const Parse = q.Parse;
 
 const Ast = @This();
 
 source: [:0]const u8,
+
+tokens: TokenList.Slice,
+nodes: NodeList.Slice,
+extra_data: []u32,
+
+errors: []const Error,
 
 pub const ByteOffset = u32;
 
@@ -113,11 +120,58 @@ pub fn deinit(tree: *Ast, gpa: Allocator) void {
 }
 
 pub const Mode = enum { k, q };
+pub const ParseOptions = struct {
+    skip_comments: bool = true,
+    mode: Mode,
+    recover: bool = true,
+};
 
-pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!Ast {
-    _ = gpa; // autofix
-    _ = source; // autofix
-    _ = mode; // autofix
+pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Allocator.Error!Ast {
+    var parser: Parse = .{
+        .gpa = gpa,
+        .source = source,
+        .tok_i = 0,
+        .tokenizer = .init(source, options.mode),
+        .tokens = .empty,
+        .errors = .empty,
+        .nodes = .empty,
+        .extra_data = .empty,
+        .scratch = .empty,
+        .mode = options.mode,
+        .recover = options.recover,
+    };
+    defer parser.tokens.deinit(gpa);
+    defer parser.errors.deinit(gpa);
+    defer parser.nodes.deinit(gpa);
+    defer parser.extra_data.deinit(gpa);
+    defer parser.scratch.deinit(gpa);
+
+    // TODO: Estimate tokens/nodes based on source len
+    const estimated_token_count = source.len / 2;
+    try parser.tokens.ensureTotalCapacity(gpa, estimated_token_count);
+    const estimated_node_count = (estimated_token_count + 2) / 2;
+    try parser.nodes.ensureTotalCapacity(gpa, estimated_node_count);
+
+    // Prime tokenizer
+    if (options.skip_comments) parser.tokenizer.skipComments();
+    const token = parser.tokenizer.next();
+    parser.tokens.appendAssumeCapacity(.{
+        .tag = token.tag,
+        .start = @intCast(token.loc.start),
+    });
+
+    try parser.parse();
+
+    try parser.extra_data.shrinkToLen(gpa);
+    try parser.errors.shrinkToLen(gpa);
+
+    return .{
+        .source = source,
+        .tokens = parser.tokens.toOwnedSlice(),
+        .nodes = parser.nodes.toOwnedSlice(),
+        .extra_data = parser.extra_data.toOwnedSliceAssert(),
+        .errors = parser.errors.toOwnedSliceAssert(),
+    };
 }
 
 /// Returns an extra offset for column and byte offset of errors that
@@ -370,6 +424,7 @@ pub const Node = struct {
         ///
         /// The `main_token` field is the first token for the source file.
         root,
+        assign,
     };
 
     pub const Data = union {
