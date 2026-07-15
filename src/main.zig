@@ -152,7 +152,6 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
     const stdin = &stdin_reader.interface;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    _ = stdout; // autofix
 
     var buffer: Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();
@@ -187,6 +186,11 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
                     .mode = mode,
                 });
                 defer tree.deinit(gpa);
+
+                for (tree.nodes.items(.tag)) |tag| {
+                    try stdout.print("{t}\n", .{tag});
+                    try stdout.flush();
+                }
             },
         }
     }

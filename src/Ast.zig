@@ -123,7 +123,6 @@ pub const Mode = enum { k, q };
 pub const ParseOptions = struct {
     skip_comments: bool = true,
     mode: Mode,
-    recover: bool = true,
 };
 
 pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Allocator.Error!Ast {
@@ -138,7 +137,6 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Alloca
         .extra_data = .empty,
         .scratch = .empty,
         .mode = options.mode,
-        .recover = options.recover,
     };
     defer parser.tokens.deinit(gpa);
     defer parser.errors.deinit(gpa);
@@ -325,14 +323,19 @@ pub const Error = struct {
     extra: union {
         none: void,
         expected_tag: Token.Tag,
+        expected_string: []const u8,
         offset: usize,
     } = .{ .none = {} },
 
     pub const Tag = enum {
         expected_expr,
+        expected_infix_expr,
 
         /// `expected_tag` is populated.
         expected_token,
+
+        /// `expected_string` is populated.
+        expected_qsql_token,
 
         /// `offset` is populated
         invalid_byte,
@@ -419,32 +422,280 @@ pub const Node = struct {
 
     pub const Tag = enum {
         /// The root node which is guaranteed to be at `Node.Index.root`.
-        /// The meaning of the `data` field depends on whether it is a `.zig` or
-        /// `.zon` file.
         ///
         /// The `main_token` field is the first token for the source file.
         root,
-        assign,
+        /// The `data` field is unused.
+        ///
+        /// The `main_token` field is unused.
+        no_op,
+
+        /// `(expr)`.
+        ///
+        /// The `data` field is a `.node_and_token`:
+        ///   1. a `Node.Index` to the sub-expression.
+        ///   2. a `TokenIndex` to the `)` token.
+        ///
+        /// The `main_token` field is the `(` token.
+        grouped_expression,
+        /// `()`.
+        ///
+        /// The `data` field is a `.token` of the `)`.
+        ///
+        /// The `main_token` field is the `(` token.
+        empty_list,
+        /// `(a;b;...)`.
+        ///
+        /// The `data` field is a `.extra_range` that stores a `Node.Index` for
+        /// each element.
+        ///
+        /// The `main_token` field is the `(` token.
+        list,
+        /// `([]a;b;...)`.
+        ///
+        /// The `data` field is a `.extra_and_token`:
+        ///   1. a `ExtraIndex` to a `Table`.
+        ///   2. a `TokenIndex` to the `)` token.
+        ///
+        /// The `main_token` field is the `(` token.
+        table_literal,
+
+        /// `{[]expr}`.
+        ///
+        /// The `data` field is a `.extra_and_token`:
+        ///   1. a `ExtraIndex` to a `Function`.
+        ///   2. a `TokenIndex` to the `}` token.
+        ///
+        /// The `main_token` field is the `{` token.
+        function,
+
+        /// `[expr]`.
+        ///
+        /// The `data` field is a `.extra_range` that stores a `Node.Index` for
+        /// each element.
+        ///
+        /// The `main_token` field is the `[` token.
+        expr_block,
+
+        /// The `main_token` field is the `:` token.
+        colon,
+        /// The `main_token` field is the `::` token.
+        colon_colon,
+        /// The `main_token` field is the `+` token.
+        plus,
+        /// The `main_token` field is the `+:` token.
+        plus_colon,
+        /// The `main_token` field is the `-` token.
+        minus,
+        /// The `main_token` field is the `-:` token.
+        minus_colon,
+        /// The `main_token` field is the `*` token.
+        asterisk,
+        /// The `main_token` field is the `*:` token.
+        asterisk_colon,
+        /// The `main_token` field is the `%` token.
+        percent,
+        /// The `main_token` field is the `%:` token.
+        percent_colon,
+        /// The `main_token` field is the `&` token.
+        ampersand,
+        /// The `main_token` field is the `&:` token.
+        ampersand_colon,
+        /// The `main_token` field is the `|` token.
+        pipe,
+        /// The `main_token` field is the `|:` token.
+        pipe_colon,
+        /// The `main_token` field is the `^` token.
+        caret,
+        /// The `main_token` field is the `^:` token.
+        caret_colon,
+        /// The `main_token` field is the `=` token.
+        equal,
+        /// The `main_token` field is the `=:` token.
+        equal_colon,
+        /// The `main_token` field is the `<` token.
+        l_angle_bracket,
+        /// The `main_token` field is the `<:` token.
+        l_angle_bracket_colon,
+        /// The `main_token` field is the `<=` token.
+        l_angle_bracket_equal,
+        /// The `main_token` field is the `<>` token.
+        l_angle_bracket_r_angle_bracket,
+        /// The `main_token` field is the `>` token.
+        r_angle_bracket,
+        /// The `main_token` field is the `>:` token.
+        r_angle_bracket_colon,
+        /// The `main_token` field is the `>=` token.
+        r_angle_bracket_equal,
+        /// The `main_token` field is the `$` token.
+        dollar,
+        /// The `main_token` field is the `$:` token.
+        dollar_colon,
+        /// The `main_token` field is the `,` token.
+        comma,
+        /// The `main_token` field is the `,:` token.
+        comma_colon,
+        /// The `main_token` field is the `#` token.
+        hash,
+        /// The `main_token` field is the `#:` token.
+        hash_colon,
+        /// The `main_token` field is the `_` token.
+        underscore,
+        /// The `main_token` field is the `_:` token.
+        underscore_colon,
+        /// The `main_token` field is the `~` token.
+        tilde,
+        /// The `main_token` field is the `~:` token.
+        tilde_colon,
+        /// The `main_token` field is the `!` token.
+        bang,
+        /// The `main_token` field is the `!:` token.
+        bang_colon,
+        /// The `main_token` field is the `?` token.
+        question_mark,
+        /// The `main_token` field is the `?:` token.
+        question_mark_colon,
+        /// The `main_token` field is the `@` token.
+        at,
+        /// The `main_token` field is the `@:` token.
+        at_colon,
+        /// The `main_token` field is the `.` token.
+        dot,
+        /// The `main_token` field is the `.:` token.
+        dot_colon,
+        /// The `main_token` field is the `0:` token.
+        zero_colon,
+        /// The `main_token` field is the `0::` token.
+        zero_colon_colon,
+        /// The `main_token` field is the `1:` token.
+        one_colon,
+        /// The `main_token` field is the `1::` token.
+        one_colon_colon,
+        /// The `main_token` field is the `2:` token.
+        two_colon,
+
+        /// `expr'`.
+        ///
+        /// The `data` field is a `.opt_node`.
+        ///
+        /// The `main_token` field is the `'` token.
+        apostrophe,
+        /// `expr':`.
+        ///
+        /// The `data` field is a `.opt_node`.
+        ///
+        /// The `main_token` field is the `':` token.
+        apostrophe_colon,
+        /// `expr/`.
+        ///
+        /// The `data` field is a `.opt_node`.
+        ///
+        /// The `main_token` field is the `/` token.
+        slash,
+        /// `expr/:`.
+        ///
+        /// The `data` field is a `.opt_node`.
+        ///
+        /// The `main_token` field is the `/:` token.
+        slash_colon,
+        /// `expr\`.
+        ///
+        /// The `data` field is a `.opt_node`.
+        ///
+        /// The `main_token` field is the `\` token.
+        backslash,
+        /// `expr\:`.
+        ///
+        /// The `data` field is a `.opt_node`.
+        ///
+        /// The `main_token` field is the `\:` token.
+        backslash_colon,
+
+        /// `expr[a;b;...]`.
+        ///
+        /// The `data` field is a `.extra_range` that stores a `Node.Index` for
+        /// each element.
+        ///
+        /// The `main_token` field is the `[` token.
+        call,
+        /// `expr expr`.
+        ///
+        /// The `data` field is a `.node_and_node`.
+        ///
+        /// The `main_token` field is unused.
+        apply_unary,
+        /// `expr op expr`.
+        ///
+        /// The `data` field is a `.node_and_opt_node`.
+        ///
+        /// The `main_token` field is the operator node.
+        apply_binary,
+
+        /// The `main_token` field is the number literal token.
+        number_literal,
+        /// `1 2 ...`.
+        ///
+        /// The `data` field is a `.token` that stores the last number literal token.
+        ///
+        /// The `main_token` field is the first number literal token.
+        number_list_literal,
+        /// The `main_token` field is the string literal token.
+        string_literal,
+        /// The `main_token` field is the symbol literal token.
+        symbol_literal,
+        /// `` `a`b...``.
+        ///
+        /// The `data` field is a `.token` that stores the last symbol literal token.
+        ///
+        /// The `main_token` field is the first symbol literal token.
+        symbol_list_literal,
+        /// The `main_token` field is the identifier token.
+        identifier,
+        /// The `main_token` field is the builtin token.
+        builtin,
+
+        /// `select ...`.
+        ///
+        /// The `data` field is a `.extra` to a `Select`.
+        ///
+        /// The `main_token` field is the `select` token.
+        select,
+        /// `exec ...`.
+        ///
+        /// The `data` field is a `.extra` to a `Exec`.
+        ///
+        /// The `main_token` field is the `exec` token.
+        exec,
+        /// `update ...`.
+        ///
+        /// The `data` field is a `.extra` to a `Update`.
+        ///
+        /// The `main_token` field is the `update` token.
+        update,
+        /// `delete ...`.
+        ///
+        /// The `data` field is a `.extra` to a `DeleteRows`.
+        ///
+        /// The `main_token` field is the `delete` token.
+        delete_rows,
+        /// `delete ...`.
+        ///
+        /// The `data` field is a `.extra` to a `DeleteCols`.
+        ///
+        /// The `main_token` field is the `delete` token.
+        delete_cols,
     };
 
     pub const Data = union {
         node: Index,
         opt_node: OptionalIndex,
         token: TokenIndex,
+        extra: ExtraIndex,
         node_and_node: struct { Index, Index },
+        node_and_token: struct { Index, TokenIndex },
         opt_node_and_opt_node: struct { OptionalIndex, OptionalIndex },
         node_and_opt_node: struct { Index, OptionalIndex },
-        opt_node_and_node: struct { OptionalIndex, Index },
-        node_and_extra: struct { Index, ExtraIndex },
-        extra_and_node: struct { ExtraIndex, Index },
-        extra_and_opt_node: struct { ExtraIndex, OptionalIndex },
-        node_and_token: struct { Index, TokenIndex },
-        token_and_node: struct { TokenIndex, Index },
-        token_and_token: struct { TokenIndex, TokenIndex },
-        opt_node_and_token: struct { OptionalIndex, TokenIndex },
-        opt_token_and_node: struct { OptionalTokenIndex, Index },
-        opt_token_and_opt_node: struct { OptionalTokenIndex, OptionalIndex },
-        opt_token_and_opt_token: struct { OptionalTokenIndex, OptionalTokenIndex },
+        extra_and_token: struct { ExtraIndex, TokenIndex },
         extra_range: SubRange,
     };
 
@@ -453,6 +704,64 @@ pub const Node = struct {
         start: ExtraIndex,
         /// Index into extra_data.
         end: ExtraIndex,
+    };
+
+    pub const Function = struct {
+        params_start: ExtraIndex,
+        body_start: ExtraIndex,
+        body_end: ExtraIndex,
+    };
+
+    pub const Table = struct {
+        keys_start: ExtraIndex,
+        columns_start: ExtraIndex,
+        columns_end: ExtraIndex,
+    };
+
+    pub const Select = struct {
+        select_start: ExtraIndex,
+        by_start: ExtraIndex,
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const Exec = struct {
+        select_start: ExtraIndex,
+        by_start: ExtraIndex,
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const Update = struct {
+        select_start: ExtraIndex,
+        by_start: ExtraIndex,
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const DeleteRows = struct {
+        from: Index,
+        where_start: ExtraIndex,
+        where_end: ExtraIndex,
+    };
+
+    pub const DeleteCols = struct {
+        select_start: ExtraIndex,
+        select_end: ExtraIndex,
+        from: Index,
+    };
+
+    pub const Builtin = enum {
+        flip,
+        neg,
+        first,
+        reciprocal,
+        enlist,
+        not,
+        type,
     };
 };
 
