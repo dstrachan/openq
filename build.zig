@@ -20,6 +20,16 @@ pub fn build(b: *std.Build) !void {
         break :blk 4;
     };
 
+    const openq_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = strip,
+        .sanitize_thread = sanitize_thread,
+        .single_threaded = single_threaded,
+        .valgrind = valgrind,
+    });
+
     const exe = b.addExecutable(.{
         .name = "openq",
         .root_module = b.createModule(.{
@@ -30,6 +40,9 @@ pub fn build(b: *std.Build) !void {
             .sanitize_thread = sanitize_thread,
             .single_threaded = single_threaded,
             .valgrind = valgrind,
+            .imports = &.{
+                .{ .name = "openq", .module = openq_mod },
+            },
         }),
     });
     b.installArtifact(exe);
@@ -127,9 +140,14 @@ pub fn build(b: *std.Build) !void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    const mod_tests = b.addTest(.{
+        .root_module = openq_mod,
+    });
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_mod_tests.step);
 }
