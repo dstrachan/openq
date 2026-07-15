@@ -145,7 +145,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Alloca
     defer parser.scratch.deinit(gpa);
 
     // TODO: Estimate tokens/nodes based on source len
-    const estimated_token_count = source.len / 2;
+    const estimated_token_count = (source.len + 2) / 2;
     try parser.tokens.ensureTotalCapacity(gpa, estimated_token_count);
     const estimated_node_count = (estimated_token_count + 2) / 2;
     try parser.nodes.ensureTotalCapacity(gpa, estimated_node_count);
@@ -270,7 +270,11 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Io.Writer) Io.Writer.Error
                 tree.tokenTag(parse_error.token + @intFromBool(parse_error.token_is_prev)).symbol(),
             });
         },
-
+        .expected_infix_expr => {
+            return w.print("expected infix expression, found '{s}'", .{
+                tree.tokenTag(parse_error.token).symbol(),
+            });
+        },
         .expected_token => {
             const found_tag = tree.tokenTag(parse_error.token + @intFromBool(parse_error.token_is_prev));
             const expected_symbol = parse_error.extra.expected_tag.symbol();
@@ -283,7 +287,18 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Io.Writer) Io.Writer.Error
                 }),
             }
         },
-
+        .expected_qsql_token => {
+            const found_tag = tree.tokenTag(parse_error.token);
+            const expected_string = parse_error.extra.expected_string;
+            switch (found_tag) {
+                .invalid => return w.print("expected '{s}', found invalid bytes", .{
+                    expected_string,
+                }),
+                else => return w.print("expected '{s}', found '{s}'", .{
+                    expected_string, found_tag.symbol(),
+                }),
+            }
+        },
         .invalid_byte => {
             const tok_slice = tree.source[tree.tokens.items(.start)[parse_error.token]..];
             return w.print("{s} contains invalid byte: '{f}'", .{

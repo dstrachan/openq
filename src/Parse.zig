@@ -164,7 +164,7 @@ fn warn(p: *Parse, error_tag: AstError.Tag) !void {
     try p.warnMsg(.{ .tag = error_tag, .token = p.tok_i });
 }
 
-fn warnMsg(p: *Parse, msg: Ast.Error) !void {
+fn warnMsg(p: *Parse, msg: AstError) !void {
     @branchHint(.cold);
     switch (msg.tag) {
         .expected_expr,
@@ -180,12 +180,12 @@ fn warnMsg(p: *Parse, msg: Ast.Error) !void {
     }
 }
 
-fn fail(p: *Parse, tag: Ast.Error.Tag) error{ ParseError, OutOfMemory } {
+fn fail(p: *Parse, tag: AstError.Tag) Error {
     @branchHint(.cold);
     return p.failMsg(.{ .tag = tag, .token = p.tok_i });
 }
 
-fn failExpected(p: *Parse, expected_token: Token.Tag) error{ ParseError, OutOfMemory } {
+fn failExpected(p: *Parse, expected_token: Token.Tag) Error {
     @branchHint(.cold);
     return p.failMsg(.{
         .tag = .expected_token,
@@ -194,42 +194,45 @@ fn failExpected(p: *Parse, expected_token: Token.Tag) error{ ParseError, OutOfMe
     });
 }
 
-fn failMsg(p: *Parse, msg: Ast.Error) error{ ParseError, OutOfMemory } {
+fn failMsg(p: *Parse, msg: AstError) Error {
     @branchHint(.cold);
     try p.warnMsg(msg);
     return error.ParseError;
 }
 
-pub fn parse(p: *Parse) Allocator.Error!void {
+pub fn parse(p: *Parse) !void {
     p.nodes.appendAssumeCapacity(.{
         .tag = .root,
         .main_token = 0,
         .data = undefined,
     });
-    const root_exprs = p.parseStatements() catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.ParseError => {
-            assert(p.errors.items.len > 0);
-            return;
-        },
-    };
+    const root_exprs = try p.parseStatements();
     if (p.tokenTag(p.tok_i) != .eof) {
         try p.warnExpected(.eof);
     }
     p.nodes.items(.data)[0] = .{ .extra_range = try root_exprs.toSpan(p) };
 }
 
-fn parseStatements(p: *Parse) Error!Statements {
+fn parseStatements(p: *Parse) !Statements {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     while (p.tokenTag(p.tok_i) != .eof) {
-        const expr = try p.parseExpr(null);
+        const expr = p.parseExpr(null) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => blk: {
+                try p.skipStatement();
+                break :blk .none;
+            },
+        };
         if (expr.unwrap()) |node| try p.scratch.append(p.gpa, node);
         switch (p.tokenTag(p.tok_i)) {
             .semicolon, .eos => _ = try p.nextToken(),
             .eof => break,
-            else => return p.fail(.expected_expr),
+            else => {
+                try p.warn(.expected_expr);
+                try p.skipStatement();
+            },
         }
     }
 
@@ -1156,9 +1159,8 @@ fn eatToken(p: *Parse, tag: Token.Tag) !?TokenIndex {
 }
 
 fn assertToken(p: *Parse, tag: Token.Tag) !TokenIndex {
-    const token = try p.nextToken();
-    assert(p.tokenTag(token) == tag);
-    return token;
+    assert(p.tokenTag(p.tok_i) == tag);
+    return p.nextToken();
 }
 
 fn expectToken(p: *Parse, tag: Token.Tag) !TokenIndex {
@@ -1175,6 +1177,377 @@ fn nextToken(p: *Parse) !TokenIndex {
     return p.tok_i - 1;
 }
 
+fn skipStatement(p: *Parse) !void {
+    while (p.tokenTag(p.tok_i) != .eos and p.tokenTag(p.tok_i) != .eof) {
+        _ = try p.nextToken();
+    }
+    _ = try p.eatToken(.eos);
+}
+
 fn tokensOnSameLine(p: *Parse, token1: TokenIndex, token2: TokenIndex) bool {
     return std.mem.findScalar(u8, p.source[p.tokenStart(token1)..p.tokenStart(token2)], '\n') == null;
+}
+
+test "parse end of statement" {
+    try testParse(
+        "1+2",
+        &.{ .number_literal, .plus, .number_literal },
+        &.{ .root, .number_literal, .apply_binary, .plus, .number_literal },
+        &.{},
+    );
+    try testParse(
+        \\1+
+        \\ 2
+    ,
+        &.{ .number_literal, .plus, .number_literal },
+        &.{ .root, .number_literal, .apply_binary, .plus, .number_literal },
+        &.{},
+    );
+    try testParse(
+        \\1
+        \\ +2
+    ,
+        &.{ .number_literal, .plus, .number_literal },
+        &.{ .root, .number_literal, .apply_binary, .plus, .number_literal },
+        &.{},
+    );
+    try testParse(
+        \\1
+        \\ +
+        \\ 2
+    ,
+        &.{ .number_literal, .plus, .number_literal },
+        &.{ .root, .number_literal, .apply_binary, .plus, .number_literal },
+        &.{},
+    );
+
+    try testParse(
+        \\1
+        \\+2
+    ,
+        &.{ .number_literal, .eos, .plus, .number_literal },
+        &.{ .root, .number_literal, .plus },
+        &.{.expected_infix_expr},
+    );
+    try testParse(
+        \\1
+        \\+
+        \\ 2
+    ,
+        &.{ .number_literal, .eos, .plus, .number_literal },
+        &.{ .root, .number_literal, .plus },
+        &.{.expected_infix_expr},
+    );
+
+    try testParse(
+        \\1
+        \\+
+        \\2
+    ,
+        &.{ .number_literal, .eos, .plus, .eos, .number_literal },
+        &.{ .root, .number_literal, .plus, .number_literal },
+        &.{},
+    );
+}
+
+test "parse select" {
+    try testParse(
+        "select a,b by a,b from x where a,b",
+        &.{
+            .keyword_select, .identifier, .comma, .identifier, // select
+            .identifier, .identifier, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .select, .identifier, .identifier, // select
+            .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "select(a,b),(c,d)by(a,b),(c,d)from x where(a,b),(c,d)",
+        &.{
+            .keyword_select, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // select
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // by
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .select, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // select
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // by
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "select f[a,b;c],d by f[a,b;c],d from x where f[a,b;c],d",
+        &.{
+            .keyword_select, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // select
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .select, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // select
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse exec" {
+    try testParse(
+        "exec a,b by a,b from x where a,b",
+        &.{
+            .keyword_exec, .identifier, .comma, .identifier, // exec
+            .identifier, .identifier, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .exec, .identifier, .identifier, // exec
+            .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "exec(a,b),(c,d)by(a,b),(c,d)from x where(a,b),(c,d)",
+        &.{
+            .keyword_exec, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // exec
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // by
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .exec, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // exec
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // by
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "exec f[a,b;c],d by f[a,b;c],d from x where f[a,b;c],d",
+        &.{
+            .keyword_exec, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // exec
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .exec, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // exec
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse update" {
+    try testParse(
+        "update a,b by a,b from x where a,b",
+        &.{
+            .keyword_update, .identifier, .comma, .identifier, // update
+            .identifier, .identifier, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .update, .identifier, .identifier, // update
+            .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "update(a,b),(c,d)by(a,b),(c,d)from x where(a,b),(c,d)",
+        &.{
+            .keyword_update, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // update
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // by
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .update, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // update
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // by
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "update f[a,b;c],d by f[a,b;c],d from x where f[a,b;c],d",
+        &.{
+            .keyword_update, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // update
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // by
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .update, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // update
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // by
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse delete rows" {
+    try testParse(
+        "delete from x where a,b",
+        &.{
+            .keyword_delete, // delete
+            .identifier, .identifier, // from
+            .identifier, .identifier, .comma, .identifier, // where
+        },
+        &.{
+            .root, .delete_rows, // delete
+            .identifier, // from
+            .identifier, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "delete from x where(a,b),(c,d)",
+        &.{
+            .keyword_delete, // delete
+            .identifier, .identifier, // from
+            .identifier, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // where
+        },
+        &.{
+            .root, .delete_rows, // delete
+            .identifier, // from
+            .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // where
+        },
+        &.{},
+    );
+    try testParse(
+        "delete from x where f[a,b;c],d",
+        &.{
+            .keyword_delete, // delete
+            .identifier, .identifier, // from
+            .identifier, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // where
+        },
+        &.{
+            .root, .delete_rows, // delete
+            .identifier, // from
+            .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // where
+        },
+        &.{},
+    );
+}
+
+test "parse delete columns" {
+    try testParse(
+        "delete a,b from x",
+        &.{
+            .keyword_delete, .identifier, .comma, .identifier, // delete
+            .identifier, .identifier, // from
+        },
+        &.{
+            .root, .delete_cols, .identifier, .identifier, // delete
+            .identifier, // from
+        },
+        &.{},
+    );
+    try testParse(
+        "delete(a,b),(c,d)from x",
+        &.{
+            .keyword_delete, .l_paren, .identifier, .comma, .identifier, .r_paren, .comma, .l_paren, .identifier, .comma, .identifier, .r_paren, // delete
+            .identifier, .identifier, // from
+        },
+        &.{
+            .root, .delete_cols, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, .grouped_expression, .identifier, .apply_binary, .comma, .identifier, // delete
+            .identifier, // from
+        },
+        &.{},
+    );
+    try testParse(
+        "delete f[a,b;c],d from x",
+        &.{
+            .keyword_delete, .identifier, .l_bracket, .identifier, .comma, .identifier, .semicolon, .identifier, .r_bracket, .comma, .identifier, // delete
+            .identifier, .identifier, // from
+        },
+        &.{
+            .root, .delete_cols, .identifier, .call, .identifier, .apply_binary, .comma, .identifier, .identifier, .identifier, // delete
+            .identifier, // from
+        },
+        &.{},
+    );
+}
+
+test "boolean or byte literal ends number list literal" {
+    try testParse(
+        "0 1 2",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0i 1 2",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "010b 0 1 2",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_literal, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0x000102 0 1 2",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_literal, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0 1 2 010b",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0 1 2 0x000102",
+        &.{ .number_literal, .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "0 1 2i",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .root, .number_list_literal },
+        &.{},
+    );
+}
+
+fn testParse(
+    source: [:0]const u8,
+    expected_tokens: []const Token.Tag,
+    expected_nodes: []const Node.Tag,
+    expected_errors: []const AstError.Tag,
+) !void {
+    const gpa = std.testing.allocator;
+    var tree: Ast = try .parse(gpa, source, .{ .mode = .q });
+    defer tree.deinit(gpa);
+
+    const actual_errors = try gpa.alloc(AstError.Tag, tree.errors.len);
+    defer gpa.free(actual_errors);
+    for (tree.errors, actual_errors) |err, *actual_error| actual_error.* = err.tag;
+    try std.testing.expectEqualSlices(AstError.Tag, expected_errors, actual_errors);
+
+    try std.testing.expect(tree.tokens.items(.tag)[tree.tokens.len - 1] == .eof);
+    try std.testing.expectEqualSlices(Token.Tag, expected_tokens, tree.tokens.items(.tag)[0 .. tree.tokens.len - 1]);
+    try std.testing.expectEqualSlices(Node.Tag, expected_nodes, tree.nodes.items(.tag));
 }

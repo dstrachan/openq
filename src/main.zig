@@ -174,25 +174,37 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             break :source written[0..slice.len :0];
         };
 
-        switch (source.len) {
-            0 => continue,
-            1 => if (source[0] == '\\') {
-                mode = if (mode == .q) .k else .q;
-            },
-            2 => if (source[0] == '\\' and source[1] == '\\') break,
-            else => {
-                var tree: Ast = try .parse(gpa, source, .{
-                    .skip_comments = false,
-                    .mode = mode,
-                });
-                defer tree.deinit(gpa);
-
-                for (tree.nodes.items(.tag)) |tag| {
-                    try stdout.print("{t}\n", .{tag});
-                    try stdout.flush();
-                }
-            },
+        if (source.len == 0) continue;
+        if (source.len == 1 and source[0] == '\\') {
+            mode = if (mode == .q) .k else .q;
+            continue;
         }
+        if (source.len == 2 and source[0] == '\\' and source[1] == '\\') break;
+
+        var tree: Ast = try .parse(gpa, source, .{
+            .skip_comments = false,
+            .mode = mode,
+        });
+        defer tree.deinit(gpa);
+
+        try stdout.writeAll("== tokens ==\n");
+        for (tree.tokens.items(.tag)) |tag| {
+            try stdout.print("{t}\n", .{tag});
+        }
+
+        if (tree.errors.len > 0) {
+            try stdout.writeAll("== errors ==\n");
+            for (tree.errors) |err| {
+                try tree.renderError(err, stdout);
+                try stdout.writeByte('\n');
+            }
+        } else {
+            try stdout.writeAll("== nodes ==\n");
+            for (tree.nodes.items(.tag)) |tag| {
+                try stdout.print("{t}\n", .{tag});
+            }
+        }
+        try stdout.flush();
     }
 }
 

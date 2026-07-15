@@ -13,7 +13,12 @@ pub const Loc = struct {
     end: usize,
 };
 
-pub const keywords: std.StaticStringMap(Tag) = .initComptime(.{});
+pub const keywords: std.StaticStringMap(Tag) = .initComptime(.{
+    .{ "select", .keyword_select },
+    .{ "exec", .keyword_exec },
+    .{ "update", .keyword_update },
+    .{ "delete", .keyword_delete },
+});
 
 pub fn getKeyword(bytes: []const u8) ?Tag {
     return keywords.get(bytes);
