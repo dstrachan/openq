@@ -212,7 +212,6 @@ pub const Tag = enum {
             .string_literal,
             .symbol_literal,
             .identifier,
-            .eos,
             => true,
             else => false,
         };

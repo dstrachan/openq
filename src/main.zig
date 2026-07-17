@@ -146,7 +146,6 @@ const banner = "OpenQ " ++ build_options.version ++ " " ++
 
 fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void {
     _ = environ_map; // autofix
-    std.debug.print("{s}\n", .{banner});
 
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
@@ -156,40 +155,76 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
     var buffer: Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();
 
-    var mode: Ast.Mode = .q;
-    while (true) {
-        std.debug.print("{t})", .{mode});
+    if (try Io.File.stdin().isTty(io)) {
+        std.debug.print("{s}\n", .{banner});
 
-        buffer.shrinkRetainingCapacity(0);
-        _ = try stdin.streamDelimiterEnding(&buffer.writer, '\n');
-        defer _ = stdin.takeByte() catch {};
+        var mode: Ast.Mode = .q;
+        while (true) {
+            std.debug.print("{t})", .{mode});
 
-        const written = buffer.written();
-        const slice = std.mem.trimEnd(u8, written, "\t\r ");
-        const source: [:0]u8 = if (written.len == slice.len) source: {
-            try buffer.writer.writeByte(0);
-            break :source buffer.written()[0..slice.len :0];
-        } else source: {
-            written[slice.len] = 0;
-            break :source written[0..slice.len :0];
-        };
+            buffer.shrinkRetainingCapacity(0);
+            _ = try stdin.streamDelimiterEnding(&buffer.writer, '\n');
+            defer _ = stdin.takeByte() catch {};
 
-        if (source.len == 0) continue;
-        if (source.len == 1 and source[0] == '\\') {
-            mode = if (mode == .q) .k else .q;
-            continue;
+            const written = buffer.written();
+            const slice = std.mem.trimEnd(u8, written, "\t\r ");
+            const source: [:0]u8 = if (written.len == slice.len) source: {
+                try buffer.writer.writeByte(0);
+                break :source buffer.written()[0..slice.len :0];
+            } else source: {
+                written[slice.len] = 0;
+                break :source written[0..slice.len :0];
+            };
+
+            if (source.len == 0) continue;
+            if (source.len == 1 and source[0] == '\\') {
+                mode = if (mode == .q) .k else .q;
+                continue;
+            }
+            if (source.len == 2 and source[0] == '\\' and source[1] == '\\') break;
+
+            var tree: Ast = try .parse(gpa, source, .{
+                .skip_comments = false,
+                .mode = mode,
+            });
+            defer tree.deinit(gpa);
+
+            try stdout.writeAll("== tokens ==\n");
+            for (tree.tokens.items(.tag), 0..) |tag, token| {
+                if (tag == .eos) continue;
+                try stdout.print("{t} '{s}'\n", .{ tag, tree.tokenSlice(@intCast(token)) });
+            }
+
+            if (tree.errors.len > 0) {
+                try stdout.writeAll("== errors ==\n");
+                for (tree.errors) |err| {
+                    try tree.renderError(err, stdout);
+                    try stdout.writeByte('\n');
+                }
+            } else {
+                try stdout.writeAll("== nodes ==\n");
+                for (tree.nodes.items(.tag)[1..], 1..) |tag, node| {
+                    try stdout.print("{t} '{s}'\n", .{ tag, tree.nodeSlice(@enumFromInt(node)) });
+                }
+            }
+            try stdout.flush();
         }
-        if (source.len == 2 and source[0] == '\\' and source[1] == '\\') break;
+    } else {
+        const len = try stdin.streamRemaining(&buffer.writer);
+        try buffer.writer.writeByte(0);
+
+        const source = buffer.written()[0..len :0];
 
         var tree: Ast = try .parse(gpa, source, .{
             .skip_comments = false,
-            .mode = mode,
+            .mode = .q,
         });
         defer tree.deinit(gpa);
 
         try stdout.writeAll("== tokens ==\n");
-        for (tree.tokens.items(.tag)) |tag| {
-            try stdout.print("{t}\n", .{tag});
+        for (tree.tokens.items(.tag)[0 .. tree.tokens.len - 1], 0..) |tag, token| {
+            if (tag == .eos) continue;
+            try stdout.print("{t} '{s}'\n", .{ tag, tree.tokenSlice(@intCast(token)) });
         }
 
         if (tree.errors.len > 0) {
@@ -200,8 +235,8 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             }
         } else {
             try stdout.writeAll("== nodes ==\n");
-            for (tree.nodes.items(.tag)) |tag| {
-                try stdout.print("{t}\n", .{tag});
+            for (tree.nodes.items(.tag)[1..], 1..) |tag, node| {
+                try stdout.print("{t} '{s}'\n", .{ tag, tree.nodeSlice(@enumFromInt(node)) });
             }
         }
         try stdout.flush();

@@ -6,6 +6,7 @@ const assert = std.debug.assert;
 const q = @import("root.zig");
 const Token = q.Token;
 const Parse = q.Parse;
+const Tokenizer = q.Tokenizer;
 
 const Ast = @This();
 
@@ -217,7 +218,12 @@ pub fn tokenLocation(self: Ast, start_offset: ByteOffset, token_index: TokenInde
 }
 
 pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
+    return tree.tokenSliceMode(token_index, .q);
+}
+
+pub fn tokenSliceMode(tree: Ast, token_index: TokenIndex, mode: Mode) []const u8 {
     const token_tag = tree.tokenTag(token_index);
+    assert(token_tag != .eos);
 
     // Many tokens can be determined entirely by their tag.
     if (token_tag.lexeme()) |lexeme| {
@@ -225,13 +231,29 @@ pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
     }
 
     // For some tokens, re-tokenization is needed to find the end.
-    var tokenizer: std.zig.Tokenizer = .{
+    var tokenizer: Tokenizer = .{
         .buffer = tree.source,
         .index = tree.tokenStart(token_index),
+        .mode = mode,
+        .next_is_minus = token_index != 0 and tree.tokenTag(token_index - 1).isNextMinus(),
     };
-    const token = tokenizer.next();
+    const token = token: {
+        const token = tokenizer.next();
+        break :token if (token.tag == .eos) tokenizer.next() else token;
+    };
     assert(token.tag == token_tag);
     return tree.source[token.loc.start..token.loc.end];
+}
+
+pub fn nodeSlice(tree: Ast, node: Node.Index) []const u8 {
+    const first_token = tree.firstToken(node);
+    const last_token = tree.lastToken(node);
+
+    const first_token_start = tree.tokenStart(first_token);
+    const last_token_start = tree.tokenStart(last_token);
+    const last_token_end = last_token_start + tree.tokenSlice(last_token).len;
+
+    return tree.source[first_token_start..last_token_end];
 }
 
 pub fn extraDataSlice(tree: Ast, range: Node.SubRange, comptime T: type) []const T {
@@ -275,6 +297,11 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Io.Writer) Io.Writer.Error
                 tree.tokenTag(parse_error.token).symbol(),
             });
         },
+        .invalid_dsl => {
+            return w.print("invalid DSL '{s}'", .{
+                tree.tokenSlice(parse_error.token),
+            });
+        },
         .expected_token => {
             const found_tag = tree.tokenTag(parse_error.token + @intFromBool(parse_error.token_is_prev));
             const expected_symbol = parse_error.extra.expected_tag.symbol();
@@ -315,13 +342,223 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Io.Writer) Io.Writer.Error
 }
 
 pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
-    _ = tree; // autofix
-    _ = node; // autofix
+    var n = node;
+    var end_offset: u32 = 0;
+    _ = &end_offset;
+    while (true) switch (tree.nodeTag(n)) {
+        .root => return 0,
+        .empty => return tree.nodeMainToken(n) - end_offset,
+
+        .grouped_expression,
+        .empty_list,
+        .list,
+        .table_literal,
+        => return tree.nodeMainToken(n) - end_offset,
+
+        .function => return tree.nodeMainToken(n) - end_offset,
+
+        .expr_block => return tree.nodeMainToken(n) - end_offset,
+
+        .colon,
+        .colon_colon,
+        .plus,
+        .plus_colon,
+        .minus,
+        .minus_colon,
+        .asterisk,
+        .asterisk_colon,
+        .percent,
+        .percent_colon,
+        .ampersand,
+        .ampersand_colon,
+        .pipe,
+        .pipe_colon,
+        .caret,
+        .caret_colon,
+        .equal,
+        .equal_colon,
+        .l_angle_bracket,
+        .l_angle_bracket_colon,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
+        .r_angle_bracket,
+        .r_angle_bracket_colon,
+        .r_angle_bracket_equal,
+        .dollar,
+        .dollar_colon,
+        .comma,
+        .comma_colon,
+        .hash,
+        .hash_colon,
+        .underscore,
+        .underscore_colon,
+        .tilde,
+        .tilde_colon,
+        .bang,
+        .bang_colon,
+        .question_mark,
+        .question_mark_colon,
+        .at,
+        .at_colon,
+        .dot,
+        .dot_colon,
+        .zero_colon,
+        .zero_colon_colon,
+        .one_colon,
+        .one_colon_colon,
+        .two_colon,
+        => return tree.nodeMainToken(n) - end_offset,
+
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => n = tree.nodeData(n).opt_node.unwrap() orelse return tree.nodeMainToken(n) - end_offset,
+
+        .call => n = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index)[0],
+        .apply_unary => n = tree.nodeData(n).node_and_node[0],
+        .apply_binary => n = tree.nodeData(n).node_and_opt_node[0],
+
+        .number_literal,
+        .number_list_literal,
+        .string_literal,
+        .symbol_literal,
+        .symbol_list_literal,
+        .identifier,
+        .builtin,
+        => return tree.nodeMainToken(n) - end_offset,
+
+        .select,
+        .exec,
+        .update,
+        .delete_rows,
+        .delete_cols,
+        => return tree.nodeMainToken(n) - end_offset,
+    };
 }
 
 pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
-    _ = tree; // autofix
-    _ = node; // autofix
+    var n = node;
+    var end_offset: u32 = 0;
+    while (true) switch (tree.nodeTag(n)) {
+        .root => return @intCast(tree.tokens.len - 1),
+        .empty => return tree.nodeMainToken(n) + end_offset,
+
+        .grouped_expression => return tree.nodeData(n).node_and_token[1] + end_offset,
+        .empty_list => return tree.nodeData(n).token + end_offset,
+        .list => {
+            const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            n = nodes[nodes.len - 1];
+            end_offset += 1; // )
+        },
+        .table_literal => return tree.nodeData(n).extra_and_token[1] + end_offset,
+
+        .function => return tree.nodeData(n).extra_and_token[1] + end_offset,
+
+        .expr_block => {
+            const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            n = nodes[nodes.len - 1];
+            end_offset += 1; // ]
+        },
+
+        .colon,
+        .colon_colon,
+        .plus,
+        .plus_colon,
+        .minus,
+        .minus_colon,
+        .asterisk,
+        .asterisk_colon,
+        .percent,
+        .percent_colon,
+        .ampersand,
+        .ampersand_colon,
+        .pipe,
+        .pipe_colon,
+        .caret,
+        .caret_colon,
+        .equal,
+        .equal_colon,
+        .l_angle_bracket,
+        .l_angle_bracket_colon,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
+        .r_angle_bracket,
+        .r_angle_bracket_colon,
+        .r_angle_bracket_equal,
+        .dollar,
+        .dollar_colon,
+        .comma,
+        .comma_colon,
+        .hash,
+        .hash_colon,
+        .underscore,
+        .underscore_colon,
+        .tilde,
+        .tilde_colon,
+        .bang,
+        .bang_colon,
+        .question_mark,
+        .question_mark_colon,
+        .at,
+        .at_colon,
+        .dot,
+        .dot_colon,
+        .zero_colon,
+        .zero_colon_colon,
+        .one_colon,
+        .one_colon_colon,
+        .two_colon,
+        => return tree.nodeMainToken(n) + end_offset,
+
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => return tree.nodeMainToken(n) + end_offset,
+
+        .call => {
+            const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
+            n = nodes[nodes.len - 1];
+            if (nodes.len == 1) {
+                end_offset += 2; // []
+            } else {
+                end_offset += 1; // ]
+            }
+        },
+        .apply_unary => n = tree.nodeData(n).node_and_node[1],
+        .apply_binary => n = tree.nodeData(n).node_and_opt_node[1].unwrap() orelse @enumFromInt(tree.nodeMainToken(n)),
+
+        .number_literal => return tree.nodeMainToken(n) + end_offset,
+        .number_list_literal => return tree.nodeData(n).token + end_offset,
+        .string_literal => return tree.nodeMainToken(n) + end_offset,
+        .symbol_literal => return tree.nodeMainToken(n) + end_offset,
+        .symbol_list_literal => return tree.nodeData(n).token + end_offset,
+        .identifier => return tree.nodeMainToken(n) + end_offset,
+        .builtin => return tree.nodeMainToken(n) + end_offset,
+
+        inline .select, .exec, .update, .delete_rows => |t| {
+            const sql = tree.extraData(tree.nodeData(n).extra, switch (t) {
+                .select => Node.Select,
+                .exec => Node.Exec,
+                .update => Node.Update,
+                .delete_rows => Node.DeleteRows,
+                else => unreachable,
+            });
+            n = if (sql.where_end != sql.where_start) blk: {
+                const nodes = tree.extraDataSlice(.{
+                    .start = sql.where_start,
+                    .end = sql.where_end,
+                }, Node.Index);
+                break :blk nodes[nodes.len - 1];
+            } else sql.from;
+        },
+        .delete_cols => n = tree.extraData(tree.nodeData(n).extra, Node.DeleteCols).from,
+    };
 }
 
 pub fn tokensOnSameLine(tree: Ast, token1: TokenIndex, token2: TokenIndex) bool {
@@ -345,6 +582,8 @@ pub const Error = struct {
     pub const Tag = enum {
         expected_expr,
         expected_infix_expr,
+
+        invalid_dsl,
 
         /// `expected_tag` is populated.
         expected_token,
@@ -442,8 +681,8 @@ pub const Node = struct {
         root,
         /// The `data` field is unused.
         ///
-        /// The `main_token` field is unused.
-        no_op,
+        /// The `main_token` field is the previous token.
+        empty,
 
         /// `(expr)`.
         ///
