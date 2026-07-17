@@ -146,11 +146,11 @@ const banner = "OpenQ " ++ build_options.version ++ " " ++
 
 fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void {
     _ = environ_map; // autofix
-
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
+    _ = stdout; // autofix
 
     var buffer: Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();
@@ -188,26 +188,10 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
                 .mode = mode,
             });
             defer tree.deinit(gpa);
-
-            try stdout.writeAll("== tokens ==\n");
-            for (tree.tokens.items(.tag), 0..) |tag, token| {
-                if (tag == .eos) continue;
-                try stdout.print("{t} '{s}'\n", .{ tag, tree.tokenSlice(@intCast(token)) });
-            }
-
             if (tree.errors.len > 0) {
-                try stdout.writeAll("== errors ==\n");
-                for (tree.errors) |err| {
-                    try tree.renderError(err, stdout);
-                    try stdout.writeByte('\n');
-                }
-            } else {
-                try stdout.writeAll("== nodes ==\n");
-                for (tree.nodes.items(.tag)[1..], 1..) |tag, node| {
-                    try stdout.print("{t} '{s}'\n", .{ tag, tree.nodeSlice(@enumFromInt(node)) });
-                }
+                try q.printAstErrorsToStderr(gpa, io, tree, "<stdin>", .auto);
+                continue;
             }
-            try stdout.flush();
         }
     } else {
         const len = try stdin.streamRemaining(&buffer.writer);
@@ -220,26 +204,10 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             .mode = .q,
         });
         defer tree.deinit(gpa);
-
-        try stdout.writeAll("== tokens ==\n");
-        for (tree.tokens.items(.tag)[0 .. tree.tokens.len - 1], 0..) |tag, token| {
-            if (tag == .eos) continue;
-            try stdout.print("{t} '{s}'\n", .{ tag, tree.tokenSlice(@intCast(token)) });
-        }
-
         if (tree.errors.len > 0) {
-            try stdout.writeAll("== errors ==\n");
-            for (tree.errors) |err| {
-                try tree.renderError(err, stdout);
-                try stdout.writeByte('\n');
-            }
-        } else {
-            try stdout.writeAll("== nodes ==\n");
-            for (tree.nodes.items(.tag)[1..], 1..) |tag, node| {
-                try stdout.print("{t} '{s}'\n", .{ tag, tree.nodeSlice(@enumFromInt(node)) });
-            }
+            try q.printAstErrorsToStderr(gpa, io, tree, "<stdin>", .auto);
+            return;
         }
-        try stdout.flush();
     }
 }
 
