@@ -28,6 +28,7 @@ nodes: Ast.NodeList,
 extra_data: std.ArrayList(u32),
 scratch: std.ArrayList(Node.Index),
 mode: Mode,
+ends_expression: std.ArrayList(Token.Tag),
 
 fn tokenTag(p: *const Parse, token_index: TokenIndex) Token.Tag {
     return p.tokens.items(.tag)[token_index];
@@ -219,7 +220,7 @@ fn parseStatements(p: *Parse) !Statements {
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     while (p.tokenTag(p.tok_i) != .eof) {
-        const expr = p.parseFirstExpr() catch |err| switch (err) {
+        const expr = p.parseStatement() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => blk: {
                 try p.skipStatement();
@@ -250,7 +251,7 @@ fn parseStatements(p: *Parse) !Statements {
     };
 }
 
-fn parseFirstExpr(p: *Parse) !Node.OptionalIndex {
+fn parseStatement(p: *Parse) !Node.OptionalIndex {
     assert(p.tok_i == 0 or p.tokenTag(p.tok_i - 1) == .eos);
 
     // Handle DSLs
@@ -303,11 +304,13 @@ fn parseExpr(p: *Parse, comptime sql_identifier: ?SqlIdentifier) Error!Node.Opti
 }
 
 fn endsExpression(p: *Parse, comptime sql_identifier: ?SqlIdentifier) bool {
-    if (sql_identifier) |sql_id| {
-        if (p.tokenTag(p.tok_i) == .comma) return true;
-        if (p.peekIdentifier(sql_id)) return true;
+    const tag = p.tokenTag(p.tok_i);
+    if (p.ends_expression.getLast()) |last_token| if (tag == last_token) return true;
+    if (sql_identifier) |identifier| {
+        if (tag == .comma) return true;
+        if (p.peekIdentifier(identifier)) return true;
     }
-    return switch (p.tokenTag(p.tok_i)) {
+    return switch (tag) {
         .semicolon, .eos, .eof => true,
         else => false,
     };
@@ -509,6 +512,8 @@ fn parseCall(p: *Parse, lhs: Node.Index) !Node.Index {
     if (p.tokenTag(p.tok_i) != .l_bracket) return p.parseIterator(lhs);
 
     const l_bracket = try p.assertToken(.l_bracket);
+    try p.ends_expression.append(p.gpa, .r_bracket);
+    defer _ = p.ends_expression.pop();
 
     const call_index = try p.reserveNode(.call);
     errdefer p.unreserveNode(call_index);
@@ -603,6 +608,7 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
         .one_colon,
         .one_colon_colon,
         .two_colon,
+        => return p.fail(.expected_infix_expr),
 
         .apostrophe,
         .apostrophe_colon,
@@ -610,7 +616,7 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
         .slash_colon,
         .backslash,
         .backslash_colon,
-        => return p.fail(.expected_infix_expr),
+        => if (p.mode != .k) return p.fail(.expected_infix_expr),
         else => {},
     }
 
@@ -669,6 +675,9 @@ fn parseBinary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifi
 
 fn parseGroup(p: *Parse) !Node.Index {
     const l_paren = try p.assertToken(.l_paren);
+    try p.ends_expression.append(p.gpa, .r_paren);
+    defer _ = p.ends_expression.pop();
+
     if (p.tokenTag(p.tok_i) == .l_bracket) return p.parseTable(l_paren);
 
     const group_index = try p.reserveNode(.grouped_expression);
@@ -677,12 +686,10 @@ fn parseGroup(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    if (p.tokenTag(p.tok_i) != .r_paren) {
-        while (true) {
-            const expr = try p.parseExpr(null);
-            try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
-            _ = try p.eatToken(.semicolon) orelse break;
-        }
+    while (p.tokenTag(p.tok_i) != .r_paren) {
+        const expr = try p.parseExpr(null);
+        try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
+        _ = try p.eatToken(.semicolon) orelse break;
     }
     const r_paren = try p.expectToken(.r_paren);
 
@@ -711,6 +718,7 @@ fn parseGroup(p: *Parse) !Node.Index {
 
 fn parseTable(p: *Parse, l_paren: TokenIndex) !Node.Index {
     _ = try p.assertToken(.l_bracket);
+    try p.ends_expression.append(p.gpa, .r_bracket);
 
     const table_index = try p.reserveNode(.table_literal);
     errdefer p.unreserveNode(table_index);
@@ -719,14 +727,13 @@ fn parseTable(p: *Parse, l_paren: TokenIndex) !Node.Index {
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     const keys_top = p.scratch.items.len;
-    if (p.tokenTag(p.tok_i) != .r_bracket) {
-        while (true) {
-            const expr = try p.expectExpr(null);
-            try p.scratch.append(p.gpa, expr);
-            _ = try p.eatToken(.semicolon) orelse break;
-        }
+    while (p.tokenTag(p.tok_i) != .r_bracket) {
+        const expr = try p.expectExpr(null);
+        try p.scratch.append(p.gpa, expr);
+        _ = try p.eatToken(.semicolon) orelse break;
     }
     _ = try p.expectToken(.r_bracket);
+    _ = p.ends_expression.pop();
 
     const columns_top = p.scratch.items.len;
 
@@ -756,6 +763,8 @@ fn parseTable(p: *Parse, l_paren: TokenIndex) !Node.Index {
 
 fn parseBlock(p: *Parse) !Node.Index {
     const l_bracket = try p.assertToken(.l_bracket);
+    try p.ends_expression.append(p.gpa, .r_bracket);
+    defer _ = p.ends_expression.pop();
 
     const block_index = try p.reserveNode(.expr_block);
     errdefer p.unreserveNode(block_index);
@@ -763,12 +772,10 @@ fn parseBlock(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    if (p.tokenTag(p.tok_i) != .r_bracket) {
-        while (true) {
-            const expr = try p.parseExpr(null);
-            try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
-            _ = try p.eatToken(.semicolon) orelse break;
-        }
+    while (p.tokenTag(p.tok_i) != .r_bracket) {
+        const expr = try p.parseExpr(null);
+        try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
+        _ = try p.eatToken(.semicolon) orelse break;
     }
     _ = try p.expectToken(.r_bracket);
 
@@ -782,6 +789,8 @@ fn parseBlock(p: *Parse) !Node.Index {
 
 fn parseFunction(p: *Parse) !Node.Index {
     const l_brace = try p.assertToken(.l_brace);
+    try p.ends_expression.append(p.gpa, .r_brace);
+    defer _ = p.ends_expression.pop();
 
     const function_index = try p.reserveNode(.function);
     errdefer p.unreserveNode(function_index);
@@ -791,12 +800,13 @@ fn parseFunction(p: *Parse) !Node.Index {
 
     const params_top = p.scratch.items.len;
     if (try p.eatToken(.l_bracket)) |_| {
-        if (p.tokenTag(p.tok_i) != .r_bracket) {
-            while (true) {
-                const expr = try p.expectExpr(null);
-                try p.scratch.append(p.gpa, expr);
-                _ = try p.eatToken(.semicolon) orelse break;
-            }
+        try p.ends_expression.append(p.gpa, .r_bracket);
+        defer _ = p.ends_expression.pop();
+
+        while (p.tokenTag(p.tok_i) != .r_bracket) {
+            const expr = try p.expectExpr(null);
+            try p.scratch.append(p.gpa, expr);
+            _ = try p.eatToken(.semicolon) orelse break;
         }
         _ = try p.expectToken(.r_bracket);
     }
@@ -1260,7 +1270,7 @@ test "parse end of statement" {
         \\+2
     ,
         &.{ .number_literal, .eos, .plus, .number_literal },
-        &.{ .number_literal, .plus },
+        &.{},
         &.{.expected_infix_expr},
     );
     try testParse(
@@ -1269,7 +1279,7 @@ test "parse end of statement" {
         \\ 2
     ,
         &.{ .number_literal, .eos, .plus, .number_literal },
-        &.{ .number_literal, .plus },
+        &.{},
         &.{.expected_infix_expr},
     );
 
@@ -1566,14 +1576,59 @@ test "boolean or byte literal ends number list literal" {
     );
 }
 
+test "iterators" {
+    try testParseMode(
+        .k,
+        "+/1 2 3",
+        &.{ .plus, .slash, .number_literal, .number_literal, .number_literal },
+        &.{ .plus, .slash, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "k)+/1 2 3",
+        &.{ .identifier, .r_paren, .plus, .slash, .number_literal, .number_literal, .number_literal },
+        &.{ .plus, .slash, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParseMode(
+        .q,
+        "+/1 2 3",
+        &.{ .plus, .slash, .number_literal, .number_literal, .number_literal },
+        &.{},
+        &.{.expected_infix_expr},
+    );
+    try testParse(
+        "(+/)1 2 3",
+        &.{ .l_paren, .plus, .slash, .r_paren, .number_literal, .number_literal, .number_literal },
+        &.{ .grouped_expression, .plus, .slash, .apply_unary, .number_list_literal },
+        &.{},
+    );
+    try testParse(
+        "+/[1 2 3]",
+        &.{ .plus, .slash, .l_bracket, .number_literal, .number_literal, .number_literal, .r_bracket },
+        &.{ .plus, .slash, .call, .number_list_literal },
+        &.{},
+    );
+}
+
 fn testParse(
     source: [:0]const u8,
     expected_tokens: []const Token.Tag,
     expected_nodes: []const Node.Tag,
     expected_errors: []const AstError.Tag,
 ) !void {
+    try testParseMode(.q, source, expected_tokens, expected_nodes, expected_errors);
+}
+
+fn testParseMode(
+    mode: Mode,
+    source: [:0]const u8,
+    expected_tokens: []const Token.Tag,
+    expected_nodes: []const Node.Tag,
+    expected_errors: []const AstError.Tag,
+) !void {
     const gpa = std.testing.allocator;
-    var tree: Ast = try .parse(gpa, source, .{ .mode = .q });
+    var tree: Ast = try .parse(gpa, source, .{ .mode = mode });
     defer tree.deinit(gpa);
 
     const actual_errors = try gpa.alloc(AstError.Tag, tree.errors.len);
@@ -1584,6 +1639,10 @@ fn testParse(
     try std.testing.expectEqualSlices(Token.Tag, expected_tokens, tree.tokens.items(.tag)[0 .. tree.tokens.len - 1]);
     try std.testing.expect(tree.tokens.items(.tag)[tree.tokens.len - 1] == .eof);
 
-    try std.testing.expectEqualSlices(Node.Tag, expected_nodes, tree.nodes.items(.tag)[1..]);
-    try std.testing.expect(tree.nodes.items(.tag)[0] == .root);
+    if (tree.errors.len == 0) {
+        try std.testing.expectEqualSlices(Node.Tag, expected_nodes, tree.nodes.items(.tag)[1..]);
+        try std.testing.expect(tree.nodes.items(.tag)[0] == .root);
+    } else {
+        try std.testing.expectEqualSlices(Node.Tag, expected_nodes, &.{});
+    }
 }

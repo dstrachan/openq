@@ -138,12 +138,14 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Alloca
         .extra_data = .empty,
         .scratch = .empty,
         .mode = options.mode,
+        .ends_expression = .empty,
     };
     defer parser.tokens.deinit(gpa);
     defer parser.errors.deinit(gpa);
     defer parser.nodes.deinit(gpa);
     defer parser.extra_data.deinit(gpa);
     defer parser.scratch.deinit(gpa);
+    defer parser.ends_expression.deinit(gpa);
 
     // TODO: Estimate tokens/nodes based on source len
     const estimated_token_count = (source.len + 2) / 2;
