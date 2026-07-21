@@ -735,100 +735,101 @@ pub const Node = struct {
 
         /// The `main_token` field is the `:` token.
         colon,
-        /// The `main_token` field is the `::` token.
-        colon_colon,
         /// The `main_token` field is the `+` token.
         plus,
-        /// The `main_token` field is the `+:` token.
-        plus_colon,
         /// The `main_token` field is the `-` token.
         minus,
-        /// The `main_token` field is the `-:` token.
-        minus_colon,
         /// The `main_token` field is the `*` token.
         asterisk,
-        /// The `main_token` field is the `*:` token.
-        asterisk_colon,
         /// The `main_token` field is the `%` token.
         percent,
-        /// The `main_token` field is the `%:` token.
-        percent_colon,
         /// The `main_token` field is the `&` token.
         ampersand,
-        /// The `main_token` field is the `&:` token.
-        ampersand_colon,
         /// The `main_token` field is the `|` token.
         pipe,
-        /// The `main_token` field is the `|:` token.
-        pipe_colon,
         /// The `main_token` field is the `^` token.
         caret,
-        /// The `main_token` field is the `^:` token.
-        caret_colon,
         /// The `main_token` field is the `=` token.
         equal,
-        /// The `main_token` field is the `=:` token.
-        equal_colon,
         /// The `main_token` field is the `<` token.
         l_angle_bracket,
-        /// The `main_token` field is the `<:` token.
-        l_angle_bracket_colon,
         /// The `main_token` field is the `<=` token.
         l_angle_bracket_equal,
         /// The `main_token` field is the `<>` token.
         l_angle_bracket_r_angle_bracket,
         /// The `main_token` field is the `>` token.
         r_angle_bracket,
-        /// The `main_token` field is the `>:` token.
-        r_angle_bracket_colon,
         /// The `main_token` field is the `>=` token.
         r_angle_bracket_equal,
         /// The `main_token` field is the `$` token.
         dollar,
-        /// The `main_token` field is the `$:` token.
-        dollar_colon,
         /// The `main_token` field is the `,` token.
         comma,
-        /// The `main_token` field is the `,:` token.
-        comma_colon,
         /// The `main_token` field is the `#` token.
         hash,
-        /// The `main_token` field is the `#:` token.
-        hash_colon,
         /// The `main_token` field is the `_` token.
         underscore,
-        /// The `main_token` field is the `_:` token.
-        underscore_colon,
         /// The `main_token` field is the `~` token.
         tilde,
-        /// The `main_token` field is the `~:` token.
-        tilde_colon,
         /// The `main_token` field is the `!` token.
         bang,
-        /// The `main_token` field is the `!:` token.
-        bang_colon,
         /// The `main_token` field is the `?` token.
         question_mark,
-        /// The `main_token` field is the `?:` token.
-        question_mark_colon,
         /// The `main_token` field is the `@` token.
         at,
-        /// The `main_token` field is the `@:` token.
-        at_colon,
         /// The `main_token` field is the `.` token.
         dot,
-        /// The `main_token` field is the `.:` token.
-        dot_colon,
         /// The `main_token` field is the `0:` token.
         zero_colon,
-        /// The `main_token` field is the `0::` token.
-        zero_colon_colon,
         /// The `main_token` field is the `1:` token.
         one_colon,
-        /// The `main_token` field is the `1::` token.
-        one_colon_colon,
         /// The `main_token` field is the `2:` token.
         two_colon,
+
+        /// The `main_token` field is the `::` token.
+        colon_colon,
+        /// The `main_token` field is the `+:` token.
+        plus_colon,
+        /// The `main_token` field is the `-:` token.
+        minus_colon,
+        /// The `main_token` field is the `*:` token.
+        asterisk_colon,
+        /// The `main_token` field is the `%:` token.
+        percent_colon,
+        /// The `main_token` field is the `&:` token.
+        ampersand_colon,
+        /// The `main_token` field is the `|:` token.
+        pipe_colon,
+        /// The `main_token` field is the `^:` token.
+        caret_colon,
+        /// The `main_token` field is the `=:` token.
+        equal_colon,
+        /// The `main_token` field is the `<:` token.
+        l_angle_bracket_colon,
+        /// The `main_token` field is the `>:` token.
+        r_angle_bracket_colon,
+        /// The `main_token` field is the `$:` token.
+        dollar_colon,
+        /// The `main_token` field is the `,:` token.
+        comma_colon,
+        /// The `main_token` field is the `#:` token.
+        hash_colon,
+        /// The `main_token` field is the `_:` token.
+        underscore_colon,
+        /// The `main_token` field is the `~:` token.
+        tilde_colon,
+        /// The `main_token` field is the `!:` token.
+        bang_colon,
+        /// The `main_token` field is the `?:` token.
+        question_mark_colon,
+        /// The `main_token` field is the `@:` token.
+        at_colon,
+        /// The `main_token` field is the `.:` token.
+        dot_colon,
+        /// The `main_token` field is the `0::` token.
+        zero_colon_colon,
+        /// The `main_token` field is the `1::` token.
+        one_colon_colon,
 
         /// `expr'`.
         ///
