@@ -271,6 +271,7 @@ pub fn extraData(tree: Ast, index: ExtraIndex, comptime T: type) T {
     var result: T = undefined;
     inline for (fields, 0..) |field, i| {
         @field(result, field.name) = switch (field.type) {
+            bool => tree.extra_data[@intFromEnum(index) + i] == 1,
             Node.Index,
             Node.OptionalIndex,
             OptionalTokenIndex,
@@ -357,7 +358,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .table_literal,
         => return tree.nodeMainToken(n) - end_offset,
 
-        .function => return tree.nodeMainToken(n) - end_offset,
+        .lambda => return tree.nodeMainToken(n) - end_offset,
 
         .expr_block => return tree.nodeMainToken(n) - end_offset,
 
@@ -457,7 +458,7 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         },
         .table_literal => return tree.nodeData(n).extra_and_token[1] + end_offset,
 
-        .function => return tree.nodeData(n).extra_and_token[1] + end_offset,
+        .lambda => return tree.nodeData(n).extra_and_token[1] + end_offset,
 
         .expr_block => {
             const nodes = tree.extraDataSlice(tree.nodeData(n).extra_range, Node.Index);
@@ -719,11 +720,11 @@ pub const Node = struct {
         /// `{[]expr}`.
         ///
         /// The `data` field is a `.extra_and_token`:
-        ///   1. a `ExtraIndex` to a `Function`.
+        ///   1. a `ExtraIndex` to a `Lambda`.
         ///   2. a `TokenIndex` to the `}` token.
         ///
         /// The `main_token` field is the `{` token.
-        function,
+        lambda,
 
         /// `[expr]`.
         ///
@@ -963,10 +964,11 @@ pub const Node = struct {
         end: ExtraIndex,
     };
 
-    pub const Function = struct {
+    pub const Lambda = struct {
         params_start: ExtraIndex,
         body_start: ExtraIndex,
         body_end: ExtraIndex,
+        trailing_semicolon: bool,
     };
 
     pub const Table = struct {

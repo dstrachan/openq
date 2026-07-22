@@ -10,6 +10,7 @@ const Symbol = Value.Symbol;
 const UnaryPrimitive = Value.UnaryPrimitive;
 const Operator = Value.Operator;
 const Iterator = Value.Iterator;
+const Compiler = q.Compiler;
 const parseNumber = q.parseNumber;
 const parseLong = q.parseLong;
 const parseFloat = q.parseFloat;
@@ -163,7 +164,11 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         .list => unreachable,
         .table_literal => unreachable,
 
-        .function => unreachable,
+        .lambda => {
+            var compiler: Compiler = .init(vm, tree);
+            defer compiler.deinit();
+            return compiler.compile(node);
+        },
 
         .expr_block => unreachable,
 

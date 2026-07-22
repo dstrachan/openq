@@ -138,6 +138,7 @@ fn addExtra(p: *Parse, extra: anytype) Allocator.Error!ExtraIndex {
     const result: ExtraIndex = @enumFromInt(p.extra_data.items.len);
     inline for (info.fields) |field| {
         const data: u32 = switch (field.type) {
+            bool => @intFromBool(@field(extra, field.name)),
             Node.Index,
             Node.OptionalIndex,
             OptionalTokenIndex,
@@ -145,7 +146,7 @@ fn addExtra(p: *Parse, extra: anytype) Allocator.Error!ExtraIndex {
             => @intFromEnum(@field(extra, field.name)),
             TokenIndex,
             => @field(extra, field.name),
-            else => @compileError("unexpected field type"),
+            else => @compileError("unexpected field type - " ++ @typeName(field.type)),
         };
         p.extra_data.appendAssumeCapacity(data);
     }
@@ -330,7 +331,7 @@ fn parseNoun(p: *Parse, comptime sql_identifier: ?SqlIdentifier) !Node.OptionalI
         .r_paren => return p.fail(.expected_expr),
         .l_bracket => try p.parseBlock(),
         .r_bracket => return p.fail(.expected_expr),
-        .l_brace => try p.parseFunction(),
+        .l_brace => try p.parseLambda(),
         .r_brace => return p.fail(.expected_expr),
         .semicolon => unreachable,
 
@@ -787,13 +788,13 @@ fn parseBlock(p: *Parse) !Node.Index {
     });
 }
 
-fn parseFunction(p: *Parse) !Node.Index {
+fn parseLambda(p: *Parse) !Node.Index {
     const l_brace = try p.assertToken(.l_brace);
     try p.ends_expression.append(p.gpa, .r_brace);
     defer _ = p.ends_expression.pop();
 
-    const function_index = try p.reserveNode(.function);
-    errdefer p.unreserveNode(function_index);
+    const lambda_index = try p.reserveNode(.lambda);
+    errdefer p.unreserveNode(lambda_index);
 
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
@@ -803,10 +804,14 @@ fn parseFunction(p: *Parse) !Node.Index {
         try p.ends_expression.append(p.gpa, .r_bracket);
         defer _ = p.ends_expression.pop();
 
-        while (p.tokenTag(p.tok_i) != .r_bracket) {
-            const expr = try p.expectExpr(null);
-            try p.scratch.append(p.gpa, expr);
-            _ = try p.eatToken(.semicolon) orelse break;
+        if (p.tokenTag(p.tok_i) != .r_bracket) {
+            while (true) {
+                const expr = try p.expectExpr(null);
+                try p.scratch.append(p.gpa, expr);
+                _ = try p.eatToken(.semicolon) orelse break;
+            }
+        } else {
+            try p.scratch.append(p.gpa, try p.empty());
         }
         _ = try p.expectToken(.r_bracket);
     }
@@ -817,20 +822,22 @@ fn parseFunction(p: *Parse) !Node.Index {
         if (expr.unwrap()) |node| try p.scratch.append(p.gpa, node);
         _ = try p.eatToken(.semicolon) orelse break;
     }
+    const trailing_semicolon = p.tokenTag(p.tok_i - 1) == .semicolon;
     const r_brace = try p.expectToken(.r_brace);
 
     const params = try p.listToSpan(p.scratch.items[params_top..body_top]);
     const body = try p.listToSpan(p.scratch.items[body_top..]);
-    const function: Node.Function = .{
+    const lambda: Node.Lambda = .{
         .params_start = params.start,
         .body_start = body.start,
         .body_end = body.end,
+        .trailing_semicolon = trailing_semicolon,
     };
-    return p.setNode(function_index, .{
-        .tag = .function,
+    return p.setNode(lambda_index, .{
+        .tag = .lambda,
         .main_token = l_brace,
         .data = .{ .extra_and_token = .{
-            try p.addExtra(function),
+            try p.addExtra(lambda),
             r_brace,
         } },
     });
