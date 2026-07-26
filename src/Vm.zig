@@ -11,13 +11,10 @@ const UnaryPrimitive = Value.UnaryPrimitive;
 const Operator = Value.Operator;
 const Iterator = Value.Iterator;
 const Compiler = q.Compiler;
-const parseNumber = q.parseNumber;
-const parseLong = q.parseLong;
-const parseFloat = q.parseFloat;
 
 const Vm = @This();
 
-const Error = Allocator.Error || std.fmt.ParseIntError;
+const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error;
 
 io: Io,
 gpa: Allocator,
@@ -133,9 +130,278 @@ fn getIterator(vm: *Vm, iterator: Iterator) *Value {
     return vm.iterators[@intFromEnum(iterator)].ref();
 }
 
-pub fn evalTree(vm: *Vm, tree: *const Ast) !*Value {
+fn parseTree(vm: *Vm, tree: *const Ast) !*Value {
     vm.tree = tree;
     return vm.parseNode(.root);
+}
+
+pub fn evalTree(vm: *Vm, tree: *const Ast) !*Value {
+    const value = try vm.parseTree(tree);
+    defer value.deref(vm.gpa);
+    return vm.eval(value);
+}
+
+fn push(vm: *Vm, value: *Value) void {
+    vm.stack.append(vm.gpa, value) catch @panic("oom");
+}
+
+fn applyImpl(vm: *Vm, func: *Value, args: []*Value) !*Value {
+    assert(args.len > 0);
+    switch (func.as) {
+        .list => unreachable,
+        .boolean => unreachable,
+        .boolean_list => unreachable,
+        .long => unreachable,
+        .long_list => unreachable,
+        .float => unreachable,
+        .float_list => unreachable,
+        .char => unreachable,
+        .char_list => unreachable,
+        .symbol => unreachable,
+        .symbol_list => unreachable,
+        .dict => unreachable,
+        .lambda => unreachable,
+        .unary_primitive => |unary_primitive| {
+            if (unary_primitive == .list and args.len > 1) return vm.enlist(args);
+            if (args.len > 1) return error.rank;
+            switch (unary_primitive) {
+                .empty => unreachable, // TODO: This might not be unreachable.
+                inline else => |t| return @field(q.unary_primitives, @tagName(t))(vm, args[0]),
+            }
+        },
+        .operator => |operator| {
+            if (args.len > 2) return error.rank;
+            if (args.len == 1) {
+                var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
+                defer values.deinit(vm.gpa);
+                errdefer for (values.items) |v| v.deref(vm.gpa);
+
+                values.appendAssumeCapacity(args[0].ref());
+
+                const callee = func.ref();
+                errdefer callee.deref(vm.gpa);
+
+                return vm.createValue(.projection, .{
+                    .callee = callee,
+                    .args = values.toOwnedSliceAssert(),
+                });
+            }
+
+            const is_first_empty = args[0].isEmpty();
+            const is_second_empty = args[1].isEmpty();
+            if (is_first_empty and is_second_empty) {
+                return func.ref();
+            } else if (is_first_empty or is_second_empty) {
+                var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 2);
+                defer values.deinit(vm.gpa);
+                errdefer for (values.items) |v| v.deref(vm.gpa);
+
+                values.appendAssumeCapacity(args[0].ref());
+                values.appendAssumeCapacity(args[1].ref());
+
+                const callee = func.ref();
+                errdefer callee.deref(vm.gpa);
+
+                return vm.createValue(.projection, .{
+                    .callee = callee,
+                    .args = values.toOwnedSliceAssert(),
+                });
+            } else {
+                switch (operator) {
+                    inline else => |t| return @field(q.operators, @tagName(t))(vm, args[0], args[1]),
+                }
+            }
+        },
+        .iterator => unreachable,
+        .projection => |projection| {
+            const rank = projection.callee.rank();
+            const args_len = len: {
+                var len: usize = projection.args.len;
+                for (projection.args) |a| {
+                    if (a.isEmpty()) len -= 1;
+                }
+                break :len len;
+            } + args.len;
+            if (args_len > rank) return error.rank;
+
+            var new_args: std.ArrayList(*Value) = try .initCapacity(vm.gpa, args_len);
+            defer new_args.deinit(vm.gpa);
+
+            var j: usize = 0;
+            for (0..args_len) |i| {
+                if (i < projection.args.len) {
+                    if (projection.args[i].isEmpty()) {
+                        new_args.appendAssumeCapacity(args[j]);
+                        j += 1;
+                    } else {
+                        new_args.appendAssumeCapacity(projection.args[i]);
+                    }
+                } else {
+                    new_args.appendAssumeCapacity(args[j]);
+                    j += 1;
+                }
+            }
+
+            return vm.applyImpl(projection.callee, new_args.items);
+        },
+        .each => unreachable,
+        .over => unreachable,
+        .scan => unreachable,
+        .each_prior => unreachable,
+        .each_right => unreachable,
+        .each_left => unreachable,
+    }
+}
+
+pub fn enlist(vm: *Vm, args: []*Value) !*Value {
+    const is_vector = is_vector: {
+        const first_type = switch (args[0].as) {
+            .list,
+            .boolean_list,
+            .long_list,
+            .float_list,
+            .char_list,
+            .symbol_list,
+            .lambda,
+            .unary_primitive,
+            .operator,
+            .iterator,
+            .projection,
+            .each,
+            .over,
+            .scan,
+            .each_prior,
+            .each_right,
+            .each_left,
+            => break :is_vector false,
+            .boolean, .long, .float, .char, .symbol, .dict => @intFromEnum(args[0].as),
+        };
+        break :is_vector for (args[1..]) |a| {
+            if (first_type != @intFromEnum(a.as)) break false;
+        } else true;
+    };
+    if (is_vector) {
+        switch (args[0].as) {
+            .list,
+            .boolean_list,
+            .long_list,
+            .float_list,
+            .char_list,
+            .symbol_list,
+            .lambda,
+            .unary_primitive,
+            .operator,
+            .iterator,
+            .projection,
+            .each,
+            .over,
+            .scan,
+            .each_prior,
+            .each_right,
+            .each_left,
+            => unreachable,
+            .boolean => {
+                const value = try vm.allocValue(.boolean_list, args.len);
+                errdefer comptime unreachable;
+                for (value.as.boolean_list, args) |*v, a| v.* = a.as.boolean;
+                return value;
+            },
+            .long => {
+                const value = try vm.allocValue(.long_list, args.len);
+                errdefer comptime unreachable;
+                for (value.as.long_list, args) |*v, a| v.* = a.as.long;
+                return value;
+            },
+            .float => {
+                const value = try vm.allocValue(.float_list, args.len);
+                errdefer comptime unreachable;
+                for (value.as.float_list, args) |*v, a| v.* = a.as.float;
+                return value;
+            },
+            .char => {
+                const value = try vm.allocValue(.char_list, args.len);
+                errdefer comptime unreachable;
+                for (value.as.char_list, args) |*v, a| v.* = a.as.char;
+                return value;
+            },
+            .symbol => {
+                const value = try vm.allocValue(.symbol_list, args.len);
+                errdefer comptime unreachable;
+                for (value.as.symbol_list, args) |*v, a| v.* = a.as.symbol;
+                return value;
+            },
+            .dict => return error.nyi,
+        }
+    } else {
+        const value = try vm.allocValue(.list, args.len);
+        errdefer comptime unreachable;
+        for (value.as.list, args) |*v, a| v.* = a.ref();
+        return value;
+    }
+}
+
+pub fn parse(vm: *Vm, x: *Value) !*Value {
+    if (x.as != .char_list) return error.type;
+
+    const slice = try vm.gpa.dupeSentinel(u8, x.as.char_list, 0);
+    defer vm.gpa.free(slice);
+
+    var tree: Ast = try .parse(vm.gpa, slice, .{
+        .skip_comments = false,
+        .mode = .q,
+    });
+    defer tree.deinit(vm.gpa);
+    if (tree.errors.len > 0) {
+        try q.printAstErrorsToStderr(vm.gpa, vm.io, tree, "<parse>", .auto);
+        return error.parse;
+    }
+
+    return vm.parseTree(&tree);
+}
+
+fn eval(vm: *Vm, x: *Value) !*Value {
+    std.log.debug("eval: {f}", .{x.fmt(vm)});
+    switch (x.as) {
+        .list => |value| {
+            if (value.len == 0) return vm.getConstant(.empty_list);
+            if (value.len == 1 and value[0].as == .symbol_list) return value[0].ref();
+
+            if (value[0].as == .char and value[0].as.char == ';') {
+                for (value[1 .. value.len - 1]) |val| {
+                    const v = try vm.eval(val);
+                    defer v.deref(vm.gpa);
+                }
+                return vm.eval(value[value.len - 1]);
+            }
+
+            if (value[0].as == .operator and value[0].as.operator == .assign) unreachable;
+
+            var it = std.mem.reverseIterator(value);
+            while (it.next()) |entry| vm.push(try vm.eval(entry));
+
+            const stack = vm.stack.items[vm.stack.items.len - value.len ..];
+            defer vm.stack.shrinkRetainingCapacity(vm.stack.items.len - value.len);
+            defer for (stack) |v| v.deref(vm.gpa);
+
+            // TODO: Remove reverse
+            std.mem.reverse(*Value, stack);
+            const func = stack[0];
+            const args = stack[1..];
+
+            return vm.applyImpl(func, args);
+        },
+        .symbol => |identifier| {
+            // TODO: Namespaces
+            if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
+                return vm.state.as.dict.values.as.list[index].ref();
+            } else return error.identifier; // TODO: Improve error message
+        },
+        .symbol_list => |value| {
+            assert(value.len == 1);
+            return vm.createValue(.symbol, value[0]);
+        },
+        else => return x.ref(),
+    }
 }
 
 fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
@@ -230,8 +496,33 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         .backslash_colon,
         => unreachable,
 
-        .call => unreachable,
-        .apply_unary => unreachable,
+        .call => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            assert(nodes.len > 1);
+
+            var values: std.ArrayList(*Value) = try .initCapacity(gpa, nodes.len);
+            defer values.deinit(gpa);
+            errdefer for (values.items) |v| v.deref(gpa);
+
+            values.appendAssumeCapacity(try vm.parseNode(nodes[0]));
+            if (nodes.len == 2 and tree.nodeTag(nodes[1]) == .empty) {
+                values.appendAssumeCapacity(vm.getUnaryPrimitive(.identity));
+            } else for (nodes[1..]) |n| values.appendAssumeCapacity(try vm.parseNode(n));
+
+            return vm.createValue(.list, values.toOwnedSliceAssert());
+        },
+        .apply_unary => {
+            const lhs, const rhs = tree.nodeData(node).node_and_node;
+
+            var values: std.ArrayList(*Value) = try .initCapacity(gpa, 2);
+            defer values.deinit(gpa);
+            errdefer for (values.items) |v| v.deref(gpa);
+
+            values.appendAssumeCapacity(try vm.parseUnaryNode(lhs));
+            values.appendAssumeCapacity(try vm.parseNode(rhs));
+
+            return vm.createValue(.list, values.toOwnedSliceAssert());
+        },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Ast.Node.Index = @enumFromInt(tree.nodeMainToken(node));
@@ -250,35 +541,104 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
             return vm.createValue(.list, values.toOwnedSliceAssert());
         },
 
-        .number_literal => {
+        .number_literal => return vm.createNumberLiteral(tree, node),
+        .number_list_literal => unreachable,
+        .string_literal => {
             const main_token = tree.nodeMainToken(node);
             const slice = tree.tokenSlice(main_token);
-            switch (slice[slice.len - 1]) {
-                'b' => switch (slice.len - 1) {
-                    0 => unreachable,
-                    1 => return vm.createValue(.boolean, slice[0] == '1'),
-                    else => {
-                        const boolean_list = try vm.allocValue(.boolean_list, slice.len - 1);
-                        errdefer comptime unreachable;
-                        for (boolean_list.as.boolean_list, slice[0 .. slice.len - 1]) |*b, c| b.* = c == '1';
-                        return boolean_list;
+
+            const buffer = try vm.gpa.alloc(u8, slice.len - 2);
+            defer vm.gpa.free(buffer);
+
+            var fixed: Io.Writer = .fixed(buffer);
+            const w = &fixed;
+
+            var index: usize = 1;
+            while (true) {
+                const b = slice[index];
+                switch (b) {
+                    '\\' => {
+                        switch (slice[index + 1]) {
+                            't' => try w.writeByte('\t'),
+                            'n' => try w.writeByte('\n'),
+                            'r' => try w.writeByte('\r'),
+                            '\\' => try w.writeByte('\\'),
+                            else => unreachable,
+                        }
+                        index += 2;
                     },
-                },
-                'j' => return vm.createValue(.long, try parseLong(slice[0 .. slice.len - 1])),
-                'f' => return vm.createValue(.float, try parseFloat(slice[0 .. slice.len - 1])),
-                else => return switch (try parseNumber(slice)) {
-                    .long => |v| vm.createValue(.long, v),
-                    .float => |v| vm.createValue(.float, v),
-                },
+                    '"' => break,
+                    else => {
+                        try w.writeByte(b);
+                        index += 1;
+                    },
+                }
             }
+
+            const buffered = fixed.buffered();
+            if (buffered.len == 1) return vm.createValue(.char, buffered[0]);
+            const char_list = try vm.allocValue(.char_list, buffered.len);
+            errdefer comptime unreachable;
+            @memcpy(char_list.as.char_list, buffered);
+            return char_list;
         },
-        .number_list_literal,
-        .string_literal,
-        .symbol_literal,
-        .symbol_list_literal,
-        .identifier,
-        .builtin,
-        => unreachable,
+        .symbol_literal => {
+            const main_token = tree.nodeMainToken(node);
+            const slice = tree.tokenSlice(main_token);
+            const symbol = try vm.intern(slice[1..]);
+            const symbol_list = try vm.allocValue(.symbol_list, 1);
+            errdefer comptime unreachable;
+            symbol_list.as.symbol_list[0] = symbol;
+            return symbol_list;
+        },
+        .symbol_list_literal => unreachable,
+        .identifier => {
+            const main_token = tree.nodeMainToken(node);
+            const slice = tree.tokenSlice(main_token);
+            const symbol = try vm.intern(slice);
+            return vm.createValue(.symbol, symbol);
+        },
+        .builtin => {
+            const main_token = tree.nodeMainToken(node);
+            const slice = tree.tokenSlice(main_token);
+            const builtin = std.meta.stringToEnum(Ast.Node.Builtin, slice).?;
+            return switch (builtin) {
+                .flip => unreachable,
+                .neg => unreachable,
+                .first => vm.getUnaryPrimitive(.first),
+                .reciprocal => unreachable,
+                .where => unreachable,
+                .reverse => unreachable,
+                .null => unreachable,
+                .group => unreachable,
+                .asc => unreachable,
+                .desc => unreachable,
+                .string => unreachable,
+                .enlist => vm.getUnaryPrimitive(.list),
+                .count => unreachable,
+                .lower => unreachable,
+                .not => unreachable,
+                .key => unreachable,
+                .distinct => unreachable,
+                .type => unreachable,
+                .value => vm.getUnaryPrimitive(.value),
+
+                .parse => blk: {
+                    var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
+                    defer values.deinit(vm.gpa);
+
+                    const neg_five = try vm.createValue(.long, -5);
+                    errdefer neg_five.deref(vm.gpa);
+
+                    values.appendAssumeCapacity(neg_five);
+
+                    break :blk vm.createValue(.projection, .{
+                        .callee = vm.getOperator(.dict),
+                        .args = values.toOwnedSliceAssert(),
+                    });
+                },
+            };
+        },
 
         .select,
         .exec,
@@ -287,6 +647,34 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         .delete_cols,
         => unreachable,
     }
+}
+
+fn parseUnaryNode(vm: *Vm, node: Ast.Node.Index) !*Value {
+    const tree = vm.tree;
+
+    return switch (tree.nodeTag(node)) {
+        .bang => vm.getUnaryPrimitive(.key),
+        .hash => vm.getUnaryPrimitive(.count),
+        .dollar => vm.getUnaryPrimitive(.string),
+        .percent => vm.getUnaryPrimitive(.reciprocal),
+        .ampersand => vm.getUnaryPrimitive(.where),
+        .asterisk => vm.getUnaryPrimitive(.first),
+        .plus => vm.getUnaryPrimitive(.flip),
+        .comma => vm.getUnaryPrimitive(.list),
+        .minus => vm.getUnaryPrimitive(.neg),
+        .dot => vm.getUnaryPrimitive(.value),
+        .colon => vm.getUnaryPrimitive(.identity),
+        .l_angle_bracket => vm.getUnaryPrimitive(.asc),
+        .equal => vm.getUnaryPrimitive(.group),
+        .r_angle_bracket => vm.getUnaryPrimitive(.desc),
+        .question_mark => vm.getUnaryPrimitive(.distinct),
+        .at => vm.getUnaryPrimitive(.type),
+        .caret => vm.getUnaryPrimitive(.null),
+        .underscore => vm.getUnaryPrimitive(.lower),
+        .pipe => vm.getUnaryPrimitive(.reverse),
+        .tilde => vm.getUnaryPrimitive(.not),
+        else => vm.parseNode(node),
+    };
 }
 
 pub fn createValue(vm: *Vm, comptime tag: Value.Type, value: @FieldType(Value.Union, @tagName(tag))) !*Value {
@@ -319,5 +707,38 @@ pub fn intern(vm: *Vm, bytes: []const u8) !Symbol {
         gop.key_ptr.* = str_index;
         try vm.string_bytes.append(vm.gpa, 0);
         return @enumFromInt(str_index);
+    }
+}
+
+pub fn internedString(vm: *Vm, index: Symbol) [:0]const u8 {
+    const slice = vm.string_bytes.items[@intFromEnum(index)..];
+    return slice[0..std.mem.findScalar(u8, slice, 0).? :0];
+}
+
+pub fn createNumberLiteral(vm: *Vm, tree: *const Ast, node: Ast.Node.Index) !*Value {
+    assert(tree.nodeTag(node) == .number_literal);
+    const main_token = tree.nodeMainToken(node);
+    const slice = tree.tokenSlice(main_token);
+    return vm.createNumberLiteralSlice(slice);
+}
+
+pub fn createNumberLiteralSlice(vm: *Vm, slice: []const u8) !*Value {
+    switch (slice[slice.len - 1]) {
+        'b' => switch (slice.len - 1) {
+            0 => unreachable,
+            1 => return vm.createValue(.boolean, slice[0] == '1'),
+            else => {
+                const boolean_list = try vm.allocValue(.boolean_list, slice.len - 1);
+                errdefer comptime unreachable;
+                for (boolean_list.as.boolean_list, slice[0 .. slice.len - 1]) |*b, c| b.* = c == '1';
+                return boolean_list;
+            },
+        },
+        'j' => return vm.createValue(.long, try q.parseLong(slice[0 .. slice.len - 1])),
+        'f' => return vm.createValue(.float, try q.parseFloat(slice[0 .. slice.len - 1])),
+        else => return switch (try q.parseNumber(slice)) {
+            .long => |v| vm.createValue(.long, v),
+            .float => |v| vm.createValue(.float, v),
+        },
     }
 }

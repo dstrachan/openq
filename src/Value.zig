@@ -70,6 +70,15 @@ pub fn deref(value: *Value, gpa: Allocator) void {
     }
 }
 
+pub fn isEmpty(self: *const Value) bool {
+    return self.as == .unary_primitive and self.as.unary_primitive == .empty;
+}
+
+pub fn eql(a: *Value, b: *Value) bool {
+    if (@as(Type, a.as) != @as(Type, b.as)) return false;
+    unreachable;
+}
+
 const Data = struct { value: *Value, vm: *Vm };
 
 pub fn fmt(value: *Value, vm: *Vm) std.fmt.Alt(Data, format) {
@@ -105,9 +114,55 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
                 try w.print("{d}", .{value});
             }
         },
+        .char => |value| try w.print("\"{c}\"", .{value}),
+        .char_list => |value| {
+            if (value.len == 1) try w.writeByte(',');
+            try w.print("\"{f}\"", .{std.zig.fmtString(value)});
+        },
+        .symbol => |value| try w.print("`{s}", .{data.vm.internedString(value)}),
+        .symbol_list => |value| {
+            if (value.len == 1) try w.writeByte(',');
+            for (value) |v| try w.print("`{s}", .{data.vm.internedString(v)});
+        },
+        .lambda => |value| try w.print("{s}", .{value.source}),
+        .unary_primitive => |value| try w.print("{f}", .{value}),
         .operator => |value| try w.print("{f}", .{value}),
+        .projection => |value| {
+            try w.print("{f}[{f}", .{ value.callee.fmt(data.vm), value.args[0].fmt(data.vm) });
+            for (value.args[1..]) |v| try w.print(";{f}", .{v.fmt(data.vm)});
+            try w.writeByte(']');
+        },
         inline else => |_, t| @panic("NYI " ++ @tagName(t)),
     }
+}
+
+pub fn rank(value: *Value) usize {
+    // TODO: Should non-applicable values return 'type?
+    return switch (value.as) {
+        .list => 1,
+        .boolean => 1,
+        .boolean_list => 1,
+        .long => 1,
+        .long_list => 1,
+        .float => 1,
+        .float_list => 1,
+        .char => 1,
+        .char_list => 1,
+        .symbol => 1,
+        .symbol_list => 1,
+        .dict => 1,
+        .lambda => |lambda| lambda.params.len,
+        .unary_primitive => 1,
+        .operator => 2,
+        .iterator => 1,
+        .projection => |projection| projection.callee.rank(),
+        .each => 1,
+        .over => 1,
+        .scan => 1,
+        .each_prior => 1,
+        .each_right => 1,
+        .each_left => 1,
+    };
 }
 
 pub const Type = enum(i8) {

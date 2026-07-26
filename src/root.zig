@@ -15,6 +15,8 @@ pub const Parse = @import("Parse.zig");
 pub const Vm = @import("Vm.zig");
 pub const Value = @import("Value.zig");
 pub const Compiler = @import("Compiler.zig");
+pub const operators = @import("functions/operators.zig");
+pub const unary_primitives = @import("functions/unary_primitives.zig");
 
 pub fn printAstErrorsToStderr(gpa: Allocator, io: Io, tree: Ast, path: []const u8, color: Color) !void {
     var wip_errors: ErrorBundle.Wip = undefined;

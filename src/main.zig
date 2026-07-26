@@ -195,6 +195,19 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
                 try q.printAstErrorsToStderr(gpa, io, tree, "<stdin>", .auto);
                 continue;
             }
+
+            const value = vm.evalTree(&tree) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidCharacter => return error.InvalidCharacter,
+                else => {
+                    std.debug.print("'{t}\n", .{err});
+                    continue;
+                },
+            };
+            defer value.deref(gpa);
+
+            try stdout.print("{f}\n", .{value.fmt(vm)});
+            try stdout.flush();
         }
     } else {
         const len = try stdin.streamRemaining(&buffer.writer);

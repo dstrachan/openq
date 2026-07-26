@@ -1018,9 +1018,23 @@ pub const Node = struct {
         neg,
         first,
         reciprocal,
+        where,
+        reverse,
+        null,
+        group,
+        asc,
+        desc,
+        string,
         enlist,
+        count,
+        lower,
         not,
+        key,
+        distinct,
         type,
+        value,
+
+        parse,
     };
 };
 
