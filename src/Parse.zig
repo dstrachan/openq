@@ -524,12 +524,10 @@ fn parseCall(p: *Parse, lhs: Node.Index) !Node.Index {
 
     try p.scratch.append(p.gpa, lhs);
 
-    if (p.tokenTag(p.tok_i) != .r_bracket) {
-        while (true) {
-            const expr = try p.parseExpr(null);
-            try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
-            _ = try p.eatToken(.semicolon) orelse break;
-        }
+    while (true) {
+        const expr = try p.parseExpr(null);
+        try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
+        _ = try p.eatToken(.semicolon) orelse break;
     }
     _ = try p.expectToken(.r_bracket);
 
