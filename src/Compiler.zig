@@ -199,7 +199,11 @@ fn compileNode(c: *Compiler, node: Node.Index) !void {
             errdefer number_literal.deref(vm.gpa);
             try c.emitConstant(number_literal);
         },
-        .number_list_literal => unreachable,
+        .number_list_literal => {
+            const number_list_literal = try vm.createNumberListLiteral(tree, node);
+            errdefer number_list_literal.deref(vm.gpa);
+            try c.emitConstant(number_list_literal);
+        },
         .string_literal => unreachable,
         .symbol_literal => unreachable,
         .symbol_list_literal => unreachable,

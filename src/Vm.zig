@@ -542,7 +542,7 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         },
 
         .number_literal => return vm.createNumberLiteral(tree, node),
-        .number_list_literal => unreachable,
+        .number_list_literal => return vm.createNumberListLiteral(tree, node),
         .string_literal => {
             const main_token = tree.nodeMainToken(node);
             const slice = tree.tokenSlice(main_token);
@@ -741,4 +741,59 @@ pub fn createNumberLiteralSlice(vm: *Vm, slice: []const u8) !*Value {
             .float => |v| vm.createValue(.float, v),
         },
     }
+}
+
+pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Ast.Node.Index) !*Value {
+    assert(tree.nodeTag(node) == .number_list_literal);
+    const first_token = tree.nodeMainToken(node);
+    const last_token = tree.nodeData(node).token;
+    const len = last_token - first_token + 1;
+
+    const last_slice = tree.tokenSlice(last_token);
+    switch (last_slice[last_slice.len - 1]) {
+        'j' => {
+            var list: std.ArrayList(i64) = try .initCapacity(vm.gpa, len);
+            defer list.deinit(vm.gpa);
+            for (first_token..last_token) |tok| {
+                const slice = tree.tokenSlice(@intCast(tok));
+                list.appendAssumeCapacity(try q.parseLong(slice));
+            }
+            list.appendAssumeCapacity(try q.parseLong(last_slice[0 .. last_slice.len - 1]));
+            return vm.createValue(.long_list, list.toOwnedSliceAssert());
+        },
+        'f', '.' => {
+            var list: std.ArrayList(f64) = try .initCapacity(vm.gpa, len);
+            defer list.deinit(vm.gpa);
+            for (first_token..last_token) |tok| {
+                const slice = tree.tokenSlice(@intCast(tok));
+                list.appendAssumeCapacity(try q.parseFloat(slice));
+            }
+            list.appendAssumeCapacity(try q.parseFloat(last_slice[0 .. last_slice.len - 1]));
+            return vm.createValue(.float_list, list.toOwnedSliceAssert());
+        },
+        '0'...'9' => {
+            long: {
+                var list: std.ArrayList(i64) = try .initCapacity(vm.gpa, len);
+                defer list.deinit(vm.gpa);
+                for (first_token..last_token + 1) |tok| {
+                    const slice = tree.tokenSlice(@intCast(tok));
+                    const number = q.parseNumber(slice) catch break :long;
+                    switch (number) {
+                        .long => |j| list.appendAssumeCapacity(j),
+                        else => break :long,
+                    }
+                }
+                return vm.createValue(.long_list, list.toOwnedSliceAssert());
+            }
+            var list: std.ArrayList(f64) = try .initCapacity(vm.gpa, len);
+            defer list.deinit(vm.gpa);
+            for (first_token..last_token + 1) |tok| {
+                const slice = tree.tokenSlice(@intCast(tok));
+                list.appendAssumeCapacity(try q.parseFloat(slice));
+            }
+            return vm.createValue(.float_list, list.toOwnedSliceAssert());
+        },
+        else => |c| std.debug.panic("NYI: {c}", .{c}),
+    }
+    unreachable;
 }

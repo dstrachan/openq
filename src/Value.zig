@@ -101,6 +101,14 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             const long: Long = @enumFromInt(value);
             try w.print("{f}", .{long});
         },
+        .long_list => |value| switch (value.len) {
+            0 => try w.writeAll("`long$()"),
+            1 => try w.print(",{f}", .{@as(Long, @enumFromInt(value[0]))}),
+            else => {
+                try w.print("{f}", .{@as(Long, @enumFromInt(value[0]))});
+                for (value[1..]) |v| try w.print(" {f}", .{@as(Long, @enumFromInt(v))});
+            },
+        },
         .float => |value| {
             if (std.math.isNan(value)) {
                 try w.writeAll("0n");
@@ -113,6 +121,55 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             } else {
                 try w.print("{d}", .{value});
             }
+        },
+        .float_list => |value| switch (value.len) {
+            0 => try w.writeAll("`float$()"),
+            1 => {
+                try w.writeByte(',');
+                if (std.math.isNan(value[0])) {
+                    try w.writeAll("0n");
+                } else if (std.math.isNegativeInf(value[0])) {
+                    try w.writeAll("-0w");
+                } else if (std.math.isPositiveInf(value[0])) {
+                    try w.writeAll("0w");
+                } else if (std.math.floor(value[0]) == value[0]) {
+                    try w.print("{d}f", .{value[0]});
+                } else {
+                    try w.print("{d}", .{value[0]});
+                }
+            },
+            else => {
+                var needs_suffix = true;
+                if (std.math.isNan(value[0])) {
+                    try w.writeAll("0n");
+                    needs_suffix = false;
+                } else if (std.math.isNegativeInf(value[0])) {
+                    try w.writeAll("-0w");
+                    needs_suffix = false;
+                } else if (std.math.isPositiveInf(value[0])) {
+                    try w.writeAll("0w");
+                    needs_suffix = false;
+                } else {
+                    try w.print("{d}", .{value[0]});
+                    needs_suffix &= std.math.floor(value[0]) == value[0];
+                }
+                for (value[1..]) |v| {
+                    if (std.math.isNan(v)) {
+                        try w.writeAll(" 0n");
+                        needs_suffix = false;
+                    } else if (std.math.isNegativeInf(v)) {
+                        try w.writeAll(" -0w");
+                        needs_suffix = false;
+                    } else if (std.math.isPositiveInf(v)) {
+                        try w.writeAll(" 0w");
+                        needs_suffix = false;
+                    } else {
+                        try w.print(" {d}", .{v});
+                        needs_suffix &= std.math.floor(v) == v;
+                    }
+                }
+                if (needs_suffix) try w.writeByte('f');
+            },
         },
         .char => |value| try w.print("\"{c}\"", .{value}),
         .char_list => |value| {
