@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 
 const q = @import("root.zig");
 const Ast = q.Ast;
+const Node = Ast.Node;
 const Value = q.Value;
 const Symbol = Value.Symbol;
 const UnaryPrimitive = Value.UnaryPrimitive;
@@ -160,7 +161,7 @@ fn applyImpl(vm: *Vm, func: *Value, args: []*Value) !*Value {
         .symbol => unreachable,
         .symbol_list => unreachable,
         .dict => unreachable,
-        .lambda => unreachable,
+        .lambda => return error.nyi,
         .unary_primitive => |unary_primitive| {
             if (unary_primitive == .list and args.len > 1) return vm.enlist(args);
             if (args.len > 1) return error.rank;
@@ -333,10 +334,25 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .dict => return error.nyi,
         }
     } else {
-        const value = try vm.allocValue(.list, args.len);
-        errdefer comptime unreachable;
-        for (value.as.list, args) |*v, a| v.* = a.ref();
-        return value;
+        const list = try vm.gpa.alloc(*Value, args.len);
+        errdefer {
+            for (list) |v| v.deref(vm.gpa);
+            vm.gpa.free(list);
+        }
+        var is_projection = false;
+        for (list, args) |*v, a| {
+            if (!is_projection and a.isEmpty()) is_projection = true;
+            v.* = a.ref();
+        }
+
+        if (is_projection) {
+            return vm.createValue(.projection, .{
+                .callee = vm.getUnaryPrimitive(.list),
+                .args = list,
+            });
+        } else {
+            return vm.createValue(.list, list);
+        }
     }
 }
 
@@ -404,13 +420,13 @@ fn eval(vm: *Vm, x: *Value) !*Value {
     }
 }
 
-fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
+fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
     const tree = vm.tree;
     const gpa = vm.gpa;
 
     switch (tree.nodeTag(node)) {
         .root => {
-            const nodes = tree.extraDataSlice(tree.nodeData(.root).extra_range, Ast.Node.Index);
+            const nodes = tree.extraDataSlice(tree.nodeData(.root).extra_range, Node.Index);
             assert(nodes.len > 0);
             if (nodes.len == 1) return vm.parseNode(nodes[0]);
 
@@ -423,11 +439,23 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
 
             return vm.createValue(.list, values.toOwnedSliceAssert());
         },
-        .empty => unreachable,
+        .empty => return vm.getUnaryPrimitive(.empty),
 
         .grouped_expression => return vm.parseNode(tree.nodeData(node).node_and_token[0]),
-        .empty_list => unreachable,
-        .list => unreachable,
+        .empty_list => return vm.getConstant(.empty_list),
+        .list => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+            assert(nodes.len > 1);
+
+            var values: std.ArrayList(*Value) = try .initCapacity(gpa, nodes.len + 1);
+            defer values.deinit(gpa);
+            errdefer for (values.items) |v| v.deref(gpa);
+
+            values.appendAssumeCapacity(vm.getUnaryPrimitive(.list));
+            for (nodes) |n| values.appendAssumeCapacity(try vm.parseNode(n));
+
+            return vm.createValue(.list, values.toOwnedSliceAssert());
+        },
         .table_literal => unreachable,
 
         .lambda => {
@@ -497,7 +525,7 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         => unreachable,
 
         .call => {
-            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Ast.Node.Index);
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
             assert(nodes.len > 1);
 
             var values: std.ArrayList(*Value) = try .initCapacity(gpa, nodes.len);
@@ -525,7 +553,7 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
-            const op: Ast.Node.Index = @enumFromInt(tree.nodeMainToken(node));
+            const op: Node.Index = @enumFromInt(tree.nodeMainToken(node));
 
             var values: std.ArrayList(*Value) = try .initCapacity(gpa, 3);
             defer values.deinit(gpa);
@@ -601,7 +629,7 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
         .builtin => {
             const main_token = tree.nodeMainToken(node);
             const slice = tree.tokenSlice(main_token);
-            const builtin = std.meta.stringToEnum(Ast.Node.Builtin, slice).?;
+            const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
             return switch (builtin) {
                 .flip => unreachable,
                 .neg => unreachable,
@@ -649,7 +677,7 @@ fn parseNode(vm: *Vm, node: Ast.Node.Index) Error!*Value {
     }
 }
 
-fn parseUnaryNode(vm: *Vm, node: Ast.Node.Index) !*Value {
+fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
     const tree = vm.tree;
 
     return switch (tree.nodeTag(node)) {
@@ -715,7 +743,7 @@ pub fn internedString(vm: *Vm, index: Symbol) [:0]const u8 {
     return slice[0..std.mem.findScalar(u8, slice, 0).? :0];
 }
 
-pub fn createNumberLiteral(vm: *Vm, tree: *const Ast, node: Ast.Node.Index) !*Value {
+pub fn createNumberLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Value {
     assert(tree.nodeTag(node) == .number_literal);
     const main_token = tree.nodeMainToken(node);
     const slice = tree.tokenSlice(main_token);
@@ -743,7 +771,7 @@ pub fn createNumberLiteralSlice(vm: *Vm, slice: []const u8) !*Value {
     }
 }
 
-pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Ast.Node.Index) !*Value {
+pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Value {
     assert(tree.nodeTag(node) == .number_list_literal);
     const first_token = tree.nodeMainToken(node);
     const last_token = tree.nodeData(node).token;

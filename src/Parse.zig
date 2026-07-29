@@ -685,10 +685,12 @@ fn parseGroup(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    while (p.tokenTag(p.tok_i) != .r_paren) {
-        const expr = try p.parseExpr(null);
-        try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
-        _ = try p.eatToken(.semicolon) orelse break;
+    if (p.tokenTag(p.tok_i) != .r_paren) {
+        while (true) {
+            const expr = try p.parseExpr(null);
+            try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
+            _ = try p.eatToken(.semicolon) orelse break;
+        }
     }
     const r_paren = try p.expectToken(.r_paren);
 

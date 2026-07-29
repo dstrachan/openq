@@ -79,13 +79,22 @@ pub fn eql(a: *Value, b: *Value) bool {
     unreachable;
 }
 
-const Data = struct { value: *Value, vm: *Vm };
+const FmtOptions = struct {
+    skip_empty: bool,
+};
+const Data = struct { value: *Value, vm: *Vm, options: FmtOptions };
 
 pub fn fmt(value: *Value, vm: *Vm) std.fmt.Alt(Data, format) {
-    return .{ .data = .{ .value = value, .vm = vm } };
+    return fmtOptions(value, vm, .{ .skip_empty = false });
+}
+
+pub fn fmtOptions(value: *Value, vm: *Vm, options: FmtOptions) std.fmt.Alt(Data, format) {
+    return .{ .data = .{ .value = value, .vm = vm, .options = options } };
 }
 
 fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
+    if (data.options.skip_empty and data.value.isEmpty()) return;
+
     switch (data.value.as) {
         .list => |value| switch (value.len) {
             0 => try w.writeAll("()"),
@@ -185,8 +194,11 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
         .unary_primitive => |value| try w.print("{f}", .{value}),
         .operator => |value| try w.print("{f}", .{value}),
         .projection => |value| {
-            try w.print("{f}[{f}", .{ value.callee.fmt(data.vm), value.args[0].fmt(data.vm) });
-            for (value.args[1..]) |v| try w.print(";{f}", .{v.fmt(data.vm)});
+            try w.print("{f}[{f}", .{
+                value.callee.fmt(data.vm),
+                value.args[0].fmtOptions(data.vm, .{ .skip_empty = true }),
+            });
+            for (value.args[1..]) |v| try w.print(";{f}", .{v.fmtOptions(data.vm, .{ .skip_empty = true })});
             try w.writeByte(']');
         },
         inline else => |_, t| @panic("NYI " ++ @tagName(t)),
