@@ -253,7 +253,7 @@ fn parseStatements(p: *Parse) !Statements {
 }
 
 fn parseStatement(p: *Parse) !Node.OptionalIndex {
-    assert(p.tok_i == 0 or p.tokenTag(p.tok_i - 1) == .eos);
+    assert(p.tok_i == 0 or p.tokenTag(p.tok_i - 1) == .eos or p.tokenTag(p.tok_i - 1) == .semicolon);
 
     // Handle DSLs
     if (p.tokenTag(p.tok_i) == .identifier and p.source[p.tokenizer.index] == ')') {

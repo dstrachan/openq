@@ -376,7 +376,7 @@ pub fn parse(vm: *Vm, x: *Value) !*Value {
 }
 
 fn eval(vm: *Vm, x: *Value) !*Value {
-    std.log.debug("eval: {f}", .{x.fmt(vm)});
+    std.log.debug("eval: ({t}) {f}", .{ x.as, x.fmt(vm) });
     switch (x.as) {
         .list => |value| {
             if (value.len == 0) return vm.getConstant(.empty_list);
@@ -437,7 +437,10 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             values.appendAssumeCapacity(vm.getConstant(.semicolon));
             for (nodes) |n| values.appendAssumeCapacity(try vm.parseNode(n));
 
-            return vm.createValue(.list, values.toOwnedSliceAssert());
+            const list = try vm.createValue(.list, &.{});
+            errdefer comptime unreachable;
+            list.as.list = values.toOwnedSliceAssert();
+            return list;
         },
         .empty => return vm.getUnaryPrimitive(.empty),
 
@@ -454,9 +457,46 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             values.appendAssumeCapacity(vm.getUnaryPrimitive(.list));
             for (nodes) |n| values.appendAssumeCapacity(try vm.parseNode(n));
 
-            return vm.createValue(.list, values.toOwnedSliceAssert());
+            const list = try vm.createValue(.list, &.{});
+            errdefer comptime unreachable;
+            list.as.list = values.toOwnedSliceAssert();
+            return list;
         },
-        .table_literal => unreachable,
+        .table_literal => {
+            const table = tree.extraData(tree.nodeData(node).extra_and_token[0], Node.Table);
+
+            const table_keys = tree.extraDataSlice(.{
+                .start = table.keys_start,
+                .end = table.columns_start,
+            }, Node.Index);
+            const maybe_key_table = if (table_keys.len == 0) null else try vm.parseTable(table_keys);
+            defer if (maybe_key_table) |key_table| key_table.deref(vm.gpa);
+
+            const table_values = tree.extraDataSlice(.{
+                .start = table.columns_start,
+                .end = table.columns_end,
+            }, Node.Index);
+            assert(table_values.len > 0);
+            const value_table = try vm.parseTable(table_values);
+            defer value_table.deref(vm.gpa);
+
+            if (maybe_key_table) |key_table| {
+                var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 3);
+                defer values.deinit(vm.gpa);
+                errdefer for (values.items) |v| v.deref(vm.gpa);
+
+                values.appendAssumeCapacity(vm.getOperator(.dict));
+                values.appendAssumeCapacity(key_table.ref());
+                values.appendAssumeCapacity(value_table.ref());
+
+                const list = try vm.createValue(.list, &.{});
+                errdefer comptime unreachable;
+                list.as.list = values.toOwnedSliceAssert();
+                return list;
+            } else {
+                return value_table.ref();
+            }
+        },
 
         .lambda => {
             var compiler: Compiler = .init(vm, tree);
@@ -703,6 +743,109 @@ fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
         .tilde => vm.getUnaryPrimitive(.not),
         else => vm.parseNode(node),
     };
+}
+
+fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
+    assert(nodes.len > 0);
+
+    var keys: std.ArrayList(Symbol) = try .initCapacity(vm.gpa, nodes.len);
+    defer keys.deinit(vm.gpa);
+
+    var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, nodes.len);
+    defer values.deinit(vm.gpa);
+    errdefer for (values.items) |v| v.deref(vm.gpa);
+
+    for (nodes) |n| {
+        const a = try vm.parseNode(n);
+        defer a.deref(vm.gpa);
+
+        switch (a.as) {
+            .list => |list| if (list.len == 2 and list[1].as == .symbol) {
+                keys.appendAssumeCapacity(list[1].as.symbol);
+                values.appendAssumeCapacity(a.ref());
+            } else if (list.len == 3 and list[1].as == .symbol) {
+                keys.appendAssumeCapacity(list[1].as.symbol);
+                values.appendAssumeCapacity(list[2].ref());
+            } else unreachable,
+            .symbol => {
+                keys.appendAssumeCapacity(a.as.symbol);
+                values.appendAssumeCapacity(a.ref());
+            },
+            else => {
+                // TODO: Generate column names.
+                keys.appendAssumeCapacity(try vm.intern("x"));
+                values.appendAssumeCapacity(a.ref());
+            },
+        }
+    }
+
+    assert(keys.items.len == values.items.len);
+
+    const keys_value = keys: {
+        const symbol_list = try vm.createValue(.symbol_list, &.{});
+        defer symbol_list.deref(vm.gpa);
+
+        symbol_list.as.symbol_list = keys.toOwnedSliceAssert();
+
+        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
+        defer list.deinit(vm.gpa);
+        errdefer for (list.items) |v| v.deref(vm.gpa);
+
+        list.appendAssumeCapacity(symbol_list.ref());
+
+        const value = try vm.createValue(.list, &.{});
+        errdefer comptime unreachable;
+        value.as.list = list.toOwnedSliceAssert();
+        break :keys value;
+    };
+    defer keys_value.deref(vm.gpa);
+
+    const values_value = values: {
+        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, values.items.len + 1);
+        defer list.deinit(vm.gpa);
+        errdefer for (list.items) |v| v.deref(vm.gpa);
+
+        list.appendAssumeCapacity(vm.getUnaryPrimitive(.list));
+        list.appendSliceAssumeCapacity(values.items);
+
+        const value = try vm.createValue(.list, &.{});
+        errdefer comptime unreachable;
+        value.as.list = list.toOwnedSliceAssert();
+        break :values value;
+    };
+    defer values_value.deref(vm.gpa);
+
+    const dict = dict: {
+        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 3);
+        defer list.deinit(vm.gpa);
+        errdefer for (list.items) |v| v.deref(vm.gpa);
+
+        list.appendAssumeCapacity(vm.getOperator(.dict));
+        list.appendAssumeCapacity(keys_value.ref());
+        list.appendAssumeCapacity(values_value.ref());
+
+        const value = try vm.createValue(.list, &.{});
+        errdefer comptime unreachable;
+        value.as.list = list.toOwnedSliceAssert();
+        break :dict value;
+    };
+    defer dict.deref(vm.gpa);
+
+    const flip = flip: {
+        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 2);
+        defer list.deinit(vm.gpa);
+        errdefer for (list.items) |v| v.deref(vm.gpa);
+
+        list.appendAssumeCapacity(vm.getUnaryPrimitive(.flip));
+        list.appendAssumeCapacity(dict.ref());
+
+        const value = try vm.createValue(.list, &.{});
+        errdefer comptime unreachable;
+        value.as.list = list.toOwnedSliceAssert();
+        break :flip value;
+    };
+    errdefer comptime unreachable;
+    return flip;
 }
 
 pub fn createValue(vm: *Vm, comptime tag: Value.Type, value: @FieldType(Value.Union, @tagName(tag))) !*Value {
