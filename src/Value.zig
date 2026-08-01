@@ -234,6 +234,34 @@ pub fn rank(value: *Value) usize {
     };
 }
 
+pub fn count(value: *Value) usize {
+    return switch (value.as) {
+        .list => |v| v.len,
+        .boolean => 1,
+        .boolean_list => |v| v.len,
+        .long => 1,
+        .long_list => |v| v.len,
+        .float => 1,
+        .float_list => |v| v.len,
+        .char => 1,
+        .char_list => |v| v.len,
+        .symbol => 1,
+        .symbol_list => |v| v.len,
+        .dict => |v| v.keys.count(),
+        .lambda => 1,
+        .unary_primitive => 1,
+        .operator => 1,
+        .iterator => 1,
+        .projection => 1,
+        .each => 1,
+        .over => 1,
+        .scan => 1,
+        .each_prior => 1,
+        .each_right => 1,
+        .each_left => 1,
+    };
+}
+
 pub const Type = enum(i8) {
     list = 0,
     boolean = -1,

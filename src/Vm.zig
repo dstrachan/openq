@@ -166,7 +166,7 @@ fn applyImpl(vm: *Vm, func: *Value, args: []*Value) !*Value {
             if (unary_primitive == .list and args.len > 1) return vm.enlist(args);
             if (args.len > 1) return error.rank;
             switch (unary_primitive) {
-                .empty => unreachable, // TODO: This might not be unreachable.
+                .empty => return q.unary_primitives.identity(vm, args[0]),
                 inline else => |t| return @field(q.unary_primitives, @tagName(t))(vm, args[0]),
             }
         },
@@ -504,7 +504,22 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             return compiler.compile(node);
         },
 
-        .expr_block => unreachable,
+        .expr_block => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+            if (nodes.len == 0) return vm.getUnaryPrimitive(.identity);
+
+            var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, nodes.len + 1);
+            defer list.deinit(vm.gpa);
+            errdefer for (list.items) |v| v.deref(vm.gpa);
+
+            list.appendAssumeCapacity(vm.getConstant(.semicolon));
+            for (nodes) |n| list.appendAssumeCapacity(try vm.parseNode(n));
+
+            const value = try vm.createValue(.list, &.{});
+            errdefer comptime unreachable;
+            value.as.list = list.toOwnedSliceAssert();
+            return value;
+        },
 
         .colon => return vm.getOperator(.assign),
         .plus => return vm.getOperator(.add),
@@ -659,7 +674,31 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             symbol_list.as.symbol_list[0] = symbol;
             return symbol_list;
         },
-        .symbol_list_literal => unreachable,
+        .symbol_list_literal => {
+            const first_token = tree.nodeMainToken(node);
+            const last_token = tree.nodeData(node).token;
+            const len = last_token - first_token + 1;
+
+            const symbol_list = symbol_list: {
+                var list: std.ArrayList(Symbol) = try .initCapacity(vm.gpa, len);
+                defer list.deinit(vm.gpa);
+                for (first_token..last_token + 1) |tok| {
+                    const slice = tree.tokenSlice(@intCast(tok));
+                    const symbol = try vm.intern(slice[1..]);
+                    list.appendAssumeCapacity(symbol);
+                }
+                const symbol_list = try vm.createValue(.symbol_list, &.{});
+                errdefer symbol_list.deref(vm.gpa);
+                symbol_list.as.symbol_list = list.toOwnedSliceAssert();
+                break :symbol_list symbol_list;
+            };
+            errdefer symbol_list.deref(vm.gpa);
+
+            const list = try vm.allocValue(.list, 1);
+            errdefer comptime unreachable;
+            list.as.list[0] = symbol_list;
+            return list;
+        },
         .identifier => {
             const main_token = tree.nodeMainToken(node);
             const slice = tree.tokenSlice(main_token);
@@ -671,24 +710,24 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             const slice = tree.tokenSlice(main_token);
             const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
             return switch (builtin) {
-                .flip => unreachable,
-                .neg => unreachable,
+                .flip => vm.getUnaryPrimitive(.flip),
+                .neg => vm.getUnaryPrimitive(.neg),
                 .first => vm.getUnaryPrimitive(.first),
-                .reciprocal => unreachable,
-                .where => unreachable,
-                .reverse => unreachable,
-                .null => unreachable,
-                .group => unreachable,
-                .asc => unreachable,
-                .desc => unreachable,
-                .string => unreachable,
+                .reciprocal => vm.getUnaryPrimitive(.reciprocal),
+                .where => vm.getUnaryPrimitive(.where),
+                .reverse => vm.getUnaryPrimitive(.reverse),
+                .null => vm.getUnaryPrimitive(.null),
+                .group => vm.getUnaryPrimitive(.group),
+                .asc => vm.getUnaryPrimitive(.asc),
+                .desc => vm.getUnaryPrimitive(.desc),
+                .string => vm.getUnaryPrimitive(.string),
                 .enlist => vm.getUnaryPrimitive(.list),
-                .count => unreachable,
-                .lower => unreachable,
-                .not => unreachable,
-                .key => unreachable,
-                .distinct => unreachable,
-                .type => unreachable,
+                .count => vm.getUnaryPrimitive(.count),
+                .lower => vm.getUnaryPrimitive(.lower),
+                .not => vm.getUnaryPrimitive(.not),
+                .key => vm.getUnaryPrimitive(.key),
+                .distinct => vm.getUnaryPrimitive(.distinct),
+                .type => vm.getUnaryPrimitive(.type),
                 .value => vm.getUnaryPrimitive(.value),
 
                 .parse => blk: {
@@ -755,6 +794,7 @@ fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
     defer values.deinit(vm.gpa);
     errdefer for (values.items) |v| v.deref(vm.gpa);
 
+    var i: usize = 0;
     for (nodes) |n| {
         const a = try vm.parseNode(n);
         defer a.deref(vm.gpa);
@@ -772,8 +812,14 @@ fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
                 values.appendAssumeCapacity(a.ref());
             },
             else => {
-                // TODO: Generate column names.
-                keys.appendAssumeCapacity(try vm.intern("x"));
+                var buf: [8]u8 = undefined;
+                const name = if (i > 0)
+                    std.fmt.bufPrint(&buf, "x{d}", .{i}) catch "x"
+                else
+                    "x";
+                i += 1;
+
+                keys.appendAssumeCapacity(try vm.intern(name));
                 values.appendAssumeCapacity(a.ref());
             },
         }
@@ -966,5 +1012,4 @@ pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Va
         },
         else => |c| std.debug.panic("NYI: {c}", .{c}),
     }
-    unreachable;
 }

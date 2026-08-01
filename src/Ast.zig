@@ -684,7 +684,7 @@ pub const Node = struct {
         root,
         /// The `data` field is unused.
         ///
-        /// The `main_token` field is the previous token.
+        /// The `main_token` field is the next token.
         empty,
 
         /// `(expr)`.

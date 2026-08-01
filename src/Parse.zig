@@ -220,7 +220,7 @@ fn parseStatements(p: *Parse) !Statements {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    while (p.tokenTag(p.tok_i) != .eof) {
+    while (true) {
         const expr = p.parseStatement() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => blk: {
@@ -228,7 +228,7 @@ fn parseStatements(p: *Parse) !Statements {
                 break :blk .none;
             },
         };
-        if (expr.unwrap()) |node| try p.scratch.append(p.gpa, node);
+        try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
         switch (p.tokenTag(p.tok_i)) {
             .semicolon, .eos => _ = try p.nextToken(),
             .eof => break,
@@ -773,10 +773,12 @@ fn parseBlock(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    while (p.tokenTag(p.tok_i) != .r_bracket) {
-        const expr = try p.parseExpr(null);
-        try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
-        _ = try p.eatToken(.semicolon) orelse break;
+    if (p.tokenTag(p.tok_i) != .r_bracket) {
+        while (true) {
+            const expr = try p.parseExpr(null);
+            try p.scratch.append(p.gpa, expr.unwrap() orelse try p.empty());
+            _ = try p.eatToken(.semicolon) orelse break;
+        }
     }
     _ = try p.expectToken(.r_bracket);
 
@@ -1184,7 +1186,7 @@ fn expectIdentifier(p: *Parse, comptime sql_identifier: SqlIdentifier) !TokenInd
 fn empty(p: *Parse) !Node.Index {
     return p.addNode(.{
         .tag = .empty,
-        .main_token = p.tok_i - 1,
+        .main_token = p.tok_i,
         .data = undefined,
     });
 }

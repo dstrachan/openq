@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const q = @import("../root.zig");
 const Vm = q.Vm;
 const Value = q.Value;
+const Symbol = Value.Symbol;
 
 pub fn assign(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
@@ -367,10 +368,67 @@ pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
 }
 
 pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    unreachable;
+    switch (x.as) {
+        .list => |x_val| {
+            const list = try vm.allocValue(.list, x_val.len + 1);
+            errdefer comptime unreachable;
+            for (list.as.list[0..x_val.len], x_val) |*v, x_v| v.* = x_v.ref();
+            list.as.list[x_val.len] = y.ref();
+            return list;
+        },
+        .boolean => return error.nyi,
+        .boolean_list => return error.nyi,
+        .long => return error.nyi,
+        .long_list => return error.nyi,
+        .float => return error.nyi,
+        .float_list => return error.nyi,
+        .char => return error.nyi,
+        .char_list => return error.nyi,
+        .symbol => return error.nyi,
+        .symbol_list => |x_val| switch (y.as) {
+            .list => return error.nyi,
+            .boolean => return error.nyi,
+            .boolean_list => return error.nyi,
+            .long => return error.nyi,
+            .long_list => return error.nyi,
+            .float => return error.nyi,
+            .float_list => return error.nyi,
+            .char => return error.nyi,
+            .char_list => return error.nyi,
+            .symbol => |y_val| {
+                const list = try vm.allocValue(.symbol_list, x_val.len + 1);
+                errdefer comptime unreachable;
+                @memcpy(list.as.symbol_list[0..x_val.len], x_val);
+                list.as.symbol_list[x_val.len] = y_val;
+                return list;
+            },
+            .symbol_list => return error.nyi,
+            .dict => return error.nyi,
+            .lambda => return error.nyi,
+            .unary_primitive => return error.nyi,
+            .operator => return error.nyi,
+            .iterator => return error.nyi,
+            .projection => return error.nyi,
+            .each => return error.nyi,
+            .over => return error.nyi,
+            .scan => return error.nyi,
+            .each_prior => return error.nyi,
+            .each_right => return error.nyi,
+            .each_left => return error.nyi,
+        },
+        .dict => return error.nyi,
+        .lambda => return error.nyi,
+        .unary_primitive => return error.nyi,
+        .operator => return error.nyi,
+        .iterator => return error.nyi,
+        .projection => return error.nyi,
+        .each => return error.nyi,
+        .over => return error.nyi,
+        .scan => return error.nyi,
+        .each_prior => return error.nyi,
+        .each_right => return error.nyi,
+        .each_left => return error.nyi,
+    }
 }
 
 pub fn take(vm: *Vm, x: *Value, y: *Value) !*Value {
@@ -396,7 +454,37 @@ pub fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
 
 pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
     switch (x.as) {
-        .list => return error.nyi,
+        .list => |x_val| switch (y.as) {
+            .list => |y_val| {
+                if (x_val.len != y_val.len) return error.length;
+                const value = try vm.createValue(.dict, .{ .keys = undefined, .values = undefined });
+                value.as.dict.keys = x.ref();
+                value.as.dict.values = y.ref();
+                return value;
+            },
+            .boolean => return error.nyi,
+            .boolean_list => return error.nyi,
+            .long => return error.nyi,
+            .long_list => return error.nyi,
+            .float => return error.nyi,
+            .float_list => return error.nyi,
+            .char => return error.nyi,
+            .char_list => return error.nyi,
+            .symbol => return error.nyi,
+            .symbol_list => return error.nyi,
+            .dict => return error.nyi,
+            .lambda => return error.nyi,
+            .unary_primitive => return error.nyi,
+            .operator => return error.nyi,
+            .iterator => return error.nyi,
+            .projection => return error.nyi,
+            .each => return error.nyi,
+            .over => return error.nyi,
+            .scan => return error.nyi,
+            .each_prior => return error.nyi,
+            .each_right => return error.nyi,
+            .each_left => return error.nyi,
+        },
         .boolean => return error.nyi,
         .boolean_list => return error.nyi,
         .long => |val| switch (@as(Value.Long, @enumFromInt(val))) {
