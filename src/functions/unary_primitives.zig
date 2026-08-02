@@ -1,10 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const q = @import("../root.zig");
 const Vm = q.Vm;
 const Value = q.Value;
+const Symbol = Value.Symbol;
 
 pub fn identity(_: *Vm, x: *Value) !*Value {
     return x.ref();
@@ -265,6 +267,7 @@ pub fn @"type"(vm: *Vm, x: *Value) !*Value {
 }
 
 pub fn value(vm: *Vm, x: *Value) !*Value {
+    std.log.debug("value: {f}", .{x.fmt(vm)});
     switch (x.as) {
         .list => return error.nyi,
         .boolean => return error.nyi,
@@ -275,7 +278,18 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
         .float_list => return error.nyi,
         .char => return error.nyi,
         .char_list => return error.nyi,
-        .symbol => return error.nyi,
+        .symbol => |identifier| {
+            const identifier_string = vm.internedString(identifier);
+            if (identifier_string[0] == '.') {
+                // TODO: Namespaces
+                unreachable;
+            } else {
+                assert(std.mem.countScalar(u8, identifier_string, '.') == 0);
+                if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
+                    return vm.state.as.dict.values.as.list[index].ref();
+                } else return error.identifier;
+            }
+        },
         .symbol_list => return error.nyi,
         .dict => return error.nyi,
         .lambda => |lambda| {

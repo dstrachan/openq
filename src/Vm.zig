@@ -418,12 +418,7 @@ fn eval(vm: *Vm, x: *Value) !*Value {
 
             return vm.applyImpl(stack[0], stack[1..]);
         },
-        .symbol => |identifier| {
-            // TODO: Namespaces
-            if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
-                return vm.state.as.dict.values.as.list[index].ref();
-            } else return error.identifier; // TODO: Improve error message
-        },
+        .symbol => return q.unary_primitives.value(vm, x),
         .symbol_list => |value| {
             assert(value.len == 1);
             return vm.createValue(.symbol, value[0]);
@@ -636,6 +631,7 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             return vm.createValue(.list, values.toOwnedSliceAssert());
         },
 
+        // TODO: Improve error reporting
         .number_literal => return vm.createNumberLiteral(tree, node),
         .number_list_literal => return vm.createNumberListLiteral(tree, node),
         .string_literal => {

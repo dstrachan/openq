@@ -21,31 +21,36 @@ pub fn assign(vm: *Vm, x: *Value, y: *Value) !*Value {
         .char => @panic("NYI"),
         .char_list => @panic("NYI"),
         .symbol => |identifier| {
-            // TODO: Namespaces
-            assert(std.mem.countScalar(u8, vm.internedString(identifier), '.') == 0);
-            if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
-                vm.state.as.dict.values.as.list[index].deref(vm.gpa);
-                vm.state.as.dict.values.as.list[index] = y.ref();
+            const identifier_string = vm.internedString(identifier);
+            if (identifier_string[0] == '.') {
+                // TODO: Namespaces
+                unreachable;
             } else {
-                const old_keys = vm.state.as.dict.keys.as.symbol_list;
-                const new_keys = try vm.allocValue(.symbol_list, old_keys.len + 1);
-                errdefer new_keys.deref(vm.gpa);
-                @memcpy(new_keys.as.symbol_list[0..old_keys.len], old_keys);
-                new_keys.as.symbol_list[old_keys.len] = identifier;
+                assert(std.mem.countScalar(u8, vm.internedString(identifier), '.') == 0);
+                if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
+                    vm.state.as.dict.values.as.list[index].deref(vm.gpa);
+                    vm.state.as.dict.values.as.list[index] = y.ref();
+                } else {
+                    const old_keys = vm.state.as.dict.keys.as.symbol_list;
+                    const new_keys = try vm.allocValue(.symbol_list, old_keys.len + 1);
+                    errdefer new_keys.deref(vm.gpa);
+                    @memcpy(new_keys.as.symbol_list[0..old_keys.len], old_keys);
+                    new_keys.as.symbol_list[old_keys.len] = identifier;
 
-                const old_values = vm.state.as.dict.values.as.list;
-                const new_values = try vm.allocValue(.list, old_values.len + 1);
-                errdefer comptime unreachable;
-                for (new_values.as.list[0..old_values.len], old_values) |*new_v, old_v| new_v.* = old_v.ref();
-                new_values.as.list[old_values.len] = y.ref();
+                    const old_values = vm.state.as.dict.values.as.list;
+                    const new_values = try vm.allocValue(.list, old_values.len + 1);
+                    errdefer comptime unreachable;
+                    for (new_values.as.list[0..old_values.len], old_values) |*new_v, old_v| new_v.* = old_v.ref();
+                    new_values.as.list[old_values.len] = y.ref();
 
-                vm.state.as.dict.keys.deref(vm.gpa);
-                vm.state.as.dict.keys = new_keys;
+                    vm.state.as.dict.keys.deref(vm.gpa);
+                    vm.state.as.dict.keys = new_keys;
 
-                vm.state.as.dict.values.deref(vm.gpa);
-                vm.state.as.dict.values = new_values;
+                    vm.state.as.dict.values.deref(vm.gpa);
+                    vm.state.as.dict.values = new_values;
+                }
+                return y;
             }
-            return y;
         },
         .symbol_list => @panic("NYI"),
         .dict => @panic("NYI"),
