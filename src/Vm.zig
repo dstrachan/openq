@@ -390,21 +390,33 @@ fn eval(vm: *Vm, x: *Value) !*Value {
                 return vm.eval(value[value.len - 1]);
             }
 
-            if (value[0].as == .operator and value[0].as.operator == .assign) unreachable;
+            if (value[0].as == .operator and value[0].as.operator == .assign) {
+                if (value.len != 3 or value[2].isEmpty()) return error.rank;
+
+                const v = try vm.eval(value[2]);
+                errdefer v.deref(vm.gpa);
+
+                return q.operators.assign(vm, value[1], v);
+            }
+
+            const stack_top = vm.stack.items.len;
+            try vm.stack.ensureUnusedCapacity(vm.gpa, value.len);
+            for (0..value.len) |_| vm.stack.appendAssumeCapacity(vm.getConstant(.empty_list));
+            defer vm.stack.shrinkRetainingCapacity(stack_top);
+
+            const stack = vm.stack.items[stack_top..];
+            defer for (stack) |v| v.deref(vm.gpa);
+            assert(stack.len == value.len);
 
             var it = std.mem.reverseIterator(value);
-            while (it.next()) |entry| vm.push(try vm.eval(entry));
+            var stack_it = std.mem.reverseIterator(stack);
+            while (stack_it.nextPtr()) |entry| {
+                const prev_entry = entry.*;
+                entry.* = try vm.eval(it.next().?);
+                prev_entry.deref(vm.gpa);
+            }
 
-            const stack = vm.stack.items[vm.stack.items.len - value.len ..];
-            defer vm.stack.shrinkRetainingCapacity(vm.stack.items.len - value.len);
-            defer for (stack) |v| v.deref(vm.gpa);
-
-            // TODO: Remove reverse
-            std.mem.reverse(*Value, stack);
-            const func = stack[0];
-            const args = stack[1..];
-
-            return vm.applyImpl(func, args);
+            return vm.applyImpl(stack[0], stack[1..]);
         },
         .symbol => |identifier| {
             // TODO: Namespaces
