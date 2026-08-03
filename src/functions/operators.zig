@@ -22,35 +22,85 @@ pub fn assign(vm: *Vm, x: *Value, y: *Value) !*Value {
         .char_list => @panic("NYI"),
         .symbol => |identifier| {
             const identifier_string = vm.internedString(identifier);
-            if (identifier_string[0] == '.') {
-                // TODO: Namespaces
-                unreachable;
-            } else {
-                assert(std.mem.countScalar(u8, vm.internedString(identifier), '.') == 0);
-                if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
-                    vm.state.as.dict.values.as.list[index].deref(vm.gpa);
-                    vm.state.as.dict.values.as.list[index] = y.ref();
-                } else {
-                    const old_keys = vm.state.as.dict.keys.as.symbol_list;
-                    const new_keys = try vm.allocValue(.symbol_list, old_keys.len + 1);
-                    errdefer new_keys.deref(vm.gpa);
-                    @memcpy(new_keys.as.symbol_list[0..old_keys.len], old_keys);
-                    new_keys.as.symbol_list[old_keys.len] = identifier;
+            const state, const symbol = if (identifier_string[0] == '.') state_symbol: {
+                assert(identifier_string.len > 1);
+                var it = std.mem.splitScalar(u8, identifier_string, '.');
+                var prev = it.first();
+                assert(prev.len == 0);
+                var symbol: Symbol = .empty;
+                var state = &vm.state.as.dict;
+                while (it.next()) |entry| {
+                    if (std.mem.findScalar(Symbol, state.keys.as.symbol_list, symbol)) |index| {
+                        state = &state.values.as.list[index].as.dict;
+                    } else {
+                        const old_keys = state.keys.as.symbol_list;
+                        const new_keys = try vm.allocValue(.symbol_list, old_keys.len + 1);
+                        errdefer new_keys.deref(vm.gpa);
+                        @memcpy(new_keys.as.symbol_list[0..old_keys.len], old_keys);
+                        new_keys.as.symbol_list[old_keys.len] = symbol;
 
-                    const old_values = vm.state.as.dict.values.as.list;
-                    const new_values = try vm.allocValue(.list, old_values.len + 1);
-                    errdefer comptime unreachable;
-                    for (new_values.as.list[0..old_values.len], old_values) |*new_v, old_v| new_v.* = old_v.ref();
-                    new_values.as.list[old_values.len] = y.ref();
+                        const keys = try vm.allocValue(.symbol_list, 1);
+                        defer keys.deref(vm.gpa);
+                        keys.as.symbol_list[0] = .empty;
 
-                    vm.state.as.dict.keys.deref(vm.gpa);
-                    vm.state.as.dict.keys = new_keys;
+                        const values = try vm.allocValue(.list, 1);
+                        values.as.list[0] = vm.getUnaryPrimitive(.identity);
+                        defer values.deref(vm.gpa);
 
-                    vm.state.as.dict.values.deref(vm.gpa);
-                    vm.state.as.dict.values = new_values;
+                        const new_state = try vm.createValue(.dict, .{ .keys = keys, .values = values });
+                        _ = new_state.as.dict.keys.ref();
+                        _ = new_state.as.dict.values.ref();
+                        errdefer new_state.deref(vm.gpa);
+
+                        const old_values = state.values.as.list;
+                        const new_values = try vm.allocValue(.list, old_values.len + 1);
+                        errdefer comptime unreachable;
+                        for (new_values.as.list[0..old_values.len], old_values) |*new_v, old_v| new_v.* = old_v.ref();
+                        new_values.as.list[old_values.len] = new_state;
+
+                        state.keys.deref(vm.gpa);
+                        state.keys = new_keys;
+
+                        state.values.deref(vm.gpa);
+                        state.values = new_values;
+
+                        state = &new_state.as.dict;
+                    }
+
+                    prev = entry;
+                    symbol = try vm.intern(prev);
                 }
-                return y;
+
+                break :state_symbol .{ state, symbol };
+            } else state_symbol: {
+                assert(std.mem.countScalar(u8, vm.internedString(identifier), '.') == 0);
+                break :state_symbol .{ &vm.state.as.dict.values.as.list[0].as.dict, identifier };
+            };
+
+            if (std.mem.findScalar(Symbol, state.keys.as.symbol_list, symbol)) |index| {
+                if (true) unreachable;
+                state.values.as.list[index].deref(vm.gpa);
+                state.values.as.list[index] = y.ref();
+            } else {
+                const old_keys = state.keys.as.symbol_list;
+                const new_keys = try vm.allocValue(.symbol_list, old_keys.len + 1);
+                errdefer new_keys.deref(vm.gpa);
+                @memcpy(new_keys.as.symbol_list[0..old_keys.len], old_keys);
+                new_keys.as.symbol_list[old_keys.len] = symbol;
+
+                const old_values = state.values.as.list;
+                const new_values = try vm.allocValue(.list, old_values.len + 1);
+                errdefer comptime unreachable;
+                for (new_values.as.list[0..old_values.len], old_values) |*new_v, old_v| new_v.* = old_v.ref();
+                new_values.as.list[old_values.len] = y.ref();
+
+                state.keys.deref(vm.gpa);
+                state.keys = new_keys;
+
+                state.values.deref(vm.gpa);
+                state.values = new_values;
             }
+            return y;
         },
         .symbol_list => @panic("NYI"),
         .dict => @panic("NYI"),

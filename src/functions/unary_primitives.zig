@@ -279,14 +279,34 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
         .char => return error.nyi,
         .char_list => return error.nyi,
         .symbol => |identifier| {
-            const identifier_string = vm.internedString(identifier);
-            if (identifier_string[0] == '.') {
-                // TODO: Namespaces
-                unreachable;
+            if (identifier == .empty) {
+                return vm.state.ref();
             } else {
-                assert(std.mem.countScalar(u8, identifier_string, '.') == 0);
-                if (std.mem.findScalar(Symbol, vm.state.as.dict.keys.as.symbol_list, identifier)) |index| {
-                    return vm.state.as.dict.values.as.list[index].ref();
+                const identifier_string = vm.internedString(identifier);
+                const state, const symbol = if (identifier_string[0] == '.') state_symbol: {
+                    assert(identifier_string.len > 1);
+                    var it = std.mem.splitScalar(u8, identifier_string, '.');
+                    var prev = it.first();
+                    assert(prev.len == 0);
+                    var symbol: Symbol = .empty;
+                    var state = vm.state.as.dict;
+                    while (it.next()) |entry| {
+                        if (std.mem.findScalar(Symbol, state.keys.as.symbol_list, symbol)) |index| {
+                            state = state.values.as.list[index].as.dict;
+                        } else return error.identifier;
+
+                        prev = entry;
+                        symbol = try vm.intern(prev);
+                    }
+
+                    break :state_symbol .{ state, symbol };
+                } else state_symbol: {
+                    assert(std.mem.countScalar(u8, vm.internedString(identifier), '.') == 0);
+                    break :state_symbol .{ vm.state.as.dict.values.as.list[0].as.dict, identifier };
+                };
+
+                if (std.mem.findScalar(Symbol, state.keys.as.symbol_list, symbol)) |index| {
+                    return state.values.as.list[index].ref();
                 } else return error.identifier;
             }
         },

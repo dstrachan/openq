@@ -45,12 +45,14 @@ const Constant = enum(u8) {
 
 pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
     const vm = try gpa.create(Vm);
-    errdefer vm.deinit();
+    errdefer gpa.destroy(vm);
     vm.* = .{
         .io = io,
         .gpa = gpa,
         .stdout = stdout,
     };
+    errdefer vm.string_table.deinit(gpa);
+    errdefer vm.string_bytes.deinit(gpa);
 
     var constants_created: usize = 0;
     errdefer for (0..constants_created) |i| vm.constants[i].deref(vm.gpa);
@@ -87,17 +89,32 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
     }
 
     const keys = try vm.allocValue(.symbol_list, 1);
-    errdefer keys.deref(gpa);
+    defer keys.deref(gpa);
     keys.as.symbol_list[0] = .empty;
 
-    const values = try vm.allocValue(.list, 1);
-    errdefer values.deref(gpa);
-    values.as.list[0] = vm.getUnaryPrimitive(.identity);
+    vm.state = state: {
+        const global_state = global_state: {
+            const values = try vm.allocValue(.list, 1);
+            values.as.list[0] = vm.getUnaryPrimitive(.identity);
+            errdefer values.deref(gpa);
 
-    const dict = try vm.createValue(.dict, .{ .keys = keys, .values = values });
+            const dict = try vm.createValue(.dict, .{ .keys = keys, .values = values });
+            errdefer comptime unreachable;
+            _ = dict.as.dict.keys.ref();
+            break :global_state dict;
+        };
+        defer global_state.deref(gpa);
+
+        const values = try vm.allocValue(.list, 1);
+        values.as.list[0] = global_state.ref();
+        errdefer values.deref(gpa);
+
+        const dict = try vm.createValue(.dict, .{ .keys = keys, .values = values });
+        errdefer comptime unreachable;
+        _ = dict.as.dict.keys.ref();
+        break :state dict;
+    };
     errdefer comptime unreachable;
-
-    vm.state = dict;
 
     return vm;
 }
@@ -115,19 +132,19 @@ pub fn deinit(vm: *Vm) void {
     vm.gpa.destroy(vm);
 }
 
-fn getConstant(vm: *Vm, constant: Constant) *Value {
+pub fn getConstant(vm: *Vm, constant: Constant) *Value {
     return vm.constants[@intFromEnum(constant)].ref();
 }
 
-fn getUnaryPrimitive(vm: *Vm, unary_primitive: UnaryPrimitive) *Value {
+pub fn getUnaryPrimitive(vm: *Vm, unary_primitive: UnaryPrimitive) *Value {
     return vm.unary_primitives[@intFromEnum(unary_primitive)].ref();
 }
 
-fn getOperator(vm: *Vm, operator: Operator) *Value {
+pub fn getOperator(vm: *Vm, operator: Operator) *Value {
     return vm.operators[@intFromEnum(operator)].ref();
 }
 
-fn getIterator(vm: *Vm, iterator: Iterator) *Value {
+pub fn getIterator(vm: *Vm, iterator: Iterator) *Value {
     return vm.iterators[@intFromEnum(iterator)].ref();
 }
 

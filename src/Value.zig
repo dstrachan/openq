@@ -187,9 +187,11 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
         },
         .symbol => |value| try w.print("`{s}", .{data.vm.internedString(value)}),
         .symbol_list => |value| {
+            if (value.len == 0) return w.writeAll("`symbol$()");
             if (value.len == 1) try w.writeByte(',');
             for (value) |v| try w.print("`{s}", .{data.vm.internedString(v)});
         },
+        .dict => |value| try w.print("{f}", .{value.fmt(data.vm)}),
         .lambda => |value| try w.print("{s}", .{value.source}),
         .unary_primitive => |value| try w.print("{f}", .{value}),
         .operator => |value| try w.print("{f}", .{value}),
@@ -379,6 +381,16 @@ pub const Symbol = enum(u32) {
 pub const Dictionary = struct {
     keys: *Value,
     values: *Value,
+
+    const Data = struct { dict: Dictionary, vm: *Vm };
+
+    pub fn fmt(self: Dictionary, vm: *Vm) std.fmt.Alt(Dictionary.Data, Dictionary.format) {
+        return .{ .data = .{ .dict = self, .vm = vm } };
+    }
+
+    fn format(data: Dictionary.Data, w: *Io.Writer) !void {
+        try w.print("{f}!{f}", .{ data.dict.keys.fmt(data.vm), data.dict.values.fmt(data.vm) });
+    }
 };
 
 pub const Lambda = struct {
