@@ -5,6 +5,8 @@ const openq_version: std.SemanticVersion = .{ .major = 0, .minor = 1, .patch = 0
 const IoMode = enum { threaded, evented };
 
 pub fn build(b: *std.Build) !void {
+    const arena = b.graph.arena;
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -16,7 +18,7 @@ pub fn build(b: *std.Build) !void {
     const io_mode = b.option(IoMode, "io-mode", "How the runtime performs IO") orelse .threaded;
     const mem_leak_frames = b.option(u32, "mem-leak-frames", "How many stack frames to print when a memory leak occurs. Tests get 2x this amount.") orelse blk: {
         if (strip == true) break :blk 0;
-        if (optimize != .Debug) break :blk @as(u32, 0);
+        if (optimize != .debug) break :blk @as(u32, 0);
         break :blk 4;
     };
 
@@ -66,6 +68,32 @@ pub fn build(b: *std.Build) !void {
                 .{},
             );
         }
+
+        // Ensure git version changes get picked up.
+        git: {
+            const io = b.graph.io;
+            const git_file = b.root.openFile(io, ".git", .{ .allow_directory = false }) catch |err| switch (err) {
+                error.IsDir => {
+                    b.dependOnFileContents(b.path(".git/logs/HEAD"));
+                    break :git;
+                },
+                else => |e| return e,
+            };
+            defer git_file.close(io);
+            var line_buffer: ["gitdir: ".len + std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+            var git_file_reader = git_file.reader(io, &line_buffer);
+            if (std.mem.cutPrefix(u8, std.mem.trimEnd(u8, try git_file_reader.interface.allocRemaining(
+                arena,
+                .limited("gitdir: ".len + std.Io.Dir.max_path_bytes + "\r\n".len),
+            ), "\r\n"), "gitdir: ")) |git_dir| {
+                const head_file = b.pathJoin(&.{ git_dir, "logs", "HEAD" });
+                b.dependOnFileContents(if (std.Io.Dir.path.isAbsolute(head_file))
+                    b.graph.cwdRelativePath(head_file)
+                else
+                    b.path(head_file));
+            }
+        }
+
         const version_string = b.fmt(
             "{d}.{d}.{d}",
             .{ openq_version.major, openq_version.minor, openq_version.patch },
@@ -74,14 +102,14 @@ pub fn build(b: *std.Build) !void {
         var code: u8 = undefined;
         const git_describe_untrimmed = b.runAllowFail(&[_][]const u8{
             "git",
-            "-C", b.build_root.path orelse ".", // affects the --git-dir argument
+            "-C", b.fmt("{f}", .{b.root}), // affects the --git-dir argument
             "--git-dir", ".git", // affected by the -C argument
             "describe", "--match",    "*.*.*", //
             "--tags",   "--abbrev=9",
         }, &code, .ignore) catch break :v version_string;
         const git_describe = std.mem.trim(u8, git_describe_untrimmed, " \n\r");
 
-        switch (std.mem.count(u8, git_describe, "-")) {
+        switch (std.mem.countScalar(u8, git_describe, '-')) {
             0 => {
                 // Tagged release version (e.g. 0.10.0).
                 if (!std.mem.eql(u8, git_describe, version_string)) {
@@ -122,7 +150,7 @@ pub fn build(b: *std.Build) !void {
             },
         }
     };
-    const version = try b.allocator.dupeSentinel(u8, version_slice, 0);
+    const version = try arena.dupeSentinel(u8, version_slice, 0);
     exe_options.addOption([:0]const u8, "version", version);
 
     const semver: std.SemanticVersion = try .parse(version);
@@ -130,9 +158,7 @@ pub fn build(b: *std.Build) !void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);

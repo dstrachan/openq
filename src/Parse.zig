@@ -39,15 +39,15 @@ fn tokenStart(p: *const Parse, token_index: TokenIndex) Ast.ByteOffset {
 }
 
 fn nodeTag(p: *const Parse, node: Node.Index) Node.Tag {
-    return p.nodes.items(.tag)[@intFromEnum(node)];
+    return p.nodes.items(.tag)[@backingInt(node)];
 }
 
 fn nodeMainToken(p: *const Parse, node: Node.Index) TokenIndex {
-    return p.nodes.items(.main_token)[@intFromEnum(node)];
+    return p.nodes.items(.main_token)[@backingInt(node)];
 }
 
 fn nodeData(p: *const Parse, node: Node.Index) Node.Data {
-    return p.nodes.items(.data)[@intFromEnum(node)];
+    return p.nodes.items(.data)[@backingInt(node)];
 }
 
 fn tokenSlice(p: *const Parse, token_index: TokenIndex) []const u8 {
@@ -101,20 +101,20 @@ const Statements = struct {
 fn listToSpan(p: *Parse, list: []const Node.Index) Allocator.Error!Node.SubRange {
     try p.extra_data.appendSlice(p.gpa, @ptrCast(list));
     return .{
-        .start = @enumFromInt(p.extra_data.items.len - list.len),
-        .end = @enumFromInt(p.extra_data.items.len),
+        .start = @fromBackingInt(@intCast(p.extra_data.items.len - list.len)),
+        .end = @fromBackingInt(@intCast(p.extra_data.items.len)),
     };
 }
 
 fn addNode(p: *Parse, elem: Ast.Node) Allocator.Error!Node.Index {
-    const result: Node.Index = @enumFromInt(p.nodes.len);
+    const result: Node.Index = @fromBackingInt(@intCast(p.nodes.len));
     try p.nodes.append(p.gpa, elem);
     return result;
 }
 
 fn setNode(p: *Parse, i: usize, elem: Ast.Node) Node.Index {
     p.nodes.set(i, elem);
-    return @enumFromInt(i);
+    return @fromBackingInt(@intCast(i));
 }
 
 fn reserveNode(p: *Parse, tag: Ast.Node.Tag) !usize {
@@ -134,19 +134,19 @@ fn unreserveNode(p: anytype, node_index: usize) void {
 
 fn addExtra(p: *Parse, extra: anytype) Allocator.Error!ExtraIndex {
     const info = @typeInfo(@TypeOf(extra)).@"struct";
-    try p.extra_data.ensureUnusedCapacity(p.gpa, info.fields.len);
-    const result: ExtraIndex = @enumFromInt(p.extra_data.items.len);
-    inline for (info.fields) |field| {
-        const data: u32 = switch (field.type) {
-            bool => @intFromBool(@field(extra, field.name)),
+    try p.extra_data.ensureUnusedCapacity(p.gpa, info.field_names.len);
+    const result: ExtraIndex = @fromBackingInt(@intCast(p.extra_data.items.len));
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        const data: u32 = switch (field_type) {
+            bool => @intFromBool(@field(extra, field_name)),
             Node.Index,
             Node.OptionalIndex,
             OptionalTokenIndex,
             ExtraIndex,
-            => @intFromEnum(@field(extra, field.name)),
+            => @backingInt(@field(extra, field_name)),
             TokenIndex,
-            => @field(extra, field.name),
-            else => @compileError("unexpected field type - " ++ @typeName(field.type)),
+            => @field(extra, field_name),
+            else => @compileError("unexpected field type - " ++ @typeName(field_type)),
         };
         p.extra_data.appendAssumeCapacity(data);
     }
@@ -306,7 +306,8 @@ fn parseExpr(p: *Parse, comptime sql_identifier: ?SqlIdentifier) Error!Node.Opti
 
 fn endsExpression(p: *Parse, comptime sql_identifier: ?SqlIdentifier) bool {
     const tag = p.tokenTag(p.tok_i);
-    if (p.ends_expression.getLast()) |last_token| if (tag == last_token) return true;
+    if (p.ends_expression.items.len > 0 and
+        tag == p.ends_expression.items[p.ends_expression.items.len - 1]) return true;
     if (sql_identifier) |identifier| {
         if (tag == .comma) return true;
         if (p.peekIdentifier(identifier)) return true;
@@ -632,7 +633,7 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
         .backslash_colon,
         => return p.setNode(apply_index, .{
             .tag = .apply_binary,
-            .main_token = @intFromEnum(rhs),
+            .main_token = @backingInt(rhs),
             .data = .{
                 .node_and_opt_node = .{
                     lhs,
@@ -664,7 +665,7 @@ fn parseBinary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifi
 
     return p.setNode(apply_index, .{
         .tag = .apply_binary,
-        .main_token = @intFromEnum(op),
+        .main_token = @backingInt(op),
         .data = .{ .node_and_opt_node = .{
             lhs,
             try p.parseExpr(sql_identifier),
@@ -852,7 +853,7 @@ fn parseNumberLiteral(p: *Parse) !Node.Index {
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     while (p.tokenTag(p.tok_i) == .number_literal and !p.tokenIsBoolOrByte(p.tok_i - 1)) {
-        try p.scratch.append(p.gpa, @enumFromInt(try p.nextToken()));
+        try p.scratch.append(p.gpa, @fromBackingInt(@intCast(try p.nextToken())));
     }
 
     const items: []TokenIndex = @ptrCast(p.scratch.items[scratch_top..]);
@@ -877,7 +878,7 @@ fn parseSymbolLiteral(p: *Parse) !Node.Index {
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
     while (p.tokenTag(p.tok_i) == .symbol_literal and !std.ascii.isWhitespace(p.source[p.tokenStart(p.tok_i) - 1])) {
-        try p.scratch.append(p.gpa, @enumFromInt(try p.nextToken()));
+        try p.scratch.append(p.gpa, @fromBackingInt(@intCast(try p.nextToken())));
     }
 
     const items: []TokenIndex = @ptrCast(p.scratch.items[scratch_top..]);

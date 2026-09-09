@@ -1459,8 +1459,8 @@ test "tokenize punctuation/operators/iterators" {
 }
 
 fn testTokenize(source: [:0]const u8, expected_values: []const struct { Token.Tag, []const u8 }) !void {
-    inline for (@typeInfo(Mode).@"enum".fields) |field| {
-        try testTokenizeMode(@enumFromInt(field.value), source, expected_values);
+    inline for (@typeInfo(Mode).@"enum".field_values) |field_value| {
+        try testTokenizeMode(@fromBackingInt(@intCast(field_value)), source, expected_values);
     }
 }
 

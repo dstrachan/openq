@@ -29,10 +29,10 @@ string_table: std.HashMapUnmanaged(
     std.hash_map.default_max_load_percentage,
 ) = .empty,
 stack: std.ArrayList(*Value) = .empty,
-constants: [std.meta.fields(Constant).len]*Value = undefined,
-unary_primitives: [std.meta.fields(UnaryPrimitive).len]*Value = undefined,
-operators: [std.meta.fields(Operator).len]*Value = undefined,
-iterators: [std.meta.fields(Iterator).len]*Value = undefined,
+constants: [@typeInfo(Constant).@"enum".field_names.len]*Value = undefined,
+unary_primitives: [@typeInfo(UnaryPrimitive).@"enum".field_names.len]*Value = undefined,
+operators: [@typeInfo(Operator).@"enum".field_names.len]*Value = undefined,
+iterators: [@typeInfo(Iterator).@"enum".field_names.len]*Value = undefined,
 state: *Value = undefined,
 
 const Constant = enum(u8) {
@@ -56,35 +56,35 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
 
     var constants_created: usize = 0;
     errdefer for (0..constants_created) |i| vm.constants[i].deref(vm.gpa);
-    vm.constants[@intFromEnum(Constant.empty_list)] = try vm.allocValue(.list, 0);
+    vm.constants[@backingInt(Constant.empty_list)] = try vm.allocValue(.list, 0);
     constants_created += 1;
-    vm.constants[@intFromEnum(Constant.zero)] = try vm.createValue(.long, 0);
+    vm.constants[@backingInt(Constant.zero)] = try vm.createValue(.long, 0);
     constants_created += 1;
-    vm.constants[@intFromEnum(Constant.one)] = try vm.createValue(.long, 1);
+    vm.constants[@backingInt(Constant.one)] = try vm.createValue(.long, 1);
     constants_created += 1;
-    vm.constants[@intFromEnum(Constant.semicolon)] = try vm.createValue(.char, ';');
+    vm.constants[@backingInt(Constant.semicolon)] = try vm.createValue(.char, ';');
     constants_created += 1;
-    vm.constants[@intFromEnum(Constant.null_symbol)] = try vm.createValue(.symbol, try vm.intern(""));
+    vm.constants[@backingInt(Constant.null_symbol)] = try vm.createValue(.symbol, try vm.intern(""));
     constants_created += 1;
 
     var unary_primitives_created: usize = 0;
     errdefer for (0..unary_primitives_created) |i| vm.unary_primitives[i].deref(vm.gpa);
     inline for (&vm.unary_primitives, 0..) |*unary_primitive, i| {
-        unary_primitive.* = try vm.createValue(.unary_primitive, @enumFromInt(i));
+        unary_primitive.* = try vm.createValue(.unary_primitive, @fromBackingInt(@intCast(i)));
         unary_primitives_created += 1;
     }
 
     var operators_created: usize = 0;
     errdefer for (0..operators_created) |i| vm.operators[i].deref(vm.gpa);
     inline for (&vm.operators, 0..) |*operator, i| {
-        operator.* = try vm.createValue(.operator, @enumFromInt(i));
+        operator.* = try vm.createValue(.operator, @fromBackingInt(@intCast(i)));
         operators_created += 1;
     }
 
     var iterators_created: usize = 0;
     errdefer for (0..iterators_created) |i| vm.iterators[i].deref(vm.gpa);
     inline for (&vm.iterators, 0..) |*iterator, i| {
-        iterator.* = try vm.createValue(.iterator, @enumFromInt(i));
+        iterator.* = try vm.createValue(.iterator, @fromBackingInt(@intCast(i)));
         iterators_created += 1;
     }
 
@@ -133,19 +133,19 @@ pub fn deinit(vm: *Vm) void {
 }
 
 pub fn getConstant(vm: *Vm, constant: Constant) *Value {
-    return vm.constants[@intFromEnum(constant)].ref();
+    return vm.constants[@backingInt(constant)].ref();
 }
 
 pub fn getUnaryPrimitive(vm: *Vm, unary_primitive: UnaryPrimitive) *Value {
-    return vm.unary_primitives[@intFromEnum(unary_primitive)].ref();
+    return vm.unary_primitives[@backingInt(unary_primitive)].ref();
 }
 
 pub fn getOperator(vm: *Vm, operator: Operator) *Value {
-    return vm.operators[@intFromEnum(operator)].ref();
+    return vm.operators[@backingInt(operator)].ref();
 }
 
 pub fn getIterator(vm: *Vm, iterator: Iterator) *Value {
-    return vm.iterators[@intFromEnum(iterator)].ref();
+    return vm.iterators[@backingInt(iterator)].ref();
 }
 
 fn parseTree(vm: *Vm, tree: *const Ast) !*Value {
@@ -292,10 +292,10 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_right,
             .each_left,
             => break :is_vector false,
-            .boolean, .long, .float, .char, .symbol, .dict => @intFromEnum(args[0].as),
+            .boolean, .long, .float, .char, .symbol, .dict => @backingInt(args[0].as),
         };
         break :is_vector for (args[1..]) |a| {
-            if (first_type != @intFromEnum(a.as)) break false;
+            if (first_type != @backingInt(a.as)) break false;
         } else true;
     };
     if (is_vector) {
@@ -632,7 +632,7 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
         },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
-            const op: Node.Index = @enumFromInt(tree.nodeMainToken(node));
+            const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
 
             var values: std.ArrayList(*Value) = try .initCapacity(gpa, 3);
             defer values.deinit(gpa);
@@ -944,16 +944,16 @@ pub fn intern(vm: *Vm, bytes: []const u8) !Symbol {
     );
     if (gop.found_existing) {
         vm.string_bytes.shrinkRetainingCapacity(str_index);
-        return @enumFromInt(gop.key_ptr.*);
+        return @fromBackingInt(@intCast(gop.key_ptr.*));
     } else {
         gop.key_ptr.* = str_index;
         try vm.string_bytes.append(vm.gpa, 0);
-        return @enumFromInt(str_index);
+        return @fromBackingInt(@intCast(str_index));
     }
 }
 
 pub fn internedString(vm: *Vm, index: Symbol) [:0]const u8 {
-    const slice = vm.string_bytes.items[@intFromEnum(index)..];
+    const slice = vm.string_bytes.items[@backingInt(index)..];
     return slice[0..std.mem.findScalar(u8, slice, 0).? :0];
 }
 
