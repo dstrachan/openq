@@ -1035,6 +1035,7 @@ pub const Node = struct {
         value,
 
         parse,
+        eval,
     };
 };
 

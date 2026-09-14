@@ -16,6 +16,15 @@ const Compiler = q.Compiler;
 const Vm = @This();
 
 const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error;
+const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
+    domain,
+    identifier,
+    length,
+    nyi,
+    parse,
+    rank,
+    type,
+};
 
 io: Io,
 gpa: Allocator,
@@ -163,7 +172,7 @@ fn push(vm: *Vm, value: *Value) void {
     vm.stack.append(vm.gpa, value) catch @panic("oom");
 }
 
-fn applyImpl(vm: *Vm, func: *Value, args: []*Value) !*Value {
+fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     assert(args.len > 0);
     switch (func.as) {
         .list => unreachable,
@@ -392,7 +401,7 @@ pub fn parse(vm: *Vm, x: *Value) !*Value {
     return vm.parseTree(&tree);
 }
 
-fn eval(vm: *Vm, x: *Value) !*Value {
+pub fn eval(vm: *Vm, x: *Value) !*Value {
     std.log.debug("eval: ({t}) {f}", .{ x.as, x.fmt(vm) });
     switch (x.as) {
         .list => |value| {
@@ -755,14 +764,18 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
                 .type => vm.getUnaryPrimitive(.type),
                 .value => vm.getUnaryPrimitive(.value),
 
-                .parse => blk: {
+                inline .parse, .eval => |t| blk: {
                     var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
                     defer values.deinit(vm.gpa);
 
-                    const neg_five = try vm.createValue(.long, -5);
-                    errdefer neg_five.deref(vm.gpa);
+                    const long = try vm.createValue(.long, switch (t) {
+                        .parse => -5,
+                        .eval => -6,
+                        else => comptime unreachable,
+                    });
+                    errdefer long.deref(vm.gpa);
 
-                    values.appendAssumeCapacity(neg_five);
+                    values.appendAssumeCapacity(long);
 
                     break :blk vm.createValue(.projection, .{
                         .callee = vm.getOperator(.dict),

@@ -235,6 +235,7 @@ fn compileNode(c: *Compiler, node: Node.Index) !void {
                 .value => try c.emitCode(.value),
 
                 .parse => unreachable,
+                .eval => unreachable,
             }
         },
 
@@ -248,7 +249,7 @@ fn compileNode(c: *Compiler, node: Node.Index) !void {
 }
 
 fn emitCode(c: *Compiler, code: ByteCode) !void {
-    try c.emitByte(@intFromEnum(code));
+    try c.emitByte(@backingInt(code));
 }
 
 fn emitByte(c: *Compiler, byte: u8) !void {
@@ -259,11 +260,11 @@ fn emitConstant(c: *Compiler, value: *Value) !void {
     for (c.constants.items, 0..) |constant, i| {
         if (value.eql(constant)) {
             defer value.deref(c.vm.gpa);
-            return c.emitByte(@intCast(@intFromEnum(ByteCode.constant) + i));
+            return c.emitByte(@intCast(@backingInt(ByteCode.constant) + i));
         }
     }
     try c.constants.append(c.vm.gpa, value);
-    try c.emitByte(@intCast(@intFromEnum(ByteCode.constant) + c.constants.items.len - 1));
+    try c.emitByte(@intCast(@backingInt(ByteCode.constant) + c.constants.items.len - 1));
 }
 
 pub const ByteCode = enum(u8) {

@@ -588,10 +588,11 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
         },
         .boolean => return error.nyi,
         .boolean_list => return error.nyi,
-        .long => |val| switch (@as(Value.Long, @enumFromInt(val))) {
+        .long => |val| switch (@as(Value.Long, @fromBackingInt(@intCast(val)))) {
             .null => return error.nyi,
             else => switch (val) {
                 -5 => return vm.parse(y),
+                -6 => return vm.eval(y),
                 else => return error.nyi,
             },
         },
