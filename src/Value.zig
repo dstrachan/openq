@@ -76,7 +76,42 @@ pub fn isEmpty(self: *const Value) bool {
 
 pub fn eql(a: *Value, b: *Value) bool {
     if (@as(Type, a.as) != @as(Type, b.as)) return false;
-    unreachable;
+    switch (a.as) {
+        .list => |a_list| {
+            for (a_list, b.as.list) |a_val, b_val| {
+                if (!a_val.eql(b_val)) return false;
+            }
+            return true;
+        },
+        .boolean => |a_val| return a_val == b.as.boolean,
+        .boolean_list => |a_val| return std.mem.eql(bool, a_val, b.as.boolean_list),
+        .long => |a_val| return a_val == b.as.long,
+        .long_list => |a_val| return std.mem.eql(i64, a_val, b.as.long_list),
+        .float => |a_val| return a_val == b.as.float,
+        .float_list => |a_val| return std.mem.eql(f64, a_val, b.as.float_list),
+        .char => |a_val| return a_val == b.as.char,
+        .char_list => |a_val| return std.mem.eql(u8, a_val, b.as.char_list),
+        .symbol => |a_val| return a_val == b.as.symbol,
+        .symbol_list => |a_val| return std.mem.eql(Symbol, a_val, b.as.symbol_list),
+        .dict => |a_val| return a_val.keys.eql(b.as.dict.keys) and a_val.values.eql(b.as.dict.values),
+        .lambda => |a_val| return std.mem.eql(u8, a_val.source, b.as.lambda.source),
+        .unary_primitive => |a_val| return a_val == b.as.unary_primitive,
+        .operator => |a_val| return a_val == b.as.operator,
+        .iterator => |a_val| return a_val == b.as.iterator,
+        .projection => |a_val| {
+            if (!a_val.callee.eql(b.as.projection.callee)) return false;
+            for (a_val.args, b.as.projection.args) |a_v, b_v| {
+                if (!a_v.eql(b_v)) return false;
+            }
+            return true;
+        },
+        .each => |a_val| return a_val.value.eql(b.as.each.value),
+        .over => |a_val| return a_val.value.eql(b.as.over.value),
+        .scan => |a_val| return a_val.value.eql(b.as.scan.value),
+        .each_prior => |a_val| return a_val.value.eql(b.as.each_prior.value),
+        .each_right => |a_val| return a_val.value.eql(b.as.each_right.value),
+        .each_left => |a_val| return a_val.value.eql(b.as.each_left.value),
+    }
 }
 
 const FmtOptions = struct {
@@ -106,16 +141,17 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
                 try w.writeByte(')');
             },
         },
+        .boolean => |value| try w.writeAll(if (value) "1b" else "0b"),
         .long => |value| {
-            const long: Long = @enumFromInt(value);
+            const long: Long = @fromBackingInt(@intCast(value));
             try w.print("{f}", .{long});
         },
         .long_list => |value| switch (value.len) {
             0 => try w.writeAll("`long$()"),
-            1 => try w.print(",{f}", .{@as(Long, @enumFromInt(value[0]))}),
+            1 => try w.print(",{f}", .{@as(Long, @fromBackingInt(@intCast(value[0])))}),
             else => {
-                try w.print("{f}", .{@as(Long, @enumFromInt(value[0]))});
-                for (value[1..]) |v| try w.print(" {f}", .{@as(Long, @enumFromInt(v))});
+                try w.print("{f}", .{@as(Long, @fromBackingInt(@intCast(value[0])))});
+                for (value[1..]) |v| try w.print(" {f}", .{@as(Long, @fromBackingInt(@intCast(v)))});
             },
         },
         .float => |value| {
@@ -360,7 +396,7 @@ pub const Long = enum(i64) {
             3 => if (buf[0] == '-' and buf[1] == '0' and std.ascii.toLower(buf[2]) == 'w') return .neg_inf,
             else => {},
         }
-        return @enumFromInt(try std.fmt.parseInt(i64, buf, 10));
+        return @fromBackingInt(@intCast(try std.fmt.parseInt(i64, buf, 10)));
     }
 
     pub fn format(long: Long, w: *Io.Writer) !void {
@@ -368,7 +404,7 @@ pub const Long = enum(i64) {
             .null => try w.writeAll("0N"),
             .neg_inf => try w.writeAll("-0W"),
             .inf => try w.writeAll("0W"),
-            else => try w.print("{d}", .{@intFromEnum(long)}),
+            else => try w.print("{d}", .{@backingInt(long)}),
         }
     }
 };

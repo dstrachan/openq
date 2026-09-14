@@ -550,10 +550,7 @@ pub fn drop(vm: *Vm, x: *Value, y: *Value) !*Value {
 }
 
 pub fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    unreachable;
+    return vm.createValue(.boolean, x.eql(y));
 }
 
 pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {

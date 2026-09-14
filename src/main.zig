@@ -6,7 +6,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const q = @import("openq");
+const q = @import("root.zig");
 const Ast = q.Ast;
 const Vm = q.Vm;
 
