@@ -555,25 +555,32 @@ pub fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
 
 pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
     switch (x.as) {
-        .list => |x_val| switch (y.as) {
-            .list => |y_val| {
-                if (x_val.len != y_val.len) return error.length;
+        .list,
+        .boolean_list,
+        .long_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        => switch (y.as) {
+            .list,
+            .boolean_list,
+            .long_list,
+            .float_list,
+            .char_list,
+            .symbol_list,
+            .dict,
+            => {
+                if (x.count() != y.count()) return error.length;
                 const value = try vm.createValue(.dict, .{ .keys = undefined, .values = undefined });
                 value.as.dict.keys = x.ref();
                 value.as.dict.values = y.ref();
                 return value;
             },
             .boolean => return error.nyi,
-            .boolean_list => return error.nyi,
             .long => return error.nyi,
-            .long_list => return error.nyi,
             .float => return error.nyi,
-            .float_list => return error.nyi,
             .char => return error.nyi,
-            .char_list => return error.nyi,
             .symbol => return error.nyi,
-            .symbol_list => return error.nyi,
-            .dict => return error.nyi,
             .lambda => return error.nyi,
             .unary_primitive => return error.nyi,
             .operator => return error.nyi,
@@ -587,22 +594,22 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
             .each_left => return error.nyi,
         },
         .boolean => return error.nyi,
-        .boolean_list => return error.nyi,
-        .long => |val| switch (@as(Value.Long, @fromBackingInt(@intCast(val)))) {
-            .null => return error.nyi,
+        .long => |val| switch (Value.Long.from(val)) {
+            .null => {
+                try vm.stdout.print("{f}\n", .{y.fmt(vm)});
+                try vm.stdout.flush();
+                return y.ref();
+            },
             else => switch (val) {
+                -3 => return vm.createCharList("{f}", .{y.fmt(vm)}),
                 -5 => return vm.parse(y),
                 -6 => return vm.eval(y),
                 else => return error.nyi,
             },
         },
-        .long_list => return error.nyi,
         .float => return error.nyi,
-        .float_list => return error.nyi,
         .char => return error.nyi,
-        .char_list => return error.nyi,
         .symbol => return error.nyi,
-        .symbol_list => return error.nyi,
         .dict => return error.nyi,
         .lambda => return error.nyi,
         .unary_primitive => return error.nyi,

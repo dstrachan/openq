@@ -386,6 +386,10 @@ pub const Long = enum(i64) {
     inf = std.math.maxInt(i64),
     _,
 
+    pub fn from(value: i64) Long {
+        return @fromBackingInt(value);
+    }
+
     pub fn parseStrict(buf: []const u8) !Long {
         switch (buf.len) {
             2 => if (buf[0] == '0') switch (buf[1]) {

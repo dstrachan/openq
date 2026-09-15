@@ -388,9 +388,13 @@ pub fn parse(vm: *Vm, x: *Value) !*Value {
     const slice = try vm.gpa.dupeSentinel(u8, x.as.char_list, 0);
     defer vm.gpa.free(slice);
 
-    var tree: Ast = try .parse(vm.gpa, slice, .{
+    return vm.parseSource(slice, .q);
+}
+
+pub fn parseSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode) !*Value {
+    var tree: Ast = try .parse(vm.gpa, source, .{
         .skip_comments = false,
-        .mode = .q,
+        .mode = mode,
     });
     defer tree.deinit(vm.gpa);
     if (tree.errors.len > 0) {
@@ -399,6 +403,23 @@ pub fn parse(vm: *Vm, x: *Value) !*Value {
     }
 
     return vm.parseTree(&tree);
+}
+
+pub fn createCharList(vm: *Vm, comptime fmt: []const u8, args: anytype) !*Value {
+    var buffer: Io.Writer.Allocating = .init(vm.gpa);
+    defer buffer.deinit();
+
+    try buffer.writer.print(fmt, args);
+    const slice = try buffer.toOwnedSlice();
+    errdefer vm.gpa.free(slice);
+
+    return vm.createValue(.char_list, slice);
+}
+
+pub fn evalSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode) !*Value {
+    const value = try vm.parseSource(source, mode);
+    defer value.deref(vm.gpa);
+    return vm.eval(value);
 }
 
 pub fn eval(vm: *Vm, x: *Value) !*Value {

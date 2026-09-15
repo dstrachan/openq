@@ -263,7 +263,7 @@ pub fn distinct(vm: *Vm, x: *Value) !*Value {
 }
 
 pub fn @"type"(vm: *Vm, x: *Value) !*Value {
-    return vm.createValue(.long, @intFromEnum(x.as));
+    return vm.createValue(.long, @backingInt(x.as));
 }
 
 pub fn value(vm: *Vm, x: *Value) !*Value {

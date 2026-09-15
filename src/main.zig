@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 
 const q = @import("root.zig");
 const Ast = q.Ast;
+const Value = q.Value;
 const Vm = q.Vm;
 
 const build_options = @import("build_options");
@@ -206,8 +207,7 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             };
             defer value.deref(gpa);
 
-            try stdout.print("{f}\n", .{value.fmt(vm)});
-            try stdout.flush();
+            try printResult(stdout, vm, value);
         }
     } else {
         const len = try stdin.streamRemaining(&buffer.writer);
@@ -228,9 +228,15 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
         const value = try vm.evalTree(&tree);
         defer value.deref(gpa);
 
-        try stdout.print("{f}\n", .{value.fmt(vm)});
-        try stdout.flush();
+        try printResult(stdout, vm, value);
     }
+}
+
+fn printResult(stdout: *Io.Writer, vm: *Vm, value: *Value) !void {
+    if (value.as != .unary_primitive or value.as.unary_primitive != .identity) {
+        try stdout.print("{f}", .{value.fmt(vm)});
+    }
+    try stdout.flush();
 }
 
 const IoImpl = switch (build_options.io_mode) {
