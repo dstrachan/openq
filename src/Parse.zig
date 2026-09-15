@@ -477,7 +477,12 @@ fn parseVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier
         .one_colon,
         .one_colon_colon,
         .two_colon,
-        => try p.parseBinary(lhs, sql_identifier),
+        => verb: {
+            if (!isVerb(p.nodeTag(lhs))) break :verb try p.parseBinary(lhs, sql_identifier);
+            // A verb followed by another verb applies monadically in k; q has no such form.
+            if (p.mode != .k) return p.fail(.expected_infix_expr);
+            break :verb try p.parseUnary(lhs, sql_identifier);
+        },
 
         // Iterators
         .apostrophe => unreachable,
@@ -559,7 +564,51 @@ fn parseIterator(p: *Parse, lhs: Node.Index) Error!Node.Index {
 }
 
 fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier) !Node.Index {
-    switch (p.nodeTag(lhs)) {
+    // A verb applied by juxtaposition (`#x`, `+/x`) is monadic application, which only k allows.
+    const lhs_is_verb = isVerb(p.nodeTag(lhs));
+    if (lhs_is_verb and p.mode != .k) return p.fail(.expected_infix_expr);
+
+    const apply_index = try p.reserveNode(.apply_unary);
+    errdefer p.unreserveNode(apply_index);
+
+    const rhs = try p.expectNoun(sql_identifier);
+    // A noun followed by a derived function is the left argument of an infix application: `x f' y`.
+    if (!lhs_is_verb) switch (p.nodeTag(rhs)) {
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => return p.setNode(apply_index, .{
+            .tag = .apply_binary,
+            .main_token = @backingInt(rhs),
+            .data = .{
+                .node_and_opt_node = .{
+                    lhs,
+                    try p.parseExpr(sql_identifier),
+                },
+            },
+        }),
+        else => {},
+    };
+
+    const verb = try p.parseVerb(rhs, sql_identifier);
+    return p.setNode(apply_index, .{
+        .tag = .apply_unary,
+        .main_token = undefined,
+        .data = .{
+            .node_and_node = .{
+                lhs,
+                verb.unwrap() orelse rhs,
+            },
+        },
+    });
+}
+
+/// Whether a node is a verb: an operator glyph or a derived function, as opposed to a noun.
+fn isVerb(tag: Node.Tag) bool {
+    return switch (tag) {
         .colon,
         .colon_colon,
         .plus,
@@ -608,53 +657,15 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
         .one_colon,
         .one_colon_colon,
         .two_colon,
-        => return p.fail(.expected_infix_expr),
-
         .apostrophe,
         .apostrophe_colon,
         .slash,
         .slash_colon,
         .backslash,
         .backslash_colon,
-        => if (p.mode != .k) return p.fail(.expected_infix_expr),
-        else => {},
-    }
-
-    const apply_index = try p.reserveNode(.apply_unary);
-    errdefer p.unreserveNode(apply_index);
-
-    const rhs = try p.expectNoun(sql_identifier);
-    switch (p.nodeTag(rhs)) {
-        .apostrophe,
-        .apostrophe_colon,
-        .slash,
-        .slash_colon,
-        .backslash,
-        .backslash_colon,
-        => return p.setNode(apply_index, .{
-            .tag = .apply_binary,
-            .main_token = @backingInt(rhs),
-            .data = .{
-                .node_and_opt_node = .{
-                    lhs,
-                    try p.parseExpr(sql_identifier),
-                },
-            },
-        }),
-        else => {
-            const verb = try p.parseVerb(rhs, sql_identifier);
-            return p.setNode(apply_index, .{
-                .tag = .apply_unary,
-                .main_token = undefined,
-                .data = .{
-                    .node_and_node = .{
-                        lhs,
-                        verb.unwrap() orelse rhs,
-                    },
-                },
-            });
-        },
-    }
+        => true,
+        else => false,
+    };
 }
 
 fn parseBinary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier) !Node.Index {
@@ -1617,6 +1628,135 @@ test "iterators" {
         "+/[1 2 3]",
         &.{ .plus, .slash, .l_bracket, .number_literal, .number_literal, .number_literal, .r_bracket },
         &.{ .plus, .slash, .call, .number_list_literal },
+        &.{},
+    );
+}
+
+test "monadic operators" {
+    // In k a verb followed by a noun is monadic application.
+    try testParseMode(
+        .k,
+        "@x",
+        &.{ .at, .identifier },
+        &.{ .at, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "#:x",
+        &.{ .hash_colon, .identifier },
+        &.{ .hash_colon, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        ",(1;2)",
+        &.{ .comma, .l_paren, .number_literal, .semicolon, .number_literal, .r_paren },
+        &.{ .comma, .apply_unary, .list, .number_literal, .number_literal },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        ",-3!x",
+        &.{ .comma, .number_literal, .bang, .identifier },
+        &.{ .comma, .apply_unary, .number_literal, .apply_binary, .bang, .identifier },
+        &.{},
+    );
+
+    // A verb followed by another verb is nested monadic application, evaluated right to left.
+    try testParseMode(
+        .k,
+        "~#x",
+        &.{ .tilde, .hash, .identifier },
+        &.{ .tilde, .apply_unary, .hash, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        ".+x",
+        &.{ .dot, .plus, .identifier },
+        &.{ .dot, .apply_unary, .plus, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "*|x",
+        &.{ .asterisk, .pipe, .identifier },
+        &.{ .asterisk, .apply_unary, .pipe, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "~0h>@x",
+        &.{ .tilde, .number_literal, .r_angle_bracket, .at, .identifier },
+        &.{ .tilde, .apply_unary, .number_literal, .apply_binary, .r_angle_bracket, .at, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "+/-x",
+        &.{ .plus, .slash, .minus, .identifier },
+        &.{ .plus, .slash, .apply_unary, .minus, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "|/#:'x",
+        &.{ .pipe, .slash, .hash_colon, .apostrophe, .identifier },
+        &.{ .pipe, .slash, .apply_unary, .hash_colon, .apostrophe, .apply_unary, .identifier },
+        &.{},
+    );
+
+    // A noun on the left is still an infix application.
+    try testParseMode(
+        .k,
+        "1-x",
+        &.{ .number_literal, .minus, .identifier },
+        &.{ .number_literal, .apply_binary, .minus, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "x#y",
+        &.{ .identifier, .hash, .identifier },
+        &.{ .identifier, .apply_binary, .hash, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "x[1]{y}'z",
+        &.{ .identifier, .l_bracket, .number_literal, .r_bracket, .l_brace, .identifier, .r_brace, .apostrophe, .identifier },
+        &.{ .identifier, .call, .number_literal, .apply_binary, .lambda, .identifier, .apostrophe, .identifier },
+        &.{},
+    );
+
+    // q has no monadic application of glyphs.
+    try testParseMode(
+        .q,
+        "@x",
+        &.{ .at, .identifier },
+        &.{},
+        &.{.expected_infix_expr},
+    );
+    try testParseMode(
+        .q,
+        "#:x",
+        &.{ .hash_colon, .identifier },
+        &.{},
+        &.{.expected_infix_expr},
+    );
+    try testParseMode(
+        .q,
+        "~#x",
+        &.{ .tilde, .hash, .identifier },
+        &.{},
+        &.{.expected_infix_expr},
+    );
+    try testParseMode(
+        .q,
+        "#[x]",
+        &.{ .hash, .l_bracket, .identifier, .r_bracket },
+        &.{ .hash, .call, .identifier },
         &.{},
     );
 }
