@@ -277,38 +277,21 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
         .float => return error.nyi,
         .float_list => return error.nyi,
         .char => return error.nyi,
-        .char_list => return error.nyi,
+        .char_list => |source| {
+            // A string starting with a backslash is a system command; anything else is q source.
+            if (source.len > 0 and source[0] == '\\') return vm.system(source[1..]);
+            if (std.mem.trim(u8, source, " \t\r\n").len == 0) return vm.getUnaryPrimitive(.identity);
+            const slice = try vm.gpa.dupeSentinel(u8, source, 0);
+            defer vm.gpa.free(slice);
+            return vm.evalSource(slice, .q);
+        },
         .symbol => |identifier| {
-            if (identifier == .empty) {
-                return vm.state.ref();
-            } else {
-                const identifier_string = vm.internedString(identifier);
-                const state, const symbol = if (identifier_string[0] == '.') state_symbol: {
-                    assert(identifier_string.len > 1);
-                    var it = std.mem.splitScalar(u8, identifier_string, '.');
-                    var prev = it.first();
-                    assert(prev.len == 0);
-                    var symbol: Symbol = .empty;
-                    var state = vm.state.as.dict;
-                    while (it.next()) |entry| {
-                        if (std.mem.findScalar(Symbol, state.keys.as.symbol_list, symbol)) |index| {
-                            state = state.values.as.list[index].as.dict;
-                        } else return error.identifier;
-
-                        prev = entry;
-                        symbol = try vm.intern(prev);
-                    }
-
-                    break :state_symbol .{ state, symbol };
-                } else state_symbol: {
-                    assert(std.mem.countScalar(u8, vm.internedString(identifier), '.') == 0);
-                    break :state_symbol .{ vm.state.as.dict.values.as.list[0].as.dict, identifier };
-                };
-
-                if (std.mem.findScalar(Symbol, state.keys.as.symbol_list, symbol)) |index| {
-                    return state.values.as.list[index].ref();
-                } else return error.identifier;
-            }
+            if (identifier == .empty) return vm.state.ref();
+            const home = (try vm.identifierHome(identifier, false)) orelse return error.identifier;
+            const dict = home.namespace.as.dict;
+            const keys = dict.keys.as.symbol_list;
+            const index = std.mem.findScalar(Symbol, keys, home.name) orelse return error.identifier;
+            return dict.values.as.list[index].ref();
         },
         .symbol_list => return error.nyi,
         .dict => return error.nyi,

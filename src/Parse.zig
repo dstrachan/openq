@@ -398,7 +398,7 @@ fn parseNoun(p: *Parse, comptime sql_identifier: ?SqlIdentifier) !Node.OptionalI
         .identifier => try p.parseIdentifier(),
 
         // Misc.
-        .system => @panic("NYI"),
+        .system => try p.addNoun(.system),
         .invalid => return p.fail(.expected_expr),
         .eos => unreachable,
         .eof => unreachable,
@@ -1628,6 +1628,34 @@ test "iterators" {
         "+/[1 2 3]",
         &.{ .plus, .slash, .l_bracket, .number_literal, .number_literal, .number_literal, .r_bracket },
         &.{ .plus, .slash, .call, .number_list_literal },
+        &.{},
+    );
+}
+
+test "system commands" {
+    try testParse(
+        \\\d .Q
+    , &.{.system}, &.{.system}, &.{});
+    try testParseMode(.k,
+        \\\d .Q
+    , &.{.system}, &.{.system}, &.{});
+    try testParse(
+        \\\d
+    , &.{.system}, &.{.system}, &.{});
+    try testParse(
+        \\\d .Q
+        \\x:1
+    ,
+        &.{ .system, .eos, .identifier, .colon, .number_literal },
+        &.{ .system, .identifier, .apply_binary, .colon, .number_literal },
+        &.{},
+    );
+    try testParse(
+        \\x:1
+        \\\d .
+    ,
+        &.{ .identifier, .colon, .number_literal, .eos, .system },
+        &.{ .identifier, .apply_binary, .colon, .number_literal, .system },
         &.{},
     );
 }

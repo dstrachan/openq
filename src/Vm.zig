@@ -21,6 +21,7 @@ const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     identifier,
     length,
     nyi,
+    os,
     parse,
     rank,
     type,
@@ -43,6 +44,8 @@ unary_primitives: [@typeInfo(UnaryPrimitive).@"enum".field_names.len]*Value = un
 operators: [@typeInfo(Operator).@"enum".field_names.len]*Value = undefined,
 iterators: [@typeInfo(Iterator).@"enum".field_names.len]*Value = undefined,
 state: *Value = undefined,
+/// The current namespace set by `\d`, as an interned path such as `.` or `.Q`.
+namespace: Symbol = .empty,
 
 const Constant = enum(u8) {
     empty_list,
@@ -75,6 +78,10 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
     constants_created += 1;
     vm.constants[@backingInt(Constant.null_symbol)] = try vm.createValue(.symbol, try vm.intern(""));
     constants_created += 1;
+    // The empty symbol must be interned first so that `Symbol.empty` names it.
+    assert(vm.constants[@backingInt(Constant.null_symbol)].as.symbol == .empty);
+    vm.namespace = try vm.intern(".");
+    assert(vm.namespace == .dot);
 
     var unary_primitives_created: usize = 0;
     errdefer for (0..unary_primitives_created) |i| vm.unary_primitives[i].deref(vm.gpa);
@@ -416,13 +423,13 @@ pub fn createCharList(vm: *Vm, comptime fmt: []const u8, args: anytype) !*Value 
     return vm.createValue(.char_list, slice);
 }
 
-pub fn evalSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode) !*Value {
+pub fn evalSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode) RunError!*Value {
     const value = try vm.parseSource(source, mode);
     defer value.deref(vm.gpa);
     return vm.eval(value);
 }
 
-pub fn eval(vm: *Vm, x: *Value) !*Value {
+pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
     std.log.debug("eval: ({t}) {f}", .{ x.as, x.fmt(vm) });
     switch (x.as) {
         .list => |value| {
@@ -497,6 +504,19 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             return list;
         },
         .empty => return vm.getUnaryPrimitive(.empty),
+        .system => {
+            // `\d .Q` is `value"\\d .Q"`.
+            const slice = tree.tokenSlice(tree.nodeMainToken(node));
+            const command = try vm.allocValue(.char_list, slice.len);
+            errdefer command.deref(vm.gpa);
+            @memcpy(command.as.char_list, slice);
+
+            const list = try vm.allocValue(.list, 2);
+            errdefer comptime unreachable;
+            list.as.list[0] = vm.getUnaryPrimitive(.value);
+            list.as.list[1] = command;
+            return list;
+        },
 
         .grouped_expression => return vm.parseNode(tree.nodeData(node).node_and_token[0]),
         .empty_list => return vm.getConstant(.empty_list),
@@ -953,6 +973,186 @@ fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
     return flip;
 }
 
+/// Runs a system command given as the text after its backslash, as `\d .Q` or `value "\\d"` would.
+/// The command name is the text up to the first space; only exact names are built in, so
+/// `\du -hs .` goes to the shell like any other unknown command.
+pub fn system(vm: *Vm, command: []const u8) !*Value {
+    const name_end = std.mem.findAny(u8, command, " \t") orelse command.len;
+    const name = command[0..name_end];
+    const args = std.mem.trim(u8, command[name_end..], " \t");
+
+    if (std.mem.eql(u8, name, "d")) {
+        if (args.len == 0) return vm.createValue(.symbol, vm.namespace);
+        if (args[0] != '.') return error.domain;
+        vm.namespace = try vm.intern(args);
+        return vm.getUnaryPrimitive(.identity);
+    }
+    return vm.shell(command);
+}
+
+/// Runs `command` the way q does: as `sh -c "<command> ><file>"` with a temporary file, so
+/// the redirection binds to the last simple command and overrides any stdout redirection
+/// there, while stderr and the output of earlier commands go to the terminal. The file's
+/// lines come back as a list of strings; a failing command is an `os` error.
+fn shell(vm: *Vm, command: []const u8) !*Value {
+    var random: [8]u8 = undefined;
+    vm.io.random(&random);
+    var path_buffer: [32]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "/tmp/openq{x:0>16}", .{
+        std.mem.readInt(u64, &random, .little),
+    }) catch unreachable;
+
+    const dir: Io.Dir = .cwd();
+    const file = dir.createFile(vm.io, path, .{ .exclusive = true }) catch return error.os;
+    file.close(vm.io);
+    defer dir.deleteFile(vm.io, path) catch {};
+
+    const script = try std.fmt.allocPrint(vm.gpa, "{s} >{s}", .{ command, path });
+    defer vm.gpa.free(script);
+
+    // The child shares the terminal, so flush anything queued ahead of its output.
+    try vm.stdout.flush();
+    var child = std.process.spawn(vm.io, .{ .argv = &.{ "/bin/sh", "-c", script } }) catch return error.os;
+    const term = child.wait(vm.io) catch return error.os;
+    if (!term.success()) return error.os;
+
+    const output = dir.readFileAlloc(vm.io, path, vm.gpa, .unlimited) catch return error.os;
+    defer vm.gpa.free(output);
+
+    // One string per line; a trailing newline does not add an empty line.
+    const trimmed = std.mem.trimEnd(u8, output, "\n");
+    const count = if (trimmed.len == 0) 0 else std.mem.countScalar(u8, trimmed, '\n') + 1;
+    const lines = try vm.allocValue(.list, count);
+    var filled: usize = 0;
+    errdefer {
+        for (lines.as.list[0..filled]) |line| line.deref(vm.gpa);
+        vm.gpa.free(lines.as.list);
+        vm.gpa.destroy(lines);
+    }
+    var it = std.mem.splitScalar(u8, trimmed, '\n');
+    while (it.next()) |line| {
+        if (filled == count) break;
+        const string = try vm.allocValue(.char_list, line.len);
+        @memcpy(string.as.char_list, line);
+        lines.as.list[filled] = string;
+        filled += 1;
+    }
+    return lines;
+}
+
+pub const Home = struct {
+    /// The namespace dictionary holding the name. Borrowed, not referenced.
+    namespace: *Value,
+    name: Symbol,
+};
+
+/// Finds the dictionary an identifier lives in and its bare name, as q does: a bare name
+/// lives in the current namespace (`\d`), `.Q.qt` lives in the namespace `.Q`, and a
+/// single-component name such as `.x` is an entry of the root directory `` ` `` beside the
+/// namespaces, distinct from the bare global `x` whatever the current namespace. Missing
+/// namespaces are created when `create` is set; otherwise null is returned.
+pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
+    // Interning below may move the string bytes, so work on a copy.
+    const string = try vm.gpa.dupe(u8, vm.internedString(identifier));
+    defer vm.gpa.free(string);
+    assert(string.len > 0);
+
+    if (string[0] != '.') {
+        assert(std.mem.findScalar(u8, string, '.') == null);
+        const namespace = (try vm.namespaceAt(vm.internedString(vm.namespace), create)) orelse return null;
+        return .{ .namespace = namespace, .name = identifier };
+    }
+
+    const last_dot = std.mem.findScalarLast(u8, string, '.').?;
+    if (last_dot == 0) return .{ .namespace = vm.state, .name = try vm.intern(string[1..]) };
+    const namespace = (try vm.namespaceAt(string[0..last_dot], create)) orelse return null;
+    return .{ .namespace = namespace, .name = try vm.intern(string[last_dot + 1 ..]) };
+}
+
+/// The namespace dictionary at a dotted path, or null when it does not exist. `.` is the
+/// root namespace of bare globals; `.Q` and `.a.b` are looked up from the root directory
+/// `` ` ``, which holds the namespaces. With `create` set, missing levels are added the way
+/// an assignment would. The returned value is borrowed, not referenced.
+pub fn namespaceAt(vm: *Vm, path: []const u8, create: bool) !?*Value {
+    assert(path.len > 0 and path[0] == '.');
+    if (path.len == 1) return vm.state.as.dict.values.as.list[0];
+
+    const owned = try vm.gpa.dupe(u8, path);
+    defer vm.gpa.free(owned);
+
+    var namespace = vm.state;
+    var it = std.mem.splitScalar(u8, owned[1..], '.');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        const symbol = try vm.intern(part);
+        const dict = namespace.as.dict;
+        if (std.mem.findScalar(Symbol, dict.keys.as.symbol_list, symbol)) |index| {
+            namespace = dict.values.as.list[index];
+            if (namespace.as != .dict) return error.type;
+        } else {
+            if (!create) return null;
+            const child = try vm.createNamespace();
+            defer child.deref(vm.gpa);
+            try vm.namespaceSet(namespace, symbol, child);
+            namespace = child;
+        }
+    }
+    return namespace;
+}
+
+/// An empty namespace: a dictionary whose only entry maps the empty symbol to `::`.
+fn createNamespace(vm: *Vm) !*Value {
+    const keys = try vm.allocValue(.symbol_list, 1);
+    errdefer keys.deref(vm.gpa);
+    keys.as.symbol_list[0] = .empty;
+
+    const values = try vm.allocValue(.list, 1);
+    errdefer values.deref(vm.gpa);
+    values.as.list[0] = vm.getUnaryPrimitive(.identity);
+
+    return vm.createValue(.dict, .{ .keys = keys, .values = values });
+}
+
+/// Sets `name` to `value` in the namespace dictionary, replacing any existing entry.
+pub fn namespaceSet(vm: *Vm, namespace: *Value, name: Symbol, value: *Value) !void {
+    const dict = &namespace.as.dict;
+    const keys = dict.keys.as.symbol_list;
+    const values = dict.values.as.list;
+
+    if (std.mem.findScalar(Symbol, keys, name)) |index| {
+        if (dict.values.ref_count == 0) {
+            const old = values[index];
+            values[index] = value.ref();
+            old.deref(vm.gpa);
+        } else {
+            // The value list is shared, so replace it rather than mutate it.
+            const new_values = try vm.allocValue(.list, values.len);
+            errdefer comptime unreachable;
+            for (new_values.as.list, values, 0..) |*new_v, old_v, i| {
+                new_v.* = if (i == index) value.ref() else old_v.ref();
+            }
+            dict.values.deref(vm.gpa);
+            dict.values = new_values;
+        }
+        return;
+    }
+
+    const new_keys = try vm.allocValue(.symbol_list, keys.len + 1);
+    errdefer new_keys.deref(vm.gpa);
+    @memcpy(new_keys.as.symbol_list[0..keys.len], keys);
+    new_keys.as.symbol_list[keys.len] = name;
+
+    const new_values = try vm.allocValue(.list, values.len + 1);
+    errdefer comptime unreachable;
+    for (new_values.as.list[0..values.len], values) |*new_v, old_v| new_v.* = old_v.ref();
+    new_values.as.list[values.len] = value.ref();
+
+    dict.keys.deref(vm.gpa);
+    dict.keys = new_keys;
+    dict.values.deref(vm.gpa);
+    dict.values = new_values;
+}
+
 pub fn createValue(vm: *Vm, comptime tag: Value.Type, value: @FieldType(Value.Union, @tagName(tag))) !*Value {
     const self = try vm.gpa.create(Value);
     errdefer comptime unreachable;
@@ -1071,4 +1271,149 @@ pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Va
         },
         else => |c| std.debug.panic("NYI: {c}", .{c}),
     }
+}
+
+const testing = std.testing;
+
+fn expectEval(vm: *Vm, source: [:0]const u8, expected: []const u8) !void {
+    const value = try vm.evalSource(source, .q);
+    defer value.deref(vm.gpa);
+
+    var buffer: Io.Writer.Allocating = .init(testing.allocator);
+    defer buffer.deinit();
+    try buffer.writer.print("{f}", .{value.fmt(vm)});
+    try testing.expectEqualStrings(expected, buffer.written());
+}
+
+test "\\d sets the namespace for bare names" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "\\d", "`.");
+    try expectEval(vm, "\\d .Q", "::");
+    try expectEval(vm, "\\d", "`.Q");
+    try expectEval(vm, "qt:1", "1");
+    try expectEval(vm, "qt", "1");
+    try expectEval(vm, ".Q.qt", "1");
+    try expectEval(vm, "\\d .", "::");
+    try expectEval(vm, "\\d", "`.");
+    try expectEval(vm, ".Q.qt", "1");
+    try testing.expectError(error.identifier, vm.evalSource("qt", .q));
+
+    // Root names are not visible from inside a namespace.
+    try expectEval(vm, "x:2", "2");
+    try expectEval(vm, "\\d .Q", "::");
+    try testing.expectError(error.identifier, vm.evalSource("x", .q));
+    try expectEval(vm, "\\d .", "::");
+    try expectEval(vm, "x", "2");
+
+    // Several statements in one source, as in a script.
+    try expectEval(vm, "\\d .Q\nw:7\n\\d .\n.Q.w", "7");
+    try expectEval(vm, "\\d", "`.");
+}
+
+test "\\d creates a namespace only on assignment" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "\\d .bar", "::");
+    try expectEval(vm, "\\d", "`.bar");
+    try expectEval(vm, "\\d .", "::");
+    try testing.expectError(error.identifier, vm.evalSource(".bar", .q));
+
+    try expectEval(vm, "\\d .bar", "::");
+    try expectEval(vm, "y:3", "3");
+    try expectEval(vm, "\\d .", "::");
+    try expectEval(vm, ".bar.y", "3");
+    try expectEval(vm, ".bar", "``y!(::;3)");
+    try expectEval(vm, ".a.b.c:4", "4");
+    try expectEval(vm, ".a.b", "``c!(::;4)");
+}
+
+test ".x is a root directory entry, not the global x" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, ".x:1", "1");
+    try testing.expectError(error.identifier, vm.evalSource("x", .q));
+    try expectEval(vm, "x:2", "2");
+    try expectEval(vm, ".x", "1");
+    try expectEval(vm, "x", "2");
+    try expectEval(vm, ".x~x", "0b");
+
+    // The root directory is reached the same way from inside a namespace.
+    try expectEval(vm, "\\d .foo", "::");
+    try testing.expectError(error.identifier, vm.evalSource("x", .q));
+    try expectEval(vm, ".x", "1");
+    try expectEval(vm, "x:3", "3");
+    try expectEval(vm, ".x", "1");
+    try expectEval(vm, ".foo.x", "3");
+    try expectEval(vm, ".z:5", "5");
+    try expectEval(vm, "\\d .", "::");
+    try expectEval(vm, "x", "2");
+    try expectEval(vm, ".z", "5");
+    try expectEval(vm, ".foo.x", "3");
+    try expectEval(vm, ".foo", "``x!(::;3)");
+
+    // Namespaces are not visible as bare globals of the root namespace.
+    try testing.expectError(error.identifier, vm.evalSource("foo", .q));
+}
+
+test "system commands through value" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "value \"\\\\d\"", "`.");
+    try expectEval(vm, "value \"\\\\d .Q\"", "::");
+    try expectEval(vm, "value \"\\\\d\"", "`.Q");
+    try expectEval(vm, "value \"1+2\"", "3");
+    try expectEval(vm, "value \"\"", "::");
+    try testing.expectError(error.domain, vm.evalSource("\\d Q", .q));
+}
+
+test "unknown system commands run in the shell" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "\\echo hi", ",\"hi\"");
+    try expectEval(vm, "\\printf 'a\\nb\\n'", "(,\"a\";,\"b\")");
+    try expectEval(vm, "\\printf 'a\\nb'", "(,\"a\";,\"b\")");
+    try expectEval(vm, "\\true", "()");
+    try expectEval(vm, "value \"\\\\echo hi\"", ",\"hi\"");
+    try expectEval(vm, "type value \"\\\\echo hi\"", "0");
+
+    // As in q, the command runs as `sh -c "<command> >file"`: the capture binds to the last
+    // simple command and wins over its own stdout redirection, and stderr is not captured.
+    try expectEval(vm, "\\echo err >/dev/null", ",\"err\"");
+    try expectEval(vm, "\\echo err 1>&2", ",\"err\"");
+    try expectEval(vm, "\\echo A >/dev/null; echo D", ",,\"D\"");
+    try expectEval(vm, "\\printf x >/dev/null; printf y", ",,\"y\"");
+    try expectEval(vm, "\\(echo err 1>&2) 2>/dev/null", "()");
+
+    // Only the exact name `d` is the namespace command.
+    try expectEval(vm, "\\d .Q", "::");
+    try expectEval(vm, "\\d", "`.Q");
+    try expectEval(vm, "type value \"\\\\du -hs .\"", "0");
+    try testing.expectError(error.os, vm.evalSource("\\dx 2>/dev/null", .q));
+    try testing.expectError(error.os, vm.evalSource("\\false", .q));
+    try testing.expectError(error.os, vm.evalSource("\\nonexistent_cmd_xyz 2>/dev/null", .q));
+}
+
+test "assignment replaces an existing global" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "z:1", "1");
+    try expectEval(vm, "z:5", "5");
+    try expectEval(vm, "z", "5");
+    try expectEval(vm, "\\d .Q", "::");
+    try expectEval(vm, "z:`a", "`a");
+    try expectEval(vm, "z:`b", "`b");
+    try expectEval(vm, ".Q.z", "`b");
 }

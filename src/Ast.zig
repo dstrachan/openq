@@ -350,7 +350,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
     _ = &end_offset;
     while (true) switch (tree.nodeTag(n)) {
         .root => return 0,
-        .empty => return tree.nodeMainToken(n) - end_offset,
+        .empty, .system => return tree.nodeMainToken(n) - end_offset,
 
         .grouped_expression,
         .empty_list,
@@ -447,7 +447,7 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
     var end_offset: u32 = 0;
     while (true) switch (tree.nodeTag(n)) {
         .root => return @intCast(tree.tokens.len - 1),
-        .empty => return tree.nodeMainToken(n) + end_offset,
+        .empty, .system => return tree.nodeMainToken(n) + end_offset,
 
         .grouped_expression => return tree.nodeData(n).node_and_token[1] + end_offset,
         .empty_list => return tree.nodeData(n).token + end_offset,
@@ -686,6 +686,13 @@ pub const Node = struct {
         ///
         /// The `main_token` field is the next token.
         empty,
+        /// `\d .Q`.
+        ///
+        /// The `data` field is unused.
+        ///
+        /// The `main_token` field is the system token, whose text is the whole command
+        /// including the leading backslash.
+        system,
 
         /// `(expr)`.
         ///

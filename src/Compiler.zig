@@ -102,6 +102,7 @@ fn compileNode(c: *Compiler, node: Node.Index) !void {
     switch (tree.nodeTag(node)) {
         .root => unreachable,
         .empty => try c.emitCode(.empty),
+        .system => unreachable,
 
         .grouped_expression,
         .empty_list,

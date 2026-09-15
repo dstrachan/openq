@@ -415,6 +415,7 @@ pub const Long = enum(i64) {
 
 pub const Symbol = enum(u32) {
     empty = 0,
+    dot = 1,
     _,
 };
 

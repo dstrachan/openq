@@ -164,7 +164,11 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
 
         var mode: Ast.Mode = .q;
         while (true) {
-            std.debug.print("{t})", .{mode});
+            if (vm.namespace == .dot) {
+                std.debug.print("{t})", .{mode});
+            } else {
+                std.debug.print("{t}{s})", .{ mode, vm.internedString(vm.namespace) });
+            }
 
             buffer.shrinkRetainingCapacity(0);
             _ = try stdin.streamDelimiterEnding(&buffer.writer, '\n');
@@ -234,7 +238,7 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
 
 fn printResult(stdout: *Io.Writer, vm: *Vm, value: *Value) !void {
     if (value.as != .unary_primitive or value.as.unary_primitive != .identity) {
-        try stdout.print("{f}", .{value.fmt(vm)});
+        try stdout.print("{f}\n", .{value.fmt(vm)});
     }
     try stdout.flush();
 }
