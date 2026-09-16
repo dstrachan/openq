@@ -310,7 +310,14 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             for (value.args[1..]) |v| try w.print(";{f}", .{v.fmtOptions(data.vm, .{ .skip_empty = true })});
             try w.writeByte(']');
         },
-        inline else => |_, t| @panic("NYI " ++ @tagName(t)),
+        .iterator => |value| try w.print("{f}", .{value}),
+        // A derived function is its function followed by the iterator: `+/`, `{x}'`.
+        .each => |d| try w.print("{f}'", .{d.value.fmt(data.vm)}),
+        .over => |d| try w.print("{f}/", .{d.value.fmt(data.vm)}),
+        .scan => |d| try w.print("{f}\\", .{d.value.fmt(data.vm)}),
+        .each_prior => |d| try w.print("{f}':", .{d.value.fmt(data.vm)}),
+        .each_right => |d| try w.print("{f}/:", .{d.value.fmt(data.vm)}),
+        .each_left => |d| try w.print("{f}\\:", .{d.value.fmt(data.vm)}),
     }
 }
 
@@ -525,12 +532,13 @@ pub fn rank(value: *Value) usize {
         .operator => 2,
         .iterator => 1,
         .projection => |projection| projection.callee.rank(),
-        .each => 1,
-        .over => 1,
-        .scan => 1,
-        .each_prior => 1,
-        .each_right => 1,
-        .each_left => 1,
+        // Each takes what its function takes. A fold takes a seed and one list per remaining
+        // parameter, so as many arguments as its function, and at least two for a monadic
+        // function (`f/[n;x]`). The others take one or two arguments.
+        .each => |d| d.value.rank(),
+        .over => |d| @max(2, d.value.rank()),
+        .scan => |d| @max(2, d.value.rank()),
+        .each_prior, .each_right, .each_left => 2,
     };
 }
 

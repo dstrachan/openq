@@ -179,6 +179,13 @@ const State = enum {
     invalid,
 };
 
+/// Whether the `)` at `index` closes a `k)` or `q)` mode prefix at the start of a statement.
+pub fn isDslPrefixParen(buffer: []const u8, index: usize) bool {
+    if (index < 1 or buffer[index] != ')') return false;
+    if (buffer[index - 1] != 'k' and buffer[index - 1] != 'q') return false;
+    return index == 1 or buffer[index - 2] == '\n' or buffer[index - 2] == ';';
+}
+
 pub fn next(self: *Tokenizer) Token {
     var result: Token = .{
         .tag = undefined,
@@ -950,6 +957,8 @@ pub fn next(self: *Tokenizer) Token {
     }
 
     self.next_is_minus = result.tag.isNextMinus();
+    // A statement starts afresh after a `k)` or `q)` prefix, so `k)-1_x` begins with -1.
+    if (result.tag == .r_paren and isDslPrefixParen(self.buffer, result.loc.start)) self.next_is_minus = false;
 
     result.loc.end = self.index;
     return result;

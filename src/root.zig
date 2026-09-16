@@ -17,6 +17,7 @@ pub const Value = @import("Value.zig");
 pub const Compiler = @import("Compiler.zig");
 pub const operators = @import("functions/operators.zig");
 pub const unary_primitives = @import("functions/unary_primitives.zig");
+pub const iterators = @import("functions/iterators.zig");
 pub const literal = @import("literal.zig");
 pub const decimal = @import("decimal.zig");
 pub const clock = @import("clock.zig");

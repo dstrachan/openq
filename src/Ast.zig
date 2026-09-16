@@ -248,7 +248,8 @@ pub fn tokenSliceMode(tree: Ast, token_index: TokenIndex, mode: Mode) []const u8
         .buffer = tree.source,
         .index = tree.tokenStart(token_index),
         .mode = mode,
-        .next_is_minus = token_index != 0 and tree.tokenTag(token_index - 1).isNextMinus(),
+        .next_is_minus = token_index != 0 and tree.tokenTag(token_index - 1).isNextMinus() and
+            !Tokenizer.isDslPrefixParen(tree.source, tree.tokenStart(token_index - 1)),
     };
     const token = token: {
         const token = tokenizer.next();

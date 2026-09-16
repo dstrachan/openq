@@ -569,7 +569,8 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
     // allows; the signal `'x` and the return `:x` are the forms q has as well.
     const lhs_is_verb = isVerb(p.nodeTag(lhs));
     const lhs_tag = p.nodeTag(lhs);
-    if (lhs_is_verb and p.mode != .k and lhs_tag != .apostrophe and lhs_tag != .colon) return p.fail(.expected_infix_expr);
+    const is_signal = lhs_tag == .apostrophe and p.nodeData(lhs).opt_node == .none;
+    if (lhs_is_verb and p.mode != .k and !is_signal and lhs_tag != .colon) return p.fail(.expected_infix_expr);
 
     const apply_index = try p.reserveNode(.apply_unary);
     errdefer p.unreserveNode(apply_index);

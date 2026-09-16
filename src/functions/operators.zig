@@ -816,7 +816,7 @@ pub fn nullLike(vm: *Vm, values: *Value) Allocator.Error!*Value {
 
 /// The null of a value's own type: `0N` for a long, `""` for a string, `()` for a general
 /// list and `::` for anything else.
-fn nullOfValue(vm: *Vm, value: *Value) Allocator.Error!*Value {
+pub fn nullOfValue(vm: *Vm, value: *Value) Allocator.Error!*Value {
     switch (value.as) {
         inline .boolean,
         .byte,

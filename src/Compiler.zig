@@ -158,6 +158,9 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
             try c.scan(lhs);
             try c.scan(rhs);
         },
+        .apostrophe, .apostrophe_colon, .slash, .slash_colon, .backslash, .backslash_colon => {
+            if (tree.nodeData(node).opt_node.unwrap()) |function| try c.scan(function);
+        },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
@@ -242,8 +245,8 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
             try c.compileNode(rhs);
-            // `'x` signals an error.
-            if (tree.nodeTag(lhs) == .apostrophe) return c.emitCode(.signal);
+            // `'x` signals an error; `f'x` is the each of `f`.
+            if (tree.nodeTag(lhs) == .apostrophe and tree.nodeData(lhs).opt_node == .none) return c.emitCode(.signal);
             // A primitive is an instruction of its own, as q compiles `neg x` to `neg`.
             if (try c.directOpcode(lhs, 1)) |code| {
                 try c.emitCode(code);
@@ -294,14 +297,15 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             if (maybe_rhs.unwrap()) |rhs| {
                 try c.compileNode(rhs);
                 try c.compileNode(lhs);
-                // An operator is an instruction of its own, as q compiles `x+y` to `+`.
+                // An operator is an instruction of its own, as q compiles `x+y` to `+`; a
+                // derived function (`x+/y`) or a keyword is pushed and called.
                 if (try c.directOpcode(op, 2)) |code| return c.emitCode(code);
-                try c.compileConstantNode(op);
+                try c.compileOperand(op);
                 return c.emitCall(2);
             }
             // A missing right operand projects, so `1+` is `+[1]`.
             try c.compileNode(lhs);
-            try c.compileConstantNode(op);
+            try c.compileOperand(op);
             try c.emitCode(.apply_at);
         },
 
@@ -314,18 +318,28 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             if (vm.qEntry(slice)) |entry| try c.emitConstant(entry.ref()) else try c.compileGlobal(slice);
         },
 
+        // An iterator on a function is the function followed by the iterator instruction,
+        // as q compiles `x+/y` to push `+` then `over`; a bare iterator is a constant.
+        .apostrophe, .apostrophe_colon, .slash, .slash_colon, .backslash, .backslash_colon => |tag| {
+            const iterator = Vm.iteratorOf(tag);
+            const function = tree.nodeData(node).opt_node.unwrap() orelse return c.emitConstant(vm.getIterator(iterator));
+            try c.compileOperand(function);
+            try c.emitCode(switch (iterator) {
+                .each => .each,
+                .over => .over,
+                .scan => .scan,
+                .each_prior => .each_prior,
+                .each_right => .each_right,
+                .each_left => .each_left,
+            });
+        },
+
         .system,
         .select,
         .exec,
         .update,
         .delete_rows,
         .delete_cols,
-        .apostrophe,
-        .apostrophe_colon,
-        .slash,
-        .slash_colon,
-        .backslash,
-        .backslash_colon,
         => return error.nyi,
 
         // A symbol literal is a one-item list in a parse tree, so that evaluating it does
@@ -385,6 +399,12 @@ fn directOpcode(c: *Compiler, node: Node.Index, arity: u8) Error!?ByteCode {
         .list,
         .expr_block,
         .lambda,
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
         => return null,
         else => if (arity == 1) try c.vm.parseUnaryNode(node) else try c.vm.parseNode(node),
     };
@@ -396,6 +416,31 @@ fn directOpcode(c: *Compiler, node: Node.Index, arity: u8) Error!?ByteCode {
     };
     const code = std.meta.stringToEnum(ByteCode, name) orelse return null;
     return if (@backingInt(code) >= @backingInt(ByteCode.identity) and @backingInt(code) < @backingInt(ByteCode.self)) code else null;
+}
+
+/// The function under an iterator: a glyph is its dyadic operator, as `+/` folds with `+`;
+/// anything else compiles.
+fn compileOperand(c: *Compiler, node: Node.Index) Error!void {
+    switch (c.tree.nodeTag(node)) {
+        .identifier,
+        .keyword,
+        .builtin,
+        .call,
+        .grouped_expression,
+        .apply_unary,
+        .apply_binary,
+        .list,
+        .expr_block,
+        .lambda,
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
+        => try c.compileNode(node),
+        else => try c.compileConstantNode(node),
+    }
 }
 
 /// The function of `f x`: a glyph is its monadic form, as `-:`; anything else compiles.
@@ -411,6 +456,12 @@ fn compileFunction(c: *Compiler, node: Node.Index) Error!void {
         .list,
         .expr_block,
         .lambda,
+        .apostrophe,
+        .apostrophe_colon,
+        .slash,
+        .slash_colon,
+        .backslash,
+        .backslash_colon,
         => try c.compileNode(node),
         else => {
             const value = try c.vm.parseUnaryNode(node);

@@ -20,7 +20,7 @@ const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || err
     nyi,
     assign,
 };
-const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
+pub const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     assign,
     domain,
     identifier,
@@ -148,10 +148,23 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
     // `.z` exists from the start so that `.z.ph:...` and friends have somewhere to go; the
     // clock variables are computed on every read rather than stored in it.
     _ = try vm.namespaceAt(".z", true);
-    errdefer comptime unreachable;
 
     vm.local_zone = .load(io, gpa);
+    errdefer vm.local_zone.deinit();
+    try vm.seedIteratorKeywords();
+    errdefer comptime unreachable;
     return vm;
+}
+
+/// `each`, `over`, `scan` and `prior` are the k lambdas q.k defines them as.
+fn seedIteratorKeywords(vm: *Vm) !void {
+    for ([_][:0]const u8{ ".q.each:{x'y}", ".q.over:{x/y}", ".q.scan:{x\\y}", ".q.prior:{x':y}" }) |source| {
+        const value = vm.evalSource(source, .k, "<init>") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        value.deref(vm.gpa);
+    }
 }
 
 /// Seeds `.q` with the keywords q.k defines as plain aliases of primitives (`neg:-:`,
@@ -390,7 +403,11 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 }
             }
         },
-        .iterator => unreachable,
+        .iterator => |iterator| {
+            // An iterator applied to a function makes the derived function.
+            if (args.len != 1) return error.rank;
+            return vm.derive(iterator, args[0]);
+        },
         .projection => |projection| {
             const rank = projection.callee.rank();
             const holes = holes: {
@@ -439,13 +456,47 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
 
             return vm.applyImpl(projection.callee, new_args.items);
         },
-        .each => unreachable,
-        .over => unreachable,
-        .scan => unreachable,
-        .each_prior => unreachable,
-        .each_right => unreachable,
-        .each_left => unreachable,
+        .each, .over, .scan, .each_prior, .each_right, .each_left => {
+            // A hole projects the derived function, as `f/[;x]` does in q.
+            for (args) |a| if (a.isEmpty()) return vm.project(func, args);
+            return switch (func.as) {
+                .each => |d| q.iterators.each(vm, d.value, args),
+                .over => |d| q.iterators.over(vm, d.value, args),
+                .scan => |d| q.iterators.scan(vm, d.value, args),
+                .each_prior => |d| q.iterators.prior(vm, d.value, args),
+                .each_right => |d| q.iterators.right(vm, d.value, args),
+                .each_left => |d| q.iterators.left(vm, d.value, args),
+                else => unreachable,
+            };
+        },
     }
+}
+
+/// The derived function of an iterator on `function`: `+/` from `/` and `+`.
+pub fn derive(vm: *Vm, iterator: Iterator, function: *Value) Allocator.Error!*Value {
+    const f = function.ref();
+    errdefer f.deref(vm.gpa);
+    return switch (iterator) {
+        .each => vm.createValue(.each, .{ .value = f }),
+        .over => vm.createValue(.over, .{ .value = f }),
+        .scan => vm.createValue(.scan, .{ .value = f }),
+        .each_prior => vm.createValue(.each_prior, .{ .value = f }),
+        .each_right => vm.createValue(.each_right, .{ .value = f }),
+        .each_left => vm.createValue(.each_left, .{ .value = f }),
+    };
+}
+
+/// The iterator an iterator node stands for.
+pub fn iteratorOf(tag: Node.Tag) Iterator {
+    return switch (tag) {
+        .apostrophe => .each,
+        .slash => .over,
+        .backslash => .scan,
+        .apostrophe_colon => .each_prior,
+        .slash_colon => .each_right,
+        .backslash_colon => .each_left,
+        else => unreachable,
+    };
 }
 
 pub fn enlist(vm: *Vm, args: []*Value) !*Value {
@@ -819,7 +870,7 @@ fn evalStatements(vm: *Vm, statements: []*Value) RunError!void {
 
 /// Whether a condition holds: an integer-like atom other than zero, as q reads it. A null
 /// is nonzero and so holds; floats, symbols, lists and functions are a type error.
-fn truthy(value: *Value) error{type}!bool {
+pub fn truthy(value: *Value) error{type}!bool {
     return switch (value.as) {
         .boolean => |b| b,
         .byte => |b| b != 0,
@@ -1020,13 +1071,27 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
         .zero_colon_colon => return vm.getUnaryPrimitive(.read_text),
         .one_colon_colon => return vm.getUnaryPrimitive(.read_binary),
 
+        // An iterator applied to a function is `(iterator;function)`, as `parse "+/x"` shows
+        // `((/;+);x)`; a bare iterator is its own value. The function under a glyph is the
+        // dyadic operator (`+/` folds with `+`), which `parseNode` gives.
         .apostrophe,
         .apostrophe_colon,
         .slash,
         .slash_colon,
         .backslash,
         .backslash_colon,
-        => unreachable,
+        => |tag| {
+            const iterator = vm.getIterator(iteratorOf(tag));
+            errdefer iterator.deref(gpa);
+            const function_node = tree.nodeData(node).opt_node.unwrap() orelse return iterator;
+            const function = try vm.parseNode(function_node);
+            errdefer function.deref(gpa);
+            const list = try vm.allocValue(.list, 2);
+            errdefer comptime unreachable;
+            list.as.list[0] = iterator;
+            list.as.list[1] = function;
+            return list;
+        },
 
         .call => {
             const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
@@ -1206,8 +1271,9 @@ pub fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
         .minus => vm.getUnaryPrimitive(.neg),
         .dot => vm.getUnaryPrimitive(.value),
         .colon => vm.getUnaryPrimitive(.identity),
-        // `'x` at the top level parses as the char `'` applied, which `eval` signals.
-        .apostrophe => vm.createValue(.char, '\''),
+        // `'x` at the top level parses as the char `'` applied, which `eval` signals; with
+        // a function on its left the apostrophe is the each iterator.
+        .apostrophe => if (tree.nodeData(node).opt_node == .none) vm.createValue(.char, '\'') else vm.parseNode(node),
         .l_angle_bracket => vm.getUnaryPrimitive(.asc),
         .equal => vm.getUnaryPrimitive(.group),
         .r_angle_bracket => vm.getUnaryPrimitive(.desc),
@@ -1608,7 +1674,11 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                     const slot = lambda.params.len + (byte - @backingInt(Compiler.ByteCode.local_1));
                     try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
                 } else if (@hasField(Iterator, name)) {
-                    try stack.append(vm.gpa, vm.getIterator(@field(Iterator, name)));
+                    // An iterator instruction turns the function on top of the stack into
+                    // the derived function, as q compiles `x+/y` to push `+` then `over`.
+                    const function = stack.pop().?;
+                    defer function.deref(vm.gpa);
+                    try stack.append(vm.gpa, try vm.derive(@field(Iterator, name), function));
                 } else if (@hasField(UnaryPrimitive, name)) {
                     // A primitive applies to the value on top of the stack.
                     const x = stack.pop().?;
@@ -3614,4 +3684,127 @@ test "lambdas span indented continuation lines" {
     try expectEval(vm, "a:1\n +2\na", "3");
     // An unindented line ends the statement even inside a lambda, so this cannot parse.
     try testing.expectError(error.parse, vm.evalSource("b:{\nx+1}\nb 2", .q, "<test>"));
+}
+
+test "iterators follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Parse trees: an iterator on a function is `(iterator;function)`.
+    try expectEval(vm, "parse \"x f'y\"", "((';`f);`x;`y)");
+    try expectEval(vm, "parse \"x+/y\"", "((/;+);`x;`y)");
+    try expectEval(vm, "parse \"(+/)x\"", "((/;+);`x)");
+    try expectEval(vm, "parse \"+/[s;x]\"", "((/;+);`s;`x)");
+    try expectEval(vm, "parse \"k)#:'x\"", "((';#:);`x)");
+    try expectEval(vm, "parse \"k)-1_'x\"", "((';_);-1;`x)");
+    try expectEval(vm, "parse \"k)@\\\\:\\\\:\"", "(\\:;(\\:;@))");
+    try expectEval(vm, "parse \"k)'/'\"", "(';(/;'))");
+    try testing.expectError(error.parse, vm.evalSource("f'x", .q, "<test>"));
+
+    // Bytecode: the function then the iterator instruction, minus q's trailing byte.
+    try expectEval(vm, "(value {x+/y})[0]", "98 97 160 19 10 2 0");
+    try expectEval(vm, "(value {f'[x;y]})[0]", "98 97 129 18 10 2 0");
+    try expectEval(vm, "(value {(+/)x})[0]", "97 160 19 82 0");
+    try expectEval(vm, "(value {f/[3;x]})[0]", "97 160 129 19 10 2 0");
+    try expectEval(vm, "(value {x f/:y})[0]", "98 97 129 22 10 2 0");
+
+    // Each.
+    try expectEval(vm, "neg'[1 2 3]", "-1 -2 -3");
+    try expectEval(vm, "{x*2}'[1 2 3]", "2 4 6");
+    try expectEval(vm, "{x*2}'[5]", "10");
+    try expectEval(vm, "{(x;y)}'[1 2;3 4]", "(1 3;2 4)");
+    try expectEval(vm, "{(x;y)}'[1 2;3]", "(1 3;2 3)");
+    try expectEval(vm, "{x+y}'[1 2 3;10 20 30]", "11 22 33");
+    try expectEval(vm, "(::)'[1 2 3]", "1 2 3");
+    try expectEval(vm, "{x}'[(1;`a;\"s\")]", "(1;`a;\"s\")");
+    try expectEval(vm, "{x}'[()]", "()");
+    try expectEval(vm, "{(x;y;z)}'[1 2;3 4;5 6]", "(1 3 5;2 4 6)");
+    try expectEval(vm, "{x+y+z}'[1 2;3;4 5]", "8 10");
+    try expectEval(vm, "1 2+''3 4", "4 6");
+    try expectEval(vm, "{x*2}''[1 2 3]", "2 4 6");
+    try expectEval(vm, "1 2 3 {x*y}' 10 20 30", "10 40 90");
+    try expectEval(vm, "count each (1 2;3 4 5)", "2 3");
+    try expectEvalMode(vm, .k, "#:'(1 2;3 4 5)", "2 3");
+    try expectEvalMode(vm, .k, "1 2 3+'10 20 30", "11 22 33");
+    try testing.expectError(error.length, vm.evalSource("{(x;y)}'[1 2;3 4 5]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("{x}'[1 2;3 4;5 6]", .q, "<test>"));
+
+    // Over and scan.
+    try expectEval(vm, "+/[1 2 3]", "6");
+    try expectEval(vm, "+/[1]", "1");
+    try expectEval(vm, "+/[()]", "()");
+    try expectEval(vm, "+/[`long$()]", "0");
+    try expectEval(vm, "*/[`long$()]", "1");
+    try expectEval(vm, "+/[`float$()]", "0f");
+    try expectEval(vm, "+/[10;1 2 3]", "16");
+    try expectEval(vm, "+/[10;()]", "10");
+    try expectEval(vm, "+/[10;5]", "15");
+    try expectEval(vm, "{x+y}/[1 2 3]", "6");
+    try expectEval(vm, "{x+y}/[10;1 2 3]", "16");
+    try expectEval(vm, "{x*2}/[3;1]", "8");
+    try expectEval(vm, "{x*2}/[0;1]", "1");
+    try expectEval(vm, "{x*2}/[-1;1]", "1");
+    try expectEval(vm, "{x+1}/[0N;1]", "1");
+    try expectEval(vm, "{x*2}/[2;1 2 3]", "4 8 12");
+    try expectEval(vm, "{x*2}/[{x-128};1]", "128");
+    try expectEval(vm, "+\\[1 2 3]", "1 3 6");
+    try expectEval(vm, "+\\[10;1 2 3]", "11 13 16");
+    try expectEval(vm, "{x*2}\\[3;1]", "1 2 4 8");
+    try expectEval(vm, "{x*2}\\[0;1]", ",1");
+    try expectEval(vm, "{x*2}\\[{x-128};1]", "1 2 4 8 16 32 64 128");
+    try expectEval(vm, "{x+y}/[1 2 3;10 20 30]", "61 62 63");
+    try expectEval(vm, "{x+y+z}/[1;1 2 3;10 20 30]", "67");
+    try expectEval(vm, "{x+y+z}\\[1;1 2 3;10 20 30]", "12 34 67");
+    try expectEval(vm, "+/[1 2 3;4 5 6]", "16 17 18");
+    try expectEval(vm, "1 2 3+/4 5 6", "16 17 18");
+    try expectEval(vm, "(+/)1 2 3", "6");
+    try expectEval(vm, "+/[x:1 2 3]", "6");
+    try expectEval(vm, "{x+y}\\[(1;2;3)]", "1 3 6");
+    try expectEvalMode(vm, .k, "+/1 2 3", "6");
+    try expectEvalMode(vm, .k, "+\\1 2 3", "1 3 6");
+    try expectEvalMode(vm, .k, "10+/1 2 3", "16");
+    try expectEval(vm, "{x+y} over 1 2 3", "6");
+    try expectEval(vm, "{x+y} scan 1 2 3", "1 3 6");
+    try testing.expectError(error.type, vm.evalSource("{x+1}/[3f;1]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("{x+1}/[3h;1]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("+/[1 2 3;4 5 6;7 8 9]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("(+/)[1;2;3]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("{x*2}/[1;2;3]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("{x+y+z}/[1;2;3;4]", .q, "<test>"));
+    try expectEval(vm, "{x+y+z}/[1;2;3]", "6");
+    try expectEval(vm, "{x*2}/[;2][3]", "16");
+    try expectEval(vm, "(+/)[;1 2][10]", "13");
+    try testing.expectError(error.rank, vm.evalSource("{x+y}/[1;2 3;4 5]", .q, "<test>"));
+
+    // Each-prior, each-right and each-left.
+    try expectEval(vm, "-':[1 3 6]", "1 2 3");
+    try expectEval(vm, "-':[10;1 3 6]", "-9 2 3");
+    try expectEval(vm, "+':[1 3 6]", "1 4 9");
+    try expectEval(vm, "*':[1 3 6]", "1 3 18");
+    try expectEval(vm, "%':[1 3 6]", "1 3 2f");
+    try expectEval(vm, "-':[1.5 3]", "1.5 1.5");
+    try expectEval(vm, "-':[1 3 6h]", "1 2 3i");
+    try expectEval(vm, "-':[2023.01.02 2023.01.05]", "8402 3i");
+    try expectEval(vm, "{x-y}':[1 3 6]", "0N 2 3");
+    try expectEval(vm, "{(x;y)}':[1 3 6]", "(1 0N;3 1;6 3)");
+    try expectEval(vm, "{(x;y)}':[`a`b]", "(`a`;`b`a)");
+    try expectEval(vm, "-':[1]", "1");
+    try expectEval(vm, "-':[()]", "()");
+    try expectEval(vm, "{x+y}':[1;2 3]", "3 5");
+    try expectEval(vm, "(-) prior 1 3 6", "1 2 3");
+    try expectEvalMode(vm, .k, "-':1 3 6", "1 2 3");
+    try expectEval(vm, "{(x;y)}/:[1 2;3 4]", "((1 2;3);(1 2;4))");
+    try expectEval(vm, "{(x;y)}\\:[1 2;3 4]", "((1;3 4);(2;3 4))");
+    try expectEval(vm, "1 2+/:3 4", "(4 5;5 6)");
+    try expectEval(vm, "1 2+\\:3 4", "(4 5;5 6)");
+    try testing.expectError(error.rank, vm.evalSource("{x}/:[1 2 3]", .q, "<test>"));
+
+    // Derived functions are values.
+    try expectEval(vm, "-3!+/", "\"+/\"");
+    try expectEval(vm, "-3!{x}'", "\"{x}'\"");
+    try expectEval(vm, "'[+]", "+'");
+    try expectEvalMode(vm, .k, "{x/y}[+;1 2 3]", "6");
+    try testing.expectError(error.parse, vm.evalSource("{x/y}", .q, "<test>"));
+    try expectEval(vm, "f:{x+y};g:{f/[x]};g 1 2 3", "6");
 }
