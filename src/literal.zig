@@ -255,6 +255,154 @@ fn parseTimeOfDay(comptime T: type, s: []const u8, unit: i64) !T {
     return @intCast(if (negative) -units else units);
 }
 
+/// The kind a capital cast letter parses text into, as `"J"$"12"`; null for `S` and `C`,
+/// which are not literal kinds, and for letters that are not casts.
+pub fn kindOfCapital(letter: u8) ?Kind {
+    return switch (letter) {
+        'B' => .boolean,
+        'X' => .byte,
+        'H' => .short,
+        'I' => .int,
+        'J' => .long,
+        'E' => .real,
+        'F' => .float,
+        'P' => .timestamp,
+        'M' => .month,
+        'D' => .date,
+        'Z' => .datetime,
+        'N' => .timespan,
+        'U' => .minute,
+        'V' => .second,
+        'T' => .time,
+        else => null,
+    };
+}
+
+/// q's forgiving text parsing behind the capital cast letters: spaces are trimmed, integers
+/// take an optional sign and their null and infinity spellings, dates accept `2023.04.17`,
+/// `20230417`, `2023/04/17`, `2023-04-17` and `04/17/2023`, times accept compact digits
+/// (`1234` is `12:34`), and anything unparsable, including an out-of-range integer, is the
+/// null of the kind. A boolean is true for a single character other than `0`.
+pub fn parseLoose(kind: Kind, text_in: []const u8) Atom {
+    const text = std.mem.trim(u8, text_in, " ");
+    return switch (kind) {
+        .boolean => .{ .boolean = text.len == 1 and text[0] != '0' },
+        .byte => .{ .byte = if (text.len == 1 or text.len == 2) std.fmt.parseInt(u8, text, 16) catch 0 else 0 },
+        .short => .{ .short = looseInteger(Value.Short, text) },
+        .int => .{ .int = looseInteger(Value.Int, text) },
+        .long => .{ .long = looseInteger(Value.Long, text) },
+        .real => .{ .real = @floatCast(looseFloat(text)) },
+        .float => .{ .float = looseFloat(text) },
+        .timestamp => .{ .timestamp = looseTimestamp(text) orelse @backingInt(Value.Long.null) },
+        .month => .{ .month = looseMonth(text) orelse @backingInt(Value.Int.null) },
+        .date => .{ .date = looseDate(text) orelse @backingInt(Value.Int.null) },
+        .datetime => .{ .datetime = if (looseTimestamp(text)) |nanos| @as(f64, @floatFromInt(nanos)) / @as(f64, @floatFromInt(ns_per_day)) else std.math.nan(f64) },
+        .timespan => .{ .timespan = if (text.len == 0) @backingInt(Value.Long.null) else parseTimespan(text) catch @backingInt(Value.Long.null) },
+        .minute => .{ .minute = looseTimeOfDay(text, 60 * ns_per_second, 4) orelse @backingInt(Value.Int.null) },
+        .second => .{ .second = looseTimeOfDay(text, ns_per_second, 6) orelse @backingInt(Value.Int.null) },
+        .time => .{ .time = looseTimeOfDay(text, 1_000_000, 9) orelse @backingInt(Value.Int.null) },
+    };
+}
+
+fn looseInteger(comptime I: type, text: []const u8) @typeInfo(I).@"enum".tag_type {
+    const T = @typeInfo(I).@"enum".tag_type;
+    if (specialInteger(I, text)) |v| return v;
+    if (text.len == 0) return @backingInt(I.null);
+    const digits = if (text[0] == '+' or text[0] == '-') text[1..] else text;
+    if (digits.len == 0) return @backingInt(I.null);
+    for (digits) |c| if (!std.ascii.isDigit(c)) return @backingInt(I.null);
+    const value = std.fmt.parseInt(i128, text, 10) catch return @backingInt(I.null);
+    if (value > std.math.maxInt(T) or value < -@as(i128, std.math.maxInt(T))) return @backingInt(I.null);
+    return @intCast(value);
+}
+
+fn looseFloat(text: []const u8) f64 {
+    if (specialFloat(text)) |v| return v;
+    if (text.len == 0 or !(std.ascii.isDigit(text[0]) or text[0] == '+' or text[0] == '-' or text[0] == '.')) return std.math.nan(f64);
+    return q.parseFloat(text) catch std.math.nan(f64);
+}
+
+fn allDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+/// Days since 2000.01.01 of a date in one of the layouts q accepts, or null.
+fn looseDate(text: []const u8) ?i32 {
+    var y: i64 = undefined;
+    var m: i64 = undefined;
+    var d: i64 = undefined;
+    if (text.len == 8 and allDigits(text)) {
+        y = std.fmt.parseInt(i64, text[0..4], 10) catch return null;
+        m = std.fmt.parseInt(i64, text[4..6], 10) catch return null;
+        d = std.fmt.parseInt(i64, text[6..8], 10) catch return null;
+    } else {
+        var parts: [3][]const u8 = undefined;
+        var count: usize = 0;
+        var it = std.mem.splitAny(u8, text, "./-");
+        while (it.next()) |part| : (count += 1) {
+            if (count == 3 or !allDigits(part)) return null;
+            parts[count] = part;
+        }
+        if (count != 3) return null;
+        // Year first, or month/day/year as q reads `04/17/2023` by default.
+        const ymd = if (parts[0].len == 4) parts else if (parts[2].len == 4) [3][]const u8{ parts[2], parts[0], parts[1] } else return null;
+        y = std.fmt.parseInt(i64, ymd[0], 10) catch return null;
+        m = std.fmt.parseInt(i64, ymd[1], 10) catch return null;
+        d = std.fmt.parseInt(i64, ymd[2], 10) catch return null;
+    }
+    if (m < 1 or m > 12 or d < 1 or d > daysInMonth(y, m)) return null;
+    return @intCast(daysFromCivil(y, m, d) - epoch_days);
+}
+
+fn daysInMonth(year: i64, month: i64) i64 {
+    return switch (month) {
+        4, 6, 9, 11 => 30,
+        2 => if (@rem(year, 4) == 0 and (@rem(year, 100) != 0 or @rem(year, 400) == 0)) 29 else 28,
+        else => 31,
+    };
+}
+
+/// Months since 2000.01 of `YYYY.MM` or `YYYYMM`, or null.
+fn looseMonth(text: []const u8) ?i32 {
+    const y_text, const m_text = if (text.len == 7 and text[4] == '.')
+        .{ text[0..4], text[5..7] }
+    else if (text.len == 6 and allDigits(text))
+        .{ text[0..4], text[4..6] }
+    else
+        return null;
+    if (!allDigits(y_text) or !allDigits(m_text)) return null;
+    const y = std.fmt.parseInt(i32, y_text, 10) catch return null;
+    const m = std.fmt.parseInt(i32, m_text, 10) catch return null;
+    if (m < 1 or m > 12) return null;
+    return (y - 2000) * 12 + m - 1;
+}
+
+/// Nanoseconds since 2000.01.01 of a date optionally followed by `D`, `T` or a space and a
+/// time of day, or null.
+fn looseTimestamp(text: []const u8) ?i64 {
+    const split = std.mem.findAny(u8, text, "DT ") orelse text.len;
+    const days: i64 = looseDate(text[0..split]) orelse return null;
+    const nanos: i64 = if (split + 1 < text.len) parseTimeOfDay(i64, text[split + 1 ..], 1) catch return null else 0;
+    return days * ns_per_day + nanos;
+}
+
+/// A time of day in units of `unit` nanoseconds, from `hh[:mm[:ss[.fff]]]` or from
+/// `compact_digits` bare digits (`1234` for a minute, `123456123` for a time), or null.
+fn looseTimeOfDay(text: []const u8, unit: i64, compact_digits: usize) ?i32 {
+    if (text.len == compact_digits and allDigits(text)) {
+        var nanos: i64 = (std.fmt.parseInt(i64, text[0..2], 10) catch return null) * 3600 * ns_per_second;
+        nanos += (std.fmt.parseInt(i64, text[2..4], 10) catch return null) * 60 * ns_per_second;
+        if (compact_digits >= 6) nanos += (std.fmt.parseInt(i64, text[4..6], 10) catch return null) * ns_per_second;
+        if (compact_digits == 9) nanos += (std.fmt.parseInt(i64, text[6..9], 10) catch return null) * 1_000_000;
+        return @intCast(@divTrunc(nanos, unit));
+    }
+    if (text.len == 0) return null;
+    const nanos = parseTimeOfDay(i64, text, 1) catch return null;
+    return @intCast(@divTrunc(nanos, unit));
+}
+
 /// Days since 1970.01.01 of a proleptic Gregorian date.
 pub fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
     const y = if (month <= 2) year - 1 else year;

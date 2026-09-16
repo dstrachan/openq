@@ -593,8 +593,8 @@ fn nullOf(vm: *Vm, comptime tag: Value.Type) !@typeInfo(@FieldType(Value.Union, 
 pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
     const target: Target = switch (x.as) {
         .symbol => |name| Target.fromName(vm.internedString(name)) orelse return error.domain,
-        // A capital letter parses text, as `"J"$"12"`, which is not implemented yet.
-        .char => |letter| Target.fromLetter(letter) orelse return if (std.ascii.isUpper(letter)) error.nyi else error.domain,
+        // A capital letter parses text, as `"J"$"12"`.
+        .char => |letter| if (std.ascii.isUpper(letter)) return parseCast(vm, letter, y) else Target.fromLetter(letter) orelse return error.domain,
         else => return error.nyi,
     };
     return castTo(vm, target, y);
@@ -636,7 +636,49 @@ const Target = union(enum) {
     }
 };
 
-const CastError = Allocator.Error || error{ type, nyi };
+const CastError = Allocator.Error || error{ type, nyi, domain };
+
+/// `"J"$"12"` and the other capital letters parse a string, a char, or each string of a
+/// list of strings; `()` gives the typed empty.
+fn parseCast(vm: *Vm, letter: u8, y: *Value) CastError!*Value {
+    switch (y.as) {
+        .char_list => |text| return parseCastText(vm, letter, text),
+        .char => |c| return parseCastText(vm, letter, &.{c}),
+        .list => |items| {
+            if (items.len == 0) return switch (letter) {
+                'S' => vm.allocValue(.symbol_list, 0),
+                'C' => vm.allocValue(.char_list, 0),
+                else => switch (q.literal.kindOfCapital(letter) orelse return error.domain) {
+                    inline else => |kind| vm.allocValue(comptime kind.listType(), 0),
+                },
+            };
+            const results = try vm.gpa.alloc(*Value, items.len);
+            defer vm.gpa.free(results);
+            var done: usize = 0;
+            defer for (results[0..done]) |r| r.deref(vm.gpa);
+            for (items) |item| {
+                results[done] = try parseCast(vm, letter, item);
+                done += 1;
+            }
+            return vm.enlist(results);
+        },
+        else => return error.type,
+    }
+}
+
+fn parseCastText(vm: *Vm, letter: u8, text: []const u8) CastError!*Value {
+    switch (letter) {
+        'S' => return vm.createValue(.symbol, try vm.intern(std.mem.trim(u8, text, " "))),
+        // q keeps a single char and turns anything else into a space.
+        'C' => return vm.createValue(.char, if (text.len == 1) text[0] else ' '),
+        else => {
+            const kind = q.literal.kindOfCapital(letter) orelse return error.domain;
+            switch (q.literal.parseLoose(kind, text)) {
+                inline else => |value, k| return vm.createValue(comptime k.atomType(), value),
+            }
+        },
+    }
+}
 
 fn castTo(vm: *Vm, target: Target, y: *Value) CastError!*Value {
     switch (target) {
