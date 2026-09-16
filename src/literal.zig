@@ -85,6 +85,9 @@ pub fn parse(slice: []const u8) !Atom {
 /// minute, `2023.04.17` a date, `0N` a long, `0n` a float).
 pub fn kindOf(slice: []const u8) !Kind {
     if (slice.len == 0) return error.InvalidCharacter;
+    // `0n` is the null float and `0w` its infinity, not a timespan or a real, so the
+    // special spellings take precedence over the type letter.
+    if (isNull(slice) or isInfinity(slice)) return if (std.ascii.isUpper(slice[slice.len - 1])) .long else .float;
     switch (slice[slice.len - 1]) {
         'b' => return .boolean,
         'h' => return .short,
@@ -102,7 +105,6 @@ pub fn kindOf(slice: []const u8) !Kind {
         't' => return .time,
         else => {},
     }
-    if (isNull(slice) or isInfinity(slice)) return if (std.ascii.isUpper(slice[slice.len - 1])) .long else .float;
     if (std.mem.findScalar(u8, slice, 'D')) |i| return if (isDate(slice[0..i])) .timestamp else .timespan;
     if (std.mem.findScalar(u8, slice, 'T') != null) return .datetime;
     switch (std.mem.countScalar(u8, slice, ':')) {
@@ -133,8 +135,8 @@ pub fn parseAs(kind: Kind, slice: []const u8) !Atom {
         .short => .{ .short = try q.parseInteger(Value.Short, body) },
         .int => .{ .int = try q.parseInteger(Value.Int, body) },
         .long => .{ .long = try q.parseInteger(Value.Long, body) },
-        .real => .{ .real = try q.parseFloat(f32, body) },
-        .float => .{ .float = try q.parseFloat(f64, body) },
+        .real => .{ .real = @floatCast(try q.parseFloat(body)) },
+        .float => .{ .float = try q.parseFloat(body) },
         .timestamp => .{ .timestamp = try parseTimestamp(body) },
         .month => .{ .month = try parseMonth(body) },
         .date => .{ .date = try parseDate(body) },

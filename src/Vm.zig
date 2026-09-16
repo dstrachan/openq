@@ -1380,9 +1380,14 @@ pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Va
     const last_token = tree.nodeData(node).token;
 
     switch (try q.literal.kindOf(tree.tokenSlice(last_token))) {
-        .long => return vm.createTypedList(tree, .long, first_token, last_token) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return vm.createTypedList(tree, .float, first_token, last_token),
+        .long => {
+            // Any float-shaped item, including a lowercase `0n`, makes the whole list float.
+            for (first_token..last_token) |tok| {
+                if (try q.literal.kindOf(tree.tokenSlice(@intCast(tok))) == .float) {
+                    return vm.createTypedList(tree, .float, first_token, last_token);
+                }
+            }
+            return vm.createTypedList(tree, .long, first_token, last_token);
         },
         inline else => |kind| return vm.createTypedList(tree, kind, first_token, last_token),
     }
@@ -2024,4 +2029,224 @@ test "\\P sets the float display precision" {
     try expectEval(vm, "\\P", "17i");
     try expectEval(vm, "0.1", "0.10000000000000001");
     try testing.expectError(error.domain, vm.evalSource("\\P x", .q, "<test>"));
+}
+
+test "take repeats, cycles and makes typed empties" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "0#0", "`long$()");
+    try expectEval(vm, "0#1 2", "`long$()");
+    try expectEval(vm, "0#1.5", "`float$()");
+    try expectEval(vm, "0#\"a\"", "\"\"");
+    try expectEval(vm, "0#\"ab\"", "\"\"");
+    try expectEval(vm, "0#`a", "`symbol$()");
+    try expectEval(vm, "0#`a`b", "`symbol$()");
+    try expectEval(vm, "0#1b", "`boolean$()");
+    try expectEval(vm, "0#0x01", "`byte$()");
+    try expectEval(vm, "0#1h", "`short$()");
+    try expectEval(vm, "0#1i", "`int$()");
+    try expectEval(vm, "0#1e", "`real$()");
+    try expectEval(vm, "0#2023.04.17", "`date$()");
+    try expectEval(vm, "0#12:00", "`minute$()");
+    try expectEval(vm, "0#()", "()");
+    try expectEval(vm, "0#(1;\"a\")", "()");
+    try expectEval(vm, "0#0N", "`long$()");
+    try expectEval(vm, "0#enlist 1", "`long$()");
+    try expectEval(vm, "0#0#0", "`long$()");
+    try expectEval(vm, "type 0#0", "7h");
+    try expectEval(vm, "count 0#0", "0");
+
+    try expectEval(vm, "2#1", "1 1");
+    try expectEval(vm, "1#1", ",1");
+    try expectEval(vm, "-1#1", ",1");
+    try expectEval(vm, "3#1 2", "1 2 1");
+    try expectEval(vm, "2#1 2 3", "1 2");
+    try expectEval(vm, "-2#1 2 3", "2 3");
+    try expectEval(vm, "5#1 2", "1 2 1 2 1");
+    try expectEval(vm, "-5#1 2", "2 1 2 1 2");
+    try expectEval(vm, "4#1 2 3", "1 2 3 1");
+    try expectEval(vm, "-4#1 2 3", "3 1 2 3");
+    try expectEval(vm, "-3#1 2 3", "1 2 3");
+    try expectEval(vm, "2#\"ab\"", "\"ab\"");
+    try expectEval(vm, "3#\"a\"", "\"aaa\"");
+    try expectEval(vm, "2#`a", "`a`a");
+    try expectEval(vm, "1#`a`b", ",`a");
+    try expectEval(vm, "-2#`a`b`c", "`b`c");
+    try expectEval(vm, "2#1b", "11b");
+    try expectEval(vm, "2#0N", "0N 0N");
+    try expectEval(vm, "2#1.5", "1.5 1.5");
+    try expectEval(vm, "2#0x01", "0x0101");
+    try expectEval(vm, "3#0x0102", "0x010201");
+    try expectEval(vm, "2#2023.04.17", "2023.04.17 2023.04.17");
+    try expectEval(vm, "2#2023.04m", "2023.04 2023.04m");
+    try expectEval(vm, "2#enlist 1", "1 1");
+    try expectEval(vm, "2#(1;\"a\")", "(1;\"a\")");
+    try expectEval(vm, "3#(1;\"a\")", "(1;\"a\";1)");
+    try expectEval(vm, "2#(1;\"a\";`b)", "(1;\"a\")");
+    try expectEval(vm, "2#(+)", "(+;+)");
+    try expectEval(vm, "2#{[x]1}", "({[x]1};{[x]1})");
+    try expectEval(vm, "2h#1 2", "1 2");
+    try expectEval(vm, "2i#1 2", "1 2");
+
+    // Taking from an empty list fills with nulls.
+    try expectEval(vm, "2#()", "(();())");
+    try expectEval(vm, "1#()", ",()");
+    try expectEval(vm, "2#`long$()", "0N 0N");
+    try expectEval(vm, "2#\"\"", "\"  \"");
+    try expectEval(vm, "2#`symbol$()", "``");
+
+    try testing.expectError(error.type, vm.evalSource("0N#1 2", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1.5#1 2", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\"a\"#1 2", .q, "<test>"));
+}
+
+test "cast makes typed empties and converts between types" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "`long$()", "`long$()");
+    try expectEval(vm, "`float$()", "`float$()");
+    try expectEval(vm, "`symbol$()", "`symbol$()");
+    try expectEval(vm, "`char$()", "\"\"");
+    try expectEval(vm, "`boolean$()", "`boolean$()");
+    try expectEval(vm, "`byte$()", "`byte$()");
+    try expectEval(vm, "`short$()", "`short$()");
+    try expectEval(vm, "`int$()", "`int$()");
+    try expectEval(vm, "`real$()", "`real$()");
+    try expectEval(vm, "`date$()", "`date$()");
+    try expectEval(vm, "`month$()", "`month$()");
+    try expectEval(vm, "`timestamp$()", "`timestamp$()");
+    try expectEval(vm, "`datetime$()", "`datetime$()");
+    try expectEval(vm, "`timespan$()", "`timespan$()");
+    try expectEval(vm, "`minute$()", "`minute$()");
+    try expectEval(vm, "`second$()", "`second$()");
+    try expectEval(vm, "`time$()", "`time$()");
+    try expectEval(vm, "`$()", "`symbol$()");
+    try expectEval(vm, "`long$`long$()", "`long$()");
+    try expectEval(vm, "\"j\"$()", "`long$()");
+    try expectEval(vm, "\"c\"$()", "\"\"");
+    try expectEval(vm, "\"d\"$()", "`date$()");
+    try expectEval(vm, "\"s\"$()", "`symbol$()");
+    try expectEval(vm, "\"b\"$()", "`boolean$()");
+    try expectEval(vm, "`long$\"\"", "`long$()");
+    try expectEval(vm, "type `long$()", "7h");
+    try expectEval(vm, "type \"j\"$()", "7h");
+
+    // Numbers round half away from zero; shorts and ints saturate, bytes wrap.
+    try expectEval(vm, "`long$enlist 1", ",1");
+    try expectEval(vm, "`long$1 2h", "1 2");
+    try expectEval(vm, "`float$1 2", "1 2f");
+    try expectEval(vm, "`int$1.7", "2i");
+    try expectEval(vm, "\"j\"$1.9", "2");
+    try expectEval(vm, "\"j\"$2.5", "3");
+    try expectEval(vm, "\"j\"$-2.5", "-3");
+    try expectEval(vm, "\"j\"$0.5", "1");
+    try expectEval(vm, "`long$1b", "1");
+    try expectEval(vm, "`boolean$1 0", "10b");
+    try expectEval(vm, "`boolean$0.5", "1b");
+    try expectEval(vm, "`boolean$2", "1b");
+    try expectEval(vm, "`boolean$0N", "1b");
+    try expectEval(vm, "`short$70000", "0Wh");
+    try expectEval(vm, "`short$-70000", "-0Wh");
+    try expectEval(vm, "`short$32767", "0Wh");
+    try expectEval(vm, "`int$0W", "0Wi");
+    try expectEval(vm, "`int$-0W", "-0Wi");
+    try expectEval(vm, "`int$3000000000", "0Wi");
+    try expectEval(vm, "`long$0W", "0W");
+    try expectEval(vm, "`byte$255", "0xff");
+    try expectEval(vm, "`byte$256", "0x00");
+    try expectEval(vm, "`byte$-1", "0xff");
+    try expectEval(vm, "`byte$0N", "0x00");
+    try expectEval(vm, "\"x\"$65", "0x41");
+    try expectEval(vm, "\"x\"$1.7", "0x02");
+    try expectEval(vm, "`real$1%3", "0.3333333e");
+    try expectEval(vm, "\"f\"$1", "1f");
+    try expectEval(vm, "\"h\"$1", "1h");
+    try expectEval(vm, "\"i\"$1", "1i");
+    try expectEval(vm, "\"e\"$1", "1e");
+    try expectEval(vm, "\"b\"$0", "0b");
+    try expectEval(vm, "`long$0x41", "65");
+    try expectEval(vm, "`float$0x41", "65f");
+
+    // Nulls stay null except into booleans and bytes.
+    try expectEval(vm, "`long$0Nh", "0N");
+    try expectEval(vm, "`int$0N", "0Ni");
+    try expectEval(vm, "`short$0N", "0Nh");
+    try expectEval(vm, "`short$0W", "0Wh");
+    try expectEval(vm, "`short$-0W", "-0Wh");
+    try expectEval(vm, "`long$0Wi", "2147483647");
+    try expectEval(vm, "`long$0Wh", "32767");
+    try expectEval(vm, "`real$0Nh", "0Ne");
+    try expectEval(vm, "`float$0N", "0n");
+    try expectEval(vm, "`long$0n", "0N");
+    try expectEval(vm, "`long$0N", "0N");
+    try expectEval(vm, "0n", "0n");
+    try expectEval(vm, "0w", "0w");
+    try expectEval(vm, "-0w", "-0w");
+    try expectEval(vm, "0Nn", "0Nn");
+    try expectEval(vm, "1 0n 2", "1 0n 2");
+
+    // Chars and symbols.
+    try expectEval(vm, "`char$65", "\"A\"");
+    try expectEval(vm, "\"c\"$65", "\"A\"");
+    try expectEval(vm, "\"c\"$65 66", "\"AB\"");
+    try expectEval(vm, "\"c\"$0x41", "\"A\"");
+    try expectEval(vm, "`char$\"a\"", "\"a\"");
+    try expectEval(vm, "`char$1b", "\"\\001\"");
+    try expectEval(vm, "\"a\\nb\"", "\"a\\nb\"");
+    try expectEval(vm, "\"\\t\"", "\"\\t\"");
+    try expectEval(vm, "\"\\\\\"", "\"\\\\\"");
+    try expectEval(vm, "`char$0 27 65", "\"\\000\\033A\"");
+    try expectEval(vm, "`long$\"12\"", "49 50");
+    try expectEval(vm, "`long$\"a\"", "97");
+    try expectEval(vm, "`boolean$\"a\"", "1b");
+    try expectEval(vm, "`$\"abc\"", "`abc");
+    try expectEval(vm, "`$\"\"", "`");
+    try expectEval(vm, "`$\"a b\"", "`a b");
+    try expectEval(vm, "`symbol$`a", "`a");
+    try expectEval(vm, "`long$(1;2.5)", "1 3");
+    try testing.expectError(error.type, vm.evalSource("`symbol$\"abc\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`long$`a", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("`xyz$1", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("\"J\"$\"12\"", .q, "<test>"));
+
+    // Temporal conversions go by days and nanoseconds.
+    try expectEval(vm, "`long$2023.04.17", "8507");
+    try expectEval(vm, "`float$2023.04.17", "8507f");
+    try expectEval(vm, "`long$12:34", "754");
+    try expectEval(vm, "`long$0D00:00:01", "1000000000");
+    try expectEval(vm, "`float$2023.04.17T12:00", "8507.5");
+    try expectEval(vm, "`date$8507", "2023.04.17");
+    try expectEval(vm, "`date$0", "2000.01.01");
+    try expectEval(vm, "`date$1.5", "2000.01.03");
+    try expectEval(vm, "`date$0N", "0Nd");
+    try expectEval(vm, "`date$0Nz", "0Nd");
+    try expectEval(vm, "`date$2023.04.17D12:00", "2023.04.17");
+    try expectEval(vm, "`date$2023.04.17T12:00", "2023.04.17");
+    try expectEval(vm, "`date$2023.04m", "2023.04.01");
+    try expectEval(vm, "`month$2023.04.17", "2023.04m");
+    try expectEval(vm, "`month$2023.04.17D12:00", "2023.04m");
+    try expectEval(vm, "`month$1", "2000.02m");
+    try expectEval(vm, "`timestamp$1", "2000.01.01D00:00:00.000000001");
+    try expectEval(vm, "`timestamp$1.5", "2000.01.01D00:00:00.000000002");
+    try expectEval(vm, "`timestamp$2023.04.17", "2023.04.17D00:00:00.000000000");
+    try expectEval(vm, "`timestamp$2023.04.17T12:00", "2023.04.17D12:00:00.000000000");
+    try expectEval(vm, "`timestamp$2023.04m", "2023.04.01D00:00:00.000000000");
+    try expectEval(vm, "`datetime$2023.04.17", "2023.04.17T00:00:00.000");
+    try expectEval(vm, "`datetime$2023.04.17D12:00", "2023.04.17T12:00:00.000");
+    try expectEval(vm, "`minute$1", "00:01");
+    try expectEval(vm, "`minute$12:34:56", "12:34");
+    try expectEval(vm, "`minute$0D12:34:56", "12:34");
+    try expectEval(vm, "`minute$12:34:56.123", "12:34");
+    try expectEval(vm, "`second$12:34", "12:34:00");
+    try expectEval(vm, "`second$12:34:56.789", "12:34:56");
+    try expectEval(vm, "`time$12:34:56", "12:34:56.000");
+    try expectEval(vm, "`time$0D12:34:56.123456789", "12:34:56.123");
+    try expectEval(vm, "`timespan$1", "0D00:00:00.000000001");
+    try expectEval(vm, "`timespan$12:34", "0D12:34:00.000000000");
+    try expectEval(vm, "`timespan$12:34:56.123", "0D12:34:56.123000000");
+    try testing.expectError(error.type, vm.evalSource("`date$12:00", .q, "<test>"));
 }

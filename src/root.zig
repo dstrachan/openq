@@ -107,19 +107,19 @@ pub fn parseInteger(comptime I: type, s: []const u8) !@typeInfo(I).@"enum".tag_t
 }
 
 /// Parses a floating-point literal without its type suffix, accepting `0n`, `0w` and `-0w`.
-pub fn parseFloat(comptime T: type, s: []const u8) !T {
+pub fn parseFloat(s: []const u8) !f64 {
     return switch (s.len) {
         2 => if (s[0] == '0') switch (s[1]) {
-            'N', 'n' => std.math.nan(T),
-            'W', 'w' => std.math.inf(T),
+            'N', 'n' => std.math.nan(f64),
+            'W', 'w' => std.math.inf(f64),
             else => null,
         } else null,
         3 => if (s[0] == '-' and s[1] == '0') switch (s[2]) {
-            'W', 'w' => -std.math.inf(T),
+            'W', 'w' => -std.math.inf(f64),
             else => null,
         } else null,
         else => null,
-    } orelse std.fmt.parseFloat(T, s);
+    } orelse std.fmt.parseFloat(f64, s);
 }
 
 test {

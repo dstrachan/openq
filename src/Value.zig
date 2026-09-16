@@ -216,6 +216,12 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             },
         },
         .boolean => |value| try w.writeAll(if (value) "1b" else "0b"),
+        .boolean_list => |value| {
+            if (value.len == 0) return w.writeAll("`boolean$()");
+            if (value.len == 1) try w.writeByte(',');
+            for (value) |b| try w.writeByte(if (b) '1' else '0');
+            try w.writeByte('b');
+        },
         .byte => |value| try w.print("0x{x:0>2}", .{value}),
         .byte_list => |value| {
             if (value.len == 0) return w.writeAll("`byte$()");
@@ -265,10 +271,10 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             }
             if (integral) try w.writeByte('f');
         },
-        .char => |value| try w.print("\"{c}\"", .{value}),
+        .char => |value| try formatChars(w, &.{value}),
         .char_list => |value| {
             if (value.len == 1) try w.writeByte(',');
-            try w.print("\"{f}\"", .{std.zig.fmtString(value)});
+            try formatChars(w, value);
         },
         .symbol => |value| try w.print("`{s}", .{data.vm.internedString(value)}),
         .symbol_list => |value| {
@@ -317,6 +323,23 @@ fn formatIntegers(comptime I: type, w: *Io.Writer, list: anytype, empty: []const
         try w.print("{f}", .{I.from(v)});
     }
     try w.writeByte(suffix);
+}
+
+/// Writes chars in double quotes the way q displays them: `"` and `\` are backslashed,
+/// newline, tab and return are `\n`, `\t` and `\r`, and other control characters are
+/// three-digit octal escapes such as `\001`. Bytes above 127 print as they are.
+fn formatChars(w: *Io.Writer, chars: []const u8) Io.Writer.Error!void {
+    try w.writeByte('"');
+    for (chars) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\t' => try w.writeAll("\\t"),
+        '\r' => try w.writeAll("\\r"),
+        0...8, 11, 12, 14...31, 127 => try w.print("\\{o:0>3}", .{c}),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
 }
 
 /// Writes a float with `precision` significant digits, as q's `\P` shows it, or `0n`, `0w`

@@ -215,9 +215,7 @@ pub fn list(vm: *Vm, x: *Value) !*Value {
 }
 
 pub fn count(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    unreachable;
+    return vm.createValue(.long, @intCast(x.count()));
 }
 
 pub fn lower(vm: *Vm, x: *Value) !*Value {

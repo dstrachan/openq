@@ -364,13 +364,6 @@ pub fn greater_than(vm: *Vm, x: *Value, y: *Value) !*Value {
     unreachable;
 }
 
-pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    unreachable;
-}
-
 pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
     switch (x.as) {
         .list => |x_val| {
@@ -483,11 +476,440 @@ pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
     }
 }
 
+/// `n#y` takes `n` items of `y`, cycling through a list (`3#1 2` is `1 2 1`), repeating an
+/// atom (`2#1` is `1 1`), from the end for negative `n` (`-2#1 2 3` is `2 3`), and filling an
+/// empty list with nulls (`2#""` is `"  "`). `0#y` is the empty list of `y`'s type, which is
+/// how q spells typed empties: `0#0` is `` `long$() ``.
 pub fn take(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    unreachable;
+    const n: i64 = switch (x.as) {
+        .short => |v| if (v == @backingInt(Value.Short.null)) return error.type else v,
+        .int => |v| if (v == @backingInt(Value.Int.null)) return error.type else v,
+        .long => |v| if (v == @backingInt(Value.Long.null)) return error.type else v,
+        .short_list, .int_list, .long_list => return error.nyi, // reshape
+        else => return error.type,
+    };
+    const len: usize = @intCast(@abs(n));
+    switch (y.as) {
+        inline .list,
+        .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| {
+            const result = try vm.allocValue(tag, len);
+            errdefer result.deref(vm.gpa);
+            const out = @field(result.as, @tagName(tag));
+            if (items.len == 0) {
+                for (out) |*item| item.* = try nullOf(vm, tag);
+                return result;
+            }
+            const start: usize = if (n >= 0) 0 else (items.len - len % items.len) % items.len;
+            for (out, 0..) |*item, i| {
+                const source = items[(start + i) % items.len];
+                item.* = if (tag == .list) source.ref() else source;
+            }
+            return result;
+        },
+        inline .boolean,
+        .byte,
+        .short,
+        .int,
+        .long,
+        .real,
+        .float,
+        .char,
+        .symbol,
+        .timestamp,
+        .month,
+        .date,
+        .datetime,
+        .timespan,
+        .minute,
+        .second,
+        .time,
+        => |atom, tag| {
+            const list_tag = @field(Value.Type, @tagName(tag) ++ "_list");
+            const result = try vm.allocValue(list_tag, len);
+            errdefer comptime unreachable;
+            for (@field(result.as, @tagName(list_tag))) |*item| item.* = atom;
+            return result;
+        },
+        .dict => return error.nyi,
+        .lambda,
+        .unary_primitive,
+        .operator,
+        .iterator,
+        .projection,
+        .each,
+        .over,
+        .scan,
+        .each_prior,
+        .each_right,
+        .each_left,
+        => {
+            const result = try vm.allocValue(.list, len);
+            errdefer comptime unreachable;
+            for (result.as.list) |*item| item.* = y.ref();
+            return result;
+        },
+    }
+}
+
+/// The null item of a list type: what `2#""` or `2#`long$()` fills with.
+fn nullOf(vm: *Vm, comptime tag: Value.Type) !@typeInfo(@FieldType(Value.Union, @tagName(tag))).pointer.child {
+    return switch (tag) {
+        .list => try vm.allocValue(.list, 0),
+        .boolean_list => false,
+        .byte_list => 0,
+        .short_list => @backingInt(Value.Short.null),
+        .int_list, .month_list, .date_list, .minute_list, .second_list, .time_list => @backingInt(Value.Int.null),
+        .long_list, .timestamp_list, .timespan_list => @backingInt(Value.Long.null),
+        .real_list => std.math.nan(f32),
+        .float_list, .datetime_list => std.math.nan(f64),
+        .char_list => ' ',
+        .symbol_list => .empty,
+        else => comptime unreachable,
+    };
+}
+
+/// `x$y` casts `y` to the type named by the symbol `x` (`` `long$1.9 ``) or its letter
+/// (`"j"$1.9`), and `` `$"abc" `` makes a symbol of a string. Casting `()` gives the typed
+/// empty (`` `long$() ``). Numbers round half away from zero, shorts and ints saturate to their
+/// infinities while bytes wrap, nulls stay null except into booleans and bytes, and temporal
+/// values convert by days and nanoseconds.
+pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
+    const target: Target = switch (x.as) {
+        .symbol => |name| Target.fromName(vm.internedString(name)) orelse return error.domain,
+        // A capital letter parses text, as `"J"$"12"`, which is not implemented yet.
+        .char => |letter| Target.fromLetter(letter) orelse return if (std.ascii.isUpper(letter)) error.nyi else error.domain,
+        else => return error.nyi,
+    };
+    return castTo(vm, target, y);
+}
+
+const Target = union(enum) {
+    /// A symbol from a string, spelled `` `$ ``.
+    symbol_from_string,
+    /// An atom type, whose list type holds cast lists.
+    atom: Value.Type,
+
+    fn fromName(name: []const u8) ?Target {
+        if (name.len == 0) return .symbol_from_string;
+        const tag = std.meta.stringToEnum(Value.Type, name) orelse return null;
+        return if (@backingInt(tag) < 0) .{ .atom = tag } else null;
+    }
+
+    fn fromLetter(letter: u8) ?Target {
+        return .{ .atom = switch (letter) {
+            'b' => .boolean,
+            'x' => .byte,
+            'h' => .short,
+            'i' => .int,
+            'j' => .long,
+            'e' => .real,
+            'f' => .float,
+            'c' => .char,
+            's' => .symbol,
+            'p' => .timestamp,
+            'm' => .month,
+            'd' => .date,
+            'z' => .datetime,
+            'n' => .timespan,
+            'u' => .minute,
+            'v' => .second,
+            't' => .time,
+            else => return null,
+        } };
+    }
+};
+
+const CastError = Allocator.Error || error{ type, nyi };
+
+fn castTo(vm: *Vm, target: Target, y: *Value) CastError!*Value {
+    switch (target) {
+        .symbol_from_string => switch (y.as) {
+            .list => |items| {
+                if (items.len == 0) return vm.allocValue(.symbol_list, 0);
+                return castEach(vm, target, items);
+            },
+            .char_list => |text| return vm.createValue(.symbol, try vm.intern(text)),
+            .char => |c| return vm.createValue(.symbol, try vm.intern(&.{c})),
+            .symbol, .symbol_list => return y.ref(),
+            else => return error.type,
+        },
+        .atom => |tag| switch (tag) {
+            inline .boolean,
+            .byte,
+            .short,
+            .int,
+            .long,
+            .real,
+            .float,
+            .char,
+            .symbol,
+            .timestamp,
+            .month,
+            .date,
+            .datetime,
+            .timespan,
+            .minute,
+            .second,
+            .time,
+            => |t| return castToAtomType(vm, t, y),
+            else => unreachable,
+        },
+    }
+}
+
+/// Casts every item of a general list and unifies the results.
+fn castEach(vm: *Vm, target: Target, items: []*Value) !*Value {
+    const results = try vm.gpa.alloc(*Value, items.len);
+    defer vm.gpa.free(results);
+    var done: usize = 0;
+    defer for (results[0..done]) |r| r.deref(vm.gpa);
+    for (items) |item| {
+        results[done] = try castTo(vm, target, item);
+        done += 1;
+    }
+    return vm.enlist(results);
+}
+
+fn castToAtomType(vm: *Vm, comptime tag: Value.Type, y: *Value) !*Value {
+    const list_tag = @field(Value.Type, @tagName(tag) ++ "_list");
+    switch (y.as) {
+        .list => |items| {
+            if (items.len == 0) return vm.allocValue(list_tag, 0);
+            return castEach(vm, .{ .atom = tag }, items);
+        },
+        .dict => return error.nyi,
+        .lambda,
+        .unary_primitive,
+        .operator,
+        .iterator,
+        .projection,
+        .each,
+        .over,
+        .scan,
+        .each_prior,
+        .each_right,
+        .each_left,
+        => return error.type,
+        else => {},
+    }
+    if (y.isList()) {
+        const result = try vm.allocValue(list_tag, y.count());
+        errdefer result.deref(vm.gpa);
+        for (@field(result.as, @tagName(list_tag)), 0..) |*item, i| item.* = try convert(tag, Scalar.at(y, i));
+        return result;
+    }
+    return vm.createValue(tag, try convert(tag, Scalar.at(y, 0)));
+}
+
+/// One item of a data value, reduced to what casting needs.
+const Scalar = union(enum) {
+    /// Booleans, bytes, shorts, ints, longs and chars (their code).
+    integer: i64,
+    /// A null short, int or long.
+    null_integer,
+    floating: f64,
+    symbol: Symbol,
+    /// A non-null int- or long-backed temporal.
+    temporal: struct { tag: Value.Type, raw: i64 },
+    null_temporal: Value.Type,
+    datetime: f64,
+
+    fn at(y: *Value, i: usize) Scalar {
+        return switch (y.as) {
+            .boolean => |v| .{ .integer = @intFromBool(v) },
+            .boolean_list => |v| .{ .integer = @intFromBool(v[i]) },
+            .byte => |v| .{ .integer = v },
+            .byte_list => |v| .{ .integer = v[i] },
+            .char => |v| .{ .integer = v },
+            .char_list => |v| .{ .integer = v[i] },
+            .short => |v| ofInteger(Value.Short, v),
+            .short_list => |v| ofInteger(Value.Short, v[i]),
+            .int => |v| ofInteger(Value.Int, v),
+            .int_list => |v| ofInteger(Value.Int, v[i]),
+            .long => |v| ofInteger(Value.Long, v),
+            .long_list => |v| ofInteger(Value.Long, v[i]),
+            .real => |v| .{ .floating = v },
+            .real_list => |v| .{ .floating = v[i] },
+            .float => |v| .{ .floating = v },
+            .float_list => |v| .{ .floating = v[i] },
+            .symbol => |v| .{ .symbol = v },
+            .symbol_list => |v| .{ .symbol = v[i] },
+            .datetime => |v| .{ .datetime = v },
+            .datetime_list => |v| .{ .datetime = v[i] },
+            inline .month, .date, .minute, .second, .time => |v, t| ofTemporal(t, Value.Int, v),
+            inline .month_list, .date_list, .minute_list, .second_list, .time_list => |v, t| ofTemporal(atomOf(t), Value.Int, v[i]),
+            inline .timestamp, .timespan => |v, t| ofTemporal(t, Value.Long, v),
+            inline .timestamp_list, .timespan_list => |v, t| ofTemporal(atomOf(t), Value.Long, v[i]),
+            else => unreachable,
+        };
+    }
+
+    fn ofInteger(comptime I: type, v: anytype) Scalar {
+        return if (v == @backingInt(I.null)) .null_integer else .{ .integer = v };
+    }
+
+    fn ofTemporal(comptime tag: Value.Type, comptime I: type, v: anytype) Scalar {
+        return if (v == @backingInt(I.null)) .{ .null_temporal = tag } else .{ .temporal = .{ .tag = tag, .raw = v } };
+    }
+
+    fn atomOf(comptime list_tag: Value.Type) Value.Type {
+        const name = @tagName(list_tag);
+        return @field(Value.Type, name[0 .. name.len - "_list".len]);
+    }
+};
+
+fn convert(comptime tag: Value.Type, s: Scalar) !@FieldType(Value.Union, @tagName(tag)) {
+    return switch (tag) {
+        .boolean => switch (s) {
+            .integer => |v| v != 0,
+            .null_integer => true,
+            .floating => |v| v != 0,
+            .symbol => error.type,
+            .temporal => |t| t.raw != 0,
+            .null_temporal => true,
+            .datetime => |v| v != 0,
+        },
+        .byte, .char => switch (s) {
+            .integer => |v| @truncate(@as(u64, @bitCast(v))),
+            .null_integer => 0,
+            .floating => |v| @truncate(@as(u128, @bitCast(roundToInteger(v) orelse 0))),
+            .symbol => error.type,
+            .temporal => |t| @truncate(@as(u64, @bitCast(t.raw))),
+            .null_temporal => 0,
+            .datetime => |v| @truncate(@as(u128, @bitCast(roundToInteger(v) orelse 0))),
+        },
+        .short => try convertInteger(Value.Short, s),
+        .int => try convertInteger(Value.Int, s),
+        .long => try convertInteger(Value.Long, s),
+        .real => @floatCast(try convertFloat(s)),
+        .float => try convertFloat(s),
+        .symbol => switch (s) {
+            .symbol => |v| v,
+            else => error.type,
+        },
+        .datetime => switch (s) {
+            .integer => |v| @floatFromInt(v),
+            .null_integer => std.math.nan(f64),
+            .floating => |v| v,
+            .symbol => error.type,
+            .temporal => |t| switch (t.tag) {
+                .date => @floatFromInt(t.raw),
+                .timestamp => @as(f64, @floatFromInt(t.raw)) / @as(f64, @floatFromInt(q.literal.ns_per_day)),
+                .month => @floatFromInt(monthToDays(t.raw)),
+                else => error.type,
+            },
+            .null_temporal => std.math.nan(f64),
+            .datetime => |v| v,
+        },
+        .month, .date, .minute, .second, .time => try convertTemporal(tag, Value.Int, s),
+        .timestamp, .timespan => try convertTemporal(tag, Value.Long, s),
+        else => comptime unreachable,
+    };
+}
+
+/// Rounds half away from zero, as q casts do; null for a NaN.
+fn roundToInteger(v: f64) ?i128 {
+    if (std.math.isNan(v)) return null;
+    if (std.math.isInf(v)) return if (v > 0) std.math.maxInt(i64) else std.math.minInt(i64) + 1;
+    return @intFromFloat(@round(v));
+}
+
+/// Saturates to the type's infinities, as `` `short$70000 `` is `0Wh`.
+fn saturate(comptime I: type, v: i128) @typeInfo(I).@"enum".tag_type {
+    const T = @typeInfo(I).@"enum".tag_type;
+    if (v >= std.math.maxInt(T)) return @backingInt(I.inf);
+    if (v <= -std.math.maxInt(T)) return @backingInt(I.neg_inf);
+    return @intCast(v);
+}
+
+fn convertInteger(comptime I: type, s: Scalar) !@typeInfo(I).@"enum".tag_type {
+    return switch (s) {
+        .integer => |v| saturate(I, v),
+        .null_integer => @backingInt(I.null),
+        .floating => |v| if (roundToInteger(v)) |r| saturate(I, r) else @backingInt(I.null),
+        .symbol => error.type,
+        .temporal => |t| saturate(I, t.raw),
+        .null_temporal => @backingInt(I.null),
+        .datetime => |v| if (roundToInteger(v)) |r| saturate(I, r) else @backingInt(I.null),
+    };
+}
+
+fn convertFloat(s: Scalar) !f64 {
+    return switch (s) {
+        .integer => |v| @floatFromInt(v),
+        .null_integer => std.math.nan(f64),
+        .floating => |v| v,
+        .symbol => error.type,
+        .temporal => |t| @floatFromInt(t.raw),
+        .null_temporal => std.math.nan(f64),
+        .datetime => |v| v,
+    };
+}
+
+fn convertTemporal(comptime tag: Value.Type, comptime I: type, s: Scalar) !@typeInfo(I).@"enum".tag_type {
+    return switch (s) {
+        .integer => |v| saturate(I, v),
+        .null_integer => @backingInt(I.null),
+        .floating => |v| if (roundToInteger(v)) |r| saturate(I, r) else @backingInt(I.null),
+        .symbol => error.type,
+        .null_temporal => @backingInt(I.null),
+        .datetime => |v| if (std.math.isNan(v)) @backingInt(I.null) else switch (tag) {
+            .date => saturate(I, @intFromFloat(@floor(v))),
+            .timestamp => saturate(I, @intFromFloat(@round(v * @as(f64, @floatFromInt(q.literal.ns_per_day))))),
+            .month => saturate(I, daysToMonth(@intFromFloat(@floor(v)))),
+            else => error.type,
+        },
+        .temporal => |t| if (t.tag == tag) saturate(I, t.raw) else switch (tag) {
+            .date => switch (t.tag) {
+                .timestamp => saturate(I, @divFloor(t.raw, q.literal.ns_per_day)),
+                .month => saturate(I, monthToDays(t.raw)),
+                else => error.type,
+            },
+            .timestamp => switch (t.tag) {
+                .date => saturate(I, @as(i128, t.raw) * q.literal.ns_per_day),
+                .month => saturate(I, @as(i128, monthToDays(t.raw)) * q.literal.ns_per_day),
+                else => error.type,
+            },
+            .month => switch (t.tag) {
+                .date => saturate(I, daysToMonth(t.raw)),
+                .timestamp => saturate(I, daysToMonth(@divFloor(t.raw, q.literal.ns_per_day))),
+                else => error.type,
+            },
+            .minute, .second, .time, .timespan => switch (t.tag) {
+                .minute, .second, .time, .timespan => saturate(I, @divTrunc(t.raw * Temporal.unitOf(t.tag), Temporal.unitOf(tag))),
+                .timestamp => saturate(I, @divTrunc(@mod(t.raw, q.literal.ns_per_day), Temporal.unitOf(tag))),
+                else => error.type,
+            },
+            else => comptime unreachable,
+        },
+    };
+}
+
+/// Days since 2000.01.01 of the first day of a month count since 2000.01.
+fn monthToDays(months: i64) i64 {
+    return q.literal.daysFromCivil(2000 + @divFloor(months, 12), @mod(months, 12) + 1, 1) - q.literal.epoch_days;
+}
+
+fn daysToMonth(days: i64) i64 {
+    const civil = q.literal.civilFromDays(days + q.literal.epoch_days);
+    return (civil.year - 2000) * 12 + civil.month - 1;
 }
 
 pub fn drop(vm: *Vm, x: *Value, y: *Value) !*Value {
