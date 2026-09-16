@@ -325,15 +325,7 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
             defer vm.gpa.free(slice);
             return vm.evalSource(slice, .q, "<value>");
         },
-        .symbol => |identifier| {
-            if (identifier == .empty) return vm.state.ref();
-            if (try vm.clockVariable(identifier)) |clock| return clock;
-            const home = (try vm.identifierHome(identifier, false)) orelse return error.identifier;
-            const dict = home.namespace.as.dict;
-            const keys = dict.keys.as.symbol_list;
-            const index = std.mem.findScalar(Symbol, keys, home.name) orelse return error.identifier;
-            return dict.values.as.list[index].ref();
-        },
+        .symbol => |identifier| return vm.readGlobal(identifier),
         .symbol_list => return error.nyi,
         .timestamp => return error.nyi,
         .timestamp_list => return error.nyi,
@@ -365,13 +357,16 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
             errdefer locals.deref(vm.gpa);
             for (locals.as.symbol_list, lambda.locals) |*v, symbol| v.* = symbol;
 
-            const globals = try vm.allocValue(.symbol_list, lambda.globals.len);
+            // As in q, the globals list starts with the namespace the lambda was defined in,
+            // written without its dot: `` ` `` for the root and `` `foo `` for `.foo`.
+            const globals = try vm.allocValue(.symbol_list, lambda.globals.len + 1);
             errdefer globals.deref(vm.gpa);
-            for (globals.as.symbol_list, lambda.globals) |*v, symbol| v.* = symbol;
+            globals.as.symbol_list[0] = try vm.intern(vm.internedString(lambda.namespace)[1..]);
+            for (globals.as.symbol_list[1..], lambda.globals) |*v, symbol| v.* = symbol;
 
             const constants = try vm.allocValue(.list, lambda.constants.len);
             errdefer constants.deref(vm.gpa);
-            for (constants.as.list, lambda.constants) |*v, val| v.* = val;
+            for (constants.as.list, lambda.constants) |*v, val| v.* = val.ref();
 
             const source = try vm.allocValue(.char_list, lambda.source.len);
             errdefer source.deref(vm.gpa);

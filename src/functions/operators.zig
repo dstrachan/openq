@@ -107,7 +107,7 @@ fn counterpart(comptime tag: Value.Type) Value.Type {
 
 /// Item `i` of a list as a value of its own: the referenced item of a general list, or a
 /// fresh atom from a typed list.
-fn itemAt(vm: *Vm, list: *Value, i: usize) Allocator.Error!*Value {
+pub fn itemAt(vm: *Vm, list: *Value, i: usize) Allocator.Error!*Value {
     switch (list.as) {
         .list => |items| return items[i].ref(),
         inline .boolean_list,
@@ -789,7 +789,7 @@ fn findKey(keys: *Value, key: *Value) ?usize {
 }
 
 /// The value a missing dictionary key reads as: a null shaped like the first value.
-fn nullLike(vm: *Vm, values: *Value) Allocator.Error!*Value {
+pub fn nullLike(vm: *Vm, values: *Value) Allocator.Error!*Value {
     switch (values.as) {
         .list => |items| return if (items.len == 0) vm.allocValue(.list, 0) else nullOfValue(vm, items[0]),
         inline .boolean_list,
@@ -1433,18 +1433,29 @@ pub fn find(vm: *Vm, x: *Value, y: *Value) !*Value {
     unreachable;
 }
 
+/// `f@x` applies or indexes with one argument: `{x*2}@3` is 6 and `neg@1 2` is `-1 -2`.
 pub fn apply_at(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    unreachable;
+    var args = [_]*Value{y};
+    return vm.applyImpl(x, &args);
 }
 
+/// `f . args` applies to the items of a list: `{x+y} . 1 2` is 3, `{x} . enlist 5` is 5.
 pub fn apply(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    unreachable;
+    if (!y.isList()) {
+        var args = [_]*Value{y};
+        return vm.applyImpl(x, &args);
+    }
+    const len = y.count();
+    if (len == 0) return error.rank;
+    const args = try vm.gpa.alloc(*Value, len);
+    defer vm.gpa.free(args);
+    var done: usize = 0;
+    defer for (args[0..done]) |a| a.deref(vm.gpa);
+    for (0..len) |i| {
+        args[done] = try itemAt(vm, y, i);
+        done += 1;
+    }
+    return vm.applyImpl(x, args);
 }
 
 pub fn file_text(vm: *Vm, x: *Value, y: *Value) !*Value {

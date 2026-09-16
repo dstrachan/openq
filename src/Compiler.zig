@@ -12,7 +12,11 @@ const Symbol = Value.Symbol;
 
 const Compiler = @This();
 
-const Error = Allocator.Error || std.fmt.ParseIntError || error{parse};
+const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || error{
+    parse,
+    nyi,
+    assign,
+};
 
 vm: *Vm,
 tree: *const Ast,
@@ -21,6 +25,10 @@ params: std.ArrayList(Symbol) = .empty,
 locals: std.ArrayList(Symbol) = .empty,
 globals: std.ArrayList(Symbol) = .empty,
 constants: std.ArrayList(*Value) = .empty,
+/// Set when the lambda has no parameter list, so its parameters are the implicit `x`, `y`
+/// and `z`, as many as the body uses.
+implicit_params: bool = false,
+implicit_valence: u8 = 0,
 
 pub fn init(vm: *Vm, tree: *const Ast) Compiler {
     return .{
@@ -38,6 +46,9 @@ pub fn deinit(c: *Compiler) void {
     c.constants.deinit(c.vm.gpa);
 }
 
+/// Compiles a lambda node to bytecode. Parameters are the explicit list or the implicit
+/// `x y z`; locals are the bare names assigned with `:` in the body; every other name is a
+/// global, resolved when the lambda runs: (`\d .foo` then `{t0 x}` calls `.foo.t0`). Keywords are inlined as q does.
 pub fn compile(c: *Compiler, node: Node.Index) Error!*Value {
     const vm = c.vm;
     const tree = c.tree;
@@ -60,8 +71,22 @@ pub fn compile(c: *Compiler, node: Node.Index) Error!*Value {
         .{ .start = lambda.body_start, .end = lambda.body_end },
         Node.Index,
     );
-    for (body) |n| try c.compileNode(n);
-    if (lambda.trailing_semicolon) unreachable; // TODO: Trailing semicolon
+    // Names are classified before any code is emitted, so a local reads as a local even
+    // ahead of its assignment, and the implicit valence is known.
+    for (body) |n| try c.scan(n);
+    if (c.implicit_params) {
+        for ("xyz"[0..@max(1, c.implicit_valence)]) |letter| {
+            try c.params.append(vm.gpa, try vm.intern(&.{letter}));
+        }
+    }
+
+    for (body, 0..) |n, i| {
+        try c.compileNode(n);
+        if (i + 1 < body.len or lambda.trailing_semicolon) try c.emitCode(.pop);
+    }
+    // An empty body or a trailing `;` returns `::`.
+    if (body.len == 0 or lambda.trailing_semicolon) try c.emitCode(.nil);
+    try c.emitCode(.@"return");
 
     try c.bytecode.shrinkToLen(vm.gpa);
     try c.params.shrinkToLen(vm.gpa);
@@ -72,190 +97,315 @@ pub fn compile(c: *Compiler, node: Node.Index) Error!*Value {
     return vm.createValue(.lambda, .{
         .bytecode = c.bytecode.toOwnedSliceAssert(),
         .params = c.params.toOwnedSliceAssert(),
-        .locals = c.params.toOwnedSliceAssert(),
+        .locals = c.locals.toOwnedSliceAssert(),
         .globals = c.globals.toOwnedSliceAssert(),
         .constants = c.constants.toOwnedSliceAssert(),
+        .namespace = vm.namespace,
         .source = source,
     });
 }
 
-fn compileParams(c: *Compiler, params: []const Node.Index) !void {
+fn compileParams(c: *Compiler, params: []const Node.Index) Error!void {
     const vm = c.vm;
     const tree = c.tree;
 
-    if (params.len == 0) unreachable; // TODO: Implicit params
-    if (params.len == 1 and tree.nodeTag(params[0]) == .empty) return;
+    if (params.len == 0) {
+        c.implicit_params = true;
+        return;
+    }
+    // Every lambda takes at least one argument: `{[]1}` has a single unnamed parameter,
+    // so `{[]1}[1]` is 1 and `{[]1}[1;2]` a rank error, as in q.
+    if (params.len == 1 and tree.nodeTag(params[0]) == .empty) return c.params.append(vm.gpa, .empty);
+    // q allows eight parameters at most.
+    if (params.len > 8) return error.parse;
 
     try c.params.ensureTotalCapacity(vm.gpa, params.len);
     for (params) |node| {
-        assert(tree.nodeTag(node) == .identifier); // TODO: Handle errors
-        const main_token = tree.nodeMainToken(node);
-        const bytes = tree.tokenSlice(main_token);
-        const symbol = try vm.intern(bytes);
+        if (tree.nodeTag(node) != .identifier) return error.parse;
+        const symbol = try vm.intern(tree.tokenSlice(tree.nodeMainToken(node)));
         c.params.appendAssumeCapacity(symbol);
     }
 }
 
-fn compileNode(c: *Compiler, node: Node.Index) !void {
+/// Finds the names the body uses: implicit parameters and locals. Nested lambdas are their
+/// own scope, as q has no closures, so they are not entered.
+fn scan(c: *Compiler, node: Node.Index) Error!void {
+    const tree = c.tree;
+    switch (tree.nodeTag(node)) {
+        .identifier => try c.noteName(tree.tokenSlice(tree.nodeMainToken(node)), false),
+        .keyword => if (c.aliasOf(node)) |name| try c.noteName(name, false),
+        .grouped_expression => try c.scan(tree.nodeData(node).node_and_token[0]),
+        .list, .call, .expr_block => {
+            for (tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index)) |n| try c.scan(n);
+        },
+        .apply_unary => {
+            const lhs, const rhs = tree.nodeData(node).node_and_node;
+            try c.scan(lhs);
+            try c.scan(rhs);
+        },
+        .apply_binary => {
+            const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
+            const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
+            if (tree.nodeTag(op) == .colon and tree.nodeTag(lhs) == .identifier) {
+                try c.noteName(tree.tokenSlice(tree.nodeMainToken(lhs)), true);
+            } else {
+                try c.scan(lhs);
+            }
+            if (maybe_rhs.unwrap()) |rhs| try c.scan(rhs);
+        },
+        else => {},
+    }
+}
+
+fn noteName(c: *Compiler, name: []const u8, assigned: bool) Error!void {
+    if (c.implicit_params and name.len == 1) {
+        switch (name[0]) {
+            'x' => c.implicit_valence = @max(c.implicit_valence, 1),
+            'y' => c.implicit_valence = @max(c.implicit_valence, 2),
+            'z' => c.implicit_valence = @max(c.implicit_valence, 3),
+            else => {},
+        }
+        if (name[0] == 'x' or name[0] == 'y' or name[0] == 'z') return;
+    }
+    // Only a bare name assigned with `:` is a local; a dotted name is always global.
+    if (!assigned or name[0] == '.') return;
+    const symbol = try c.vm.intern(name);
+    if (std.mem.findScalar(Symbol, c.params.items, symbol) != null) return;
+    if (std.mem.findScalar(Symbol, c.locals.items, symbol) != null) return;
+    try c.locals.append(c.vm.gpa, symbol);
+}
+
+fn compileNode(c: *Compiler, node: Node.Index) Error!void {
     const vm = c.vm;
     const tree = c.tree;
     switch (tree.nodeTag(node)) {
         .root => unreachable,
         .empty => try c.emitCode(.empty),
-        .system => unreachable,
+        .grouped_expression => try c.compileNode(tree.nodeData(node).node_and_token[0]),
 
-        .grouped_expression,
-        .empty_list,
-        .list,
-        .table_literal,
-        => unreachable,
-
-        .lambda => {
-            var compiler: Compiler = .init(vm, tree);
-            defer compiler.deinit();
-            const value = try compiler.compile(node);
-            errdefer value.deref(c.vm.gpa);
-            try c.emitConstant(value);
+        .list => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+            try c.compileArgs(nodes);
+            try c.emitConstant(vm.getUnaryPrimitive(.enlist));
+            try c.emitCall(nodes.len);
         },
-
-        .expr_block => unreachable,
-
-        .call => unreachable,
+        .expr_block => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+            if (nodes.len == 0) return c.emitCode(.nil);
+            for (nodes, 0..) |n, i| {
+                try c.compileNode(n);
+                if (i + 1 < nodes.len) try c.emitCode(.pop);
+            }
+        },
+        .call => {
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+            const args = nodes[1..];
+            // `f[]` applies `f` to `::`.
+            if (args.len == 1 and tree.nodeTag(args[0]) == .empty) {
+                try c.emitCode(.nil);
+            } else {
+                try c.compileArgs(args);
+            }
+            try c.compileNode(nodes[0]);
+            try c.emitCall(args.len);
+        },
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
             try c.compileNode(rhs);
-            try c.compileNode(lhs);
+            try c.compileFunction(lhs);
+            try c.emitCall(1);
         },
-        .apply_binary => unreachable,
+        .apply_binary => {
+            const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
+            const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
+            const op_tag = tree.nodeTag(op);
+            if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .identifier) {
+                const rhs = maybe_rhs.unwrap() orelse return error.parse;
+                try c.compileNode(rhs);
+                return c.compileAssign(tree.tokenSlice(tree.nodeMainToken(lhs)), op_tag == .colon_colon);
+            }
+            // A `.q` name cannot be assigned, not even a symbol alias (q 5.0; q 4.0 assigned
+            // through the alias).
+            if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .keyword) return error.assign;
+            // Indexed and compound assignment are still to come.
+            if (op_tag == .colon) return error.nyi;
+            if (maybe_rhs.unwrap()) |rhs| try c.compileNode(rhs);
+            try c.compileNode(lhs);
+            try c.compileConstantNode(op);
+            // A missing right operand projects, so `1+` is `+[1]`.
+            try c.emitCall(if (maybe_rhs == .none) 1 else 2);
+        },
 
-        .colon => unreachable,
-        .plus => unreachable,
-        .minus => unreachable,
-        .asterisk => unreachable,
-        .percent => unreachable,
-        .ampersand => unreachable,
-        .pipe => unreachable,
-        .caret => unreachable,
-        .equal => unreachable,
-        .l_angle_bracket => unreachable,
-        .l_angle_bracket_equal => unreachable,
-        .l_angle_bracket_r_angle_bracket => unreachable,
-        .r_angle_bracket => unreachable,
-        .r_angle_bracket_equal => unreachable,
-        .dollar => unreachable,
-        .comma => unreachable,
-        .hash => unreachable,
-        .underscore => unreachable,
-        .tilde => unreachable,
-        .bang => unreachable,
-        .question_mark => unreachable,
-        .at => unreachable,
-        .dot => unreachable,
-        .zero_colon => unreachable,
-        .one_colon => unreachable,
-        .two_colon => unreachable,
+        .identifier => try c.compileIdentifier(tree.tokenSlice(tree.nodeMainToken(node))),
+        .keyword => {
+            // Keywords are inlined while compiling, as q does: `f:{neg x}` keeps `-:` even
+            // if `.q.neg` changes later. A missing entry is left to run-time lookup.
+            const slice = tree.tokenSlice(tree.nodeMainToken(node));
+            if (c.aliasOf(node)) |name| return c.compileIdentifier(name);
+            if (vm.qEntry(slice)) |entry| try c.emitConstant(entry.ref()) else try c.compileGlobal(slice);
+        },
+        .builtin => {
+            const slice = tree.tokenSlice(tree.nodeMainToken(node));
+            const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
+            switch (builtin) {
+                inline else => |t| if (@hasField(ByteCode, @tagName(t)))
+                    try c.emitCode(@field(ByteCode, @tagName(t)))
+                else
+                    try c.compileConstantNode(node),
+            }
+        },
 
-        .colon_colon => unreachable,
-        .plus_colon => unreachable,
-        .minus_colon => unreachable,
-        .asterisk_colon => unreachable,
-        .percent_colon => unreachable,
-        .ampersand_colon => unreachable,
-        .pipe_colon => unreachable,
-        .caret_colon => unreachable,
-        .equal_colon => unreachable,
-        .l_angle_bracket_colon => unreachable,
-        .r_angle_bracket_colon => unreachable,
-        .dollar_colon => unreachable,
-        .comma_colon => unreachable,
-        .hash_colon => unreachable,
-        .underscore_colon => unreachable,
-        .tilde_colon => unreachable,
-        .bang_colon => unreachable,
-        .question_mark_colon => unreachable,
-        .at_colon => unreachable,
-        .dot_colon => unreachable,
-        .zero_colon_colon => unreachable,
-        .one_colon_colon => unreachable,
-
+        .system,
+        .select,
+        .exec,
+        .update,
+        .delete_rows,
+        .delete_cols,
         .apostrophe,
         .apostrophe_colon,
         .slash,
         .slash_colon,
         .backslash,
         .backslash_colon,
-        => unreachable,
+        => return error.nyi,
 
-        .number_literal => {
-            const main_token = tree.nodeMainToken(node);
-            const slice = tree.tokenSlice(main_token);
-            if (slice.len == 1 or (slice.len == 2 and slice[1] == 'j')) {
-                switch (slice[0]) {
-                    '0' => return c.emitCode(.zero),
-                    '1' => return c.emitCode(.one),
-                    else => {},
-                }
-            }
-            const number_literal = try vm.createNumberLiteralSlice(slice);
-            errdefer number_literal.deref(vm.gpa);
-            try c.emitConstant(number_literal);
-        },
-        .number_list_literal => {
-            const number_list_literal = try vm.createNumberListLiteral(tree, node);
-            errdefer number_list_literal.deref(vm.gpa);
-            try c.emitConstant(number_list_literal);
-        },
-        .string_literal => unreachable,
-        .symbol_literal => unreachable,
-        .symbol_list_literal => unreachable,
-        .identifier => unreachable,
-        .keyword => unreachable,
-        .builtin => {
-            const main_token = tree.nodeMainToken(node);
-            const slice = tree.tokenSlice(main_token);
-            const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
-            switch (builtin) {
-                inline else => |t| if (@hasField(ByteCode, @tagName(t)))
-                    try c.emitCode(@field(ByteCode, @tagName(t)))
-                else
-                    unreachable,
-            }
-        },
-
-        .select,
-        .exec,
-        .update,
-        .delete_rows,
-        .delete_cols,
-        => unreachable,
+        // Literals, nested lambdas and the glyphs are values that need no evaluation.
+        else => try c.compileConstantNode(node),
     }
 }
 
-fn emitCode(c: *Compiler, code: ByteCode) !void {
+/// The name a keyword stands for when its `.q` entry is a symbol: with `.q.a:`alias`, `a`
+/// reads as `alias` wherever it appears, be that a parameter, a local or a global, as q
+/// does. Null for a keyword whose entry is anything else.
+fn aliasOf(c: *Compiler, node: Node.Index) ?[]const u8 {
+    const entry = c.vm.qEntry(c.tree.tokenSlice(c.tree.nodeMainToken(node))) orelse return null;
+    return if (entry.as == .symbol) c.vm.internedString(entry.as.symbol) else null;
+}
+
+/// The function of `f x`: a glyph is its monadic form, as `-:`; anything else compiles.
+fn compileFunction(c: *Compiler, node: Node.Index) Error!void {
+    switch (c.tree.nodeTag(node)) {
+        .identifier,
+        .keyword,
+        .builtin,
+        .call,
+        .grouped_expression,
+        .apply_unary,
+        .apply_binary,
+        .list,
+        .expr_block,
+        .lambda,
+        => try c.compileNode(node),
+        else => {
+            const value = try c.vm.parseUnaryNode(node);
+            errdefer value.deref(c.vm.gpa);
+            try c.emitConstant(value);
+        },
+    }
+}
+
+/// Arguments are pushed last to first so the first is on top when the function is called.
+fn compileArgs(c: *Compiler, nodes: []const Node.Index) Error!void {
+    var i = nodes.len;
+    while (i > 0) {
+        i -= 1;
+        try c.compileNode(nodes[i]);
+    }
+}
+
+fn compileConstantNode(c: *Compiler, node: Node.Index) Error!void {
+    const value = try c.vm.parseNode(node);
+    errdefer value.deref(c.vm.gpa);
+    try c.emitConstant(value);
+}
+
+fn compileIdentifier(c: *Compiler, name: []const u8) Error!void {
+    if (std.mem.eql(u8, name, ".z.s")) return c.emitCode(.self);
+    if (name[0] != '.') {
+        const symbol = try c.vm.intern(name);
+        if (std.mem.findScalar(Symbol, c.params.items, symbol)) |i| return c.emitParam(i);
+        if (std.mem.findScalar(Symbol, c.locals.items, symbol)) |i| return c.emitLocal(i);
+    }
+    try c.compileGlobal(name);
+}
+
+fn compileGlobal(c: *Compiler, name: []const u8) Error!void {
+    try c.emitCode(.global);
+    try c.emitByte(try c.globalIndex(name));
+}
+
+/// Assigns the value on top of the stack, which stays there as the expression's value.
+/// `x::v` reaches the global unless `x` is a parameter or local, as in q.
+fn compileAssign(c: *Compiler, name: []const u8, global: bool) Error!void {
+    if (name[0] != '.') {
+        const symbol = try c.vm.intern(name);
+        if (std.mem.findScalar(Symbol, c.params.items, symbol)) |i| return c.emitAssign(i);
+        if (std.mem.findScalar(Symbol, c.locals.items, symbol)) |i| return c.emitAssign(c.params.items.len + i);
+        assert(global);
+    }
+    try c.emitCode(.assign_global);
+    try c.emitByte(try c.globalIndex(name));
+}
+
+fn globalIndex(c: *Compiler, name: []const u8) Error!u8 {
+    const symbol = try c.vm.intern(name);
+    const index = std.mem.findScalar(Symbol, c.globals.items, symbol) orelse index: {
+        try c.globals.append(c.vm.gpa, symbol);
+        break :index c.globals.items.len - 1;
+    };
+    return std.math.cast(u8, index) orelse error.nyi;
+}
+
+fn emitParam(c: *Compiler, index: usize) Error!void {
+    if (index >= 8) return error.nyi;
+    try c.emitByte(@intCast(@backingInt(ByteCode.param_1) + index));
+}
+
+fn emitLocal(c: *Compiler, index: usize) Error!void {
+    if (index < 22) return c.emitByte(@intCast(@backingInt(ByteCode.local_1) + index));
+    try c.emitCode(.local_wide);
+    try c.emitByte(std.math.cast(u8, index) orelse return error.nyi);
+}
+
+fn emitAssign(c: *Compiler, slot: usize) Error!void {
+    try c.emitCode(.assign);
+    try c.emitByte(std.math.cast(u8, slot) orelse return error.nyi);
+}
+
+fn emitCall(c: *Compiler, args: usize) Error!void {
+    try c.emitCode(.call);
+    try c.emitByte(std.math.cast(u8, args) orelse return error.nyi);
+}
+
+fn emitCode(c: *Compiler, code: ByteCode) Error!void {
     try c.emitByte(@backingInt(code));
 }
 
-fn emitByte(c: *Compiler, byte: u8) !void {
+fn emitByte(c: *Compiler, byte: u8) Error!void {
     try c.bytecode.append(c.vm.gpa, byte);
 }
 
-fn emitConstant(c: *Compiler, value: *Value) !void {
+fn emitConstant(c: *Compiler, value: *Value) Error!void {
     for (c.constants.items, 0..) |constant, i| {
         if (value.eql(constant)) {
             defer value.deref(c.vm.gpa);
             return c.emitByte(@intCast(@backingInt(ByteCode.constant) + i));
         }
     }
+    if (c.constants.items.len >= @as(usize, 256) - @backingInt(ByteCode.constant)) return error.nyi;
     try c.constants.append(c.vm.gpa, value);
     try c.emitByte(@intCast(@backingInt(ByteCode.constant) + c.constants.items.len - 1));
 }
 
+/// One byte per instruction; `call`, `assign`, `assign_global`, `global` and `local_wide`
+/// take a one-byte operand, and `constant` plus an index pushes that constant.
 pub const ByteCode = enum(u8) {
     @"return" = 0,
     print = 1,
     pop = 2,
     assign = 3,
     amend = 4,
+    assign_global = 5,
     call = 10,
 
     // builtins

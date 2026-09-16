@@ -15,7 +15,11 @@ const Compiler = q.Compiler;
 
 const Vm = @This();
 
-const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || error{parse};
+const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || error{
+    parse,
+    nyi,
+    assign,
+};
 const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     assign,
     domain,
@@ -287,46 +291,48 @@ fn push(vm: *Vm, value: *Value) void {
     vm.stack.append(vm.gpa, value) catch @panic("oom");
 }
 
-fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
+pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     assert(args.len > 0);
     switch (func.as) {
-        .list => unreachable,
-        .boolean => unreachable,
-        .boolean_list => unreachable,
-        .byte => unreachable,
-        .byte_list => unreachable,
-        .short => unreachable,
-        .short_list => unreachable,
-        .int => unreachable,
-        .int_list => unreachable,
-        .long => unreachable,
-        .long_list => unreachable,
-        .real => unreachable,
-        .real_list => unreachable,
-        .float => unreachable,
-        .float_list => unreachable,
-        .char => unreachable,
-        .char_list => unreachable,
-        .symbol => unreachable,
-        .symbol_list => unreachable,
-        .timestamp => unreachable,
-        .timestamp_list => unreachable,
-        .month => unreachable,
-        .month_list => unreachable,
-        .date => unreachable,
-        .date_list => unreachable,
-        .datetime => unreachable,
-        .datetime_list => unreachable,
-        .timespan => unreachable,
-        .timespan_list => unreachable,
-        .minute => unreachable,
-        .minute_list => unreachable,
-        .second => unreachable,
-        .second_list => unreachable,
-        .time => unreachable,
-        .time_list => unreachable,
-        .dict => unreachable,
-        .lambda => return error.nyi,
+        .boolean,
+        .byte,
+        .short,
+        .int,
+        .long,
+        .real,
+        .float,
+        .char,
+        .symbol,
+        .timestamp,
+        .month,
+        .date,
+        .datetime,
+        .timespan,
+        .minute,
+        .second,
+        .time,
+        => return error.type,
+        .list,
+        .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => return vm.indexList(func, args),
+        .dict => return error.nyi,
+        .lambda => return vm.callLambda(func, args),
         .unary_primitive => |unary_primitive| {
             if (unary_primitive == .enlist and args.len > 1) return vm.enlist(args);
             if (args.len > 1) return error.rank;
@@ -652,7 +658,7 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
     }
 }
 
-fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
+pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
     const tree = vm.tree;
     const gpa = vm.gpa;
 
@@ -854,6 +860,10 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
+            // A `.q` name cannot be assigned, even when its entry is a symbol that reads as an
+            // alias (`.q.a:`alias` makes `a` read `alias` but `a:5` an error, as in q 5.0).
+            const op_tag = tree.nodeTag(op);
+            if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .keyword) return error.assign;
 
             var values: std.ArrayList(*Value) = try .initCapacity(gpa, if (maybe_rhs == .none) 2 else 3);
             defer values.deinit(gpa);
@@ -983,7 +993,7 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
     }
 }
 
-fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
+pub fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
     const tree = vm.tree;
 
     return switch (tree.nodeTag(node)) {
@@ -1221,6 +1231,200 @@ pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
     if (last_dot == 0) return .{ .namespace = vm.state, .name = try vm.intern(string[1..]) };
     const namespace = (try vm.namespaceAt(string[0..last_dot], create)) orelse return null;
     return .{ .namespace = namespace, .name = try vm.intern(string[last_dot + 1 ..]) };
+}
+
+/// The value of a global name: a clock variable, the root for `` ` ``, or the entry found
+/// through `identifierHome`, so a bare name reads from the current namespace.
+pub fn readGlobal(vm: *Vm, identifier: Symbol) RunError!*Value {
+    if (identifier == .empty) return vm.state.ref();
+    if (try vm.clockVariable(identifier)) |clock| return clock;
+    const home = (try vm.identifierHome(identifier, false)) orelse return error.identifier;
+    const dict = home.namespace.as.dict;
+    const index = std.mem.findScalar(Symbol, dict.keys.as.symbol_list, home.name) orelse return error.identifier;
+    return dict.values.as.list[index].ref();
+}
+
+/// Runs a lambda: too many arguments are a rank error and too few or a hole make a
+/// projection. Every lambda takes at least one argument, `{[]1}` included, whose single
+/// parameter is unnamed, so `f[]` passes `::` to it. Parameters are filled from the
+/// arguments, locals start unset (reading one is an error, as in q), and bare global names
+/// resolve in the namespace the lambda was defined in, which is also where `x::v` assigns.
+pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
+    const lambda = func.as.lambda;
+    assert(lambda.params.len > 0);
+    const given = args;
+    if (given.len > lambda.params.len) return error.rank;
+    const has_hole = for (given) |a| {
+        if (a.isEmpty()) break true;
+    } else false;
+    if (given.len < lambda.params.len or has_hole) return vm.project(func, given);
+
+    const slots = try vm.gpa.alloc(?*Value, lambda.params.len + lambda.locals.len);
+    defer {
+        for (slots) |slot| if (slot) |v| v.deref(vm.gpa);
+        vm.gpa.free(slots);
+    }
+    @memset(slots, null);
+    for (slots[0..given.len], given) |*slot, a| slot.* = a.ref();
+
+    const saved_namespace = vm.namespace;
+    vm.namespace = lambda.namespace;
+    defer vm.namespace = saved_namespace;
+
+    var stack: std.ArrayList(*Value) = .empty;
+    defer {
+        for (stack.items) |v| v.deref(vm.gpa);
+        stack.deinit(vm.gpa);
+    }
+
+    const code = lambda.bytecode;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const byte = code[pc];
+        pc += 1;
+        if (byte >= @backingInt(Compiler.ByteCode.constant)) {
+            try stack.append(vm.gpa, lambda.constants[byte - @backingInt(Compiler.ByteCode.constant)].ref());
+            continue;
+        }
+        const op: Compiler.ByteCode = @fromBackingInt(byte);
+        switch (op) {
+            .@"return" => return stack.pop().?,
+            .pop => stack.pop().?.deref(vm.gpa),
+            .nil => try stack.append(vm.gpa, vm.getUnaryPrimitive(.identity)),
+            .empty => try stack.append(vm.gpa, vm.getUnaryPrimitive(.empty)),
+            .empty_list => try stack.append(vm.gpa, vm.getConstant(.empty_list)),
+            .zero => try stack.append(vm.gpa, vm.getConstant(.zero)),
+            .one => try stack.append(vm.gpa, vm.getConstant(.one)),
+            .null_symbol => try stack.append(vm.gpa, vm.getConstant(.null_symbol)),
+            .self => try stack.append(vm.gpa, func.ref()),
+            .global => {
+                const index = code[pc];
+                pc += 1;
+                try stack.append(vm.gpa, try vm.readGlobal(lambda.globals[index]));
+            },
+            .assign => {
+                const slot = code[pc];
+                pc += 1;
+                const value = stack.items[stack.items.len - 1];
+                if (slots[slot]) |old| old.deref(vm.gpa);
+                slots[slot] = value.ref();
+            },
+            .assign_global => {
+                const index = code[pc];
+                pc += 1;
+                const target = try vm.createValue(.symbol, lambda.globals[index]);
+                defer target.deref(vm.gpa);
+                _ = try q.operators.assign(vm, target, stack.items[stack.items.len - 1]);
+            },
+            .call => {
+                const count = code[pc];
+                pc += 1;
+                const callee = stack.pop().?;
+                defer callee.deref(vm.gpa);
+                const call_args = try vm.gpa.alloc(*Value, count);
+                defer vm.gpa.free(call_args);
+                for (call_args) |*a| a.* = stack.pop().?;
+                defer for (call_args) |a| a.deref(vm.gpa);
+                try stack.append(vm.gpa, try vm.applyImpl(callee, call_args));
+            },
+            .param_1, .param_2, .param_3, .param_4, .param_5, .param_6, .param_7, .param_8 => {
+                const slot = byte - @backingInt(Compiler.ByteCode.param_1);
+                try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
+            },
+            .local_wide => {
+                const slot = lambda.params.len + code[pc];
+                pc += 1;
+                try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
+            },
+            .print, .amend, .comma => unreachable,
+            inline else => |t| {
+                const name = @tagName(t);
+                if (comptime std.mem.startsWith(u8, name, "local_")) {
+                    const slot = lambda.params.len + (byte - @backingInt(Compiler.ByteCode.local_1));
+                    try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
+                } else if (@hasField(Iterator, name)) {
+                    try stack.append(vm.gpa, vm.getIterator(@field(Iterator, name)));
+                } else if (@hasField(UnaryPrimitive, name)) {
+                    try stack.append(vm.gpa, vm.getUnaryPrimitive(@field(UnaryPrimitive, name)));
+                } else if (@hasField(Operator, name)) {
+                    try stack.append(vm.gpa, vm.getOperator(@field(Operator, name)));
+                } else {
+                    unreachable;
+                }
+            },
+        }
+    }
+    unreachable;
+}
+
+/// Indexing a list, as `x[i]` or `x i`: an integer picks an item, with a null shaped like
+/// the first item when it is out of range (`1 2 3[-1]` is `0N`, `"abc" 5` is `" "`), a list
+/// of indices picks each, `::` or a hole keeps everything, and further indices apply to what
+/// was picked, item by item after a list or a hole (`(1 2;3 4)[;0]` is `1 3`).
+fn indexList(vm: *Vm, list: *Value, args: []*Value) RunError!*Value {
+    const first = args[0];
+    const rest = args[1..];
+    const all = first.isEmpty() or (first.as == .unary_primitive and first.as.unary_primitive == .identity);
+    if (!all and !first.isList()) {
+        const index: ?i64 = switch (first.as) {
+            .boolean => |b| @intFromBool(b),
+            .short => |v| if (v == @backingInt(Value.Short.null)) null else v,
+            .int => |v| if (v == @backingInt(Value.Int.null)) null else v,
+            .long => |v| if (v == @backingInt(Value.Long.null)) null else v,
+            else => return error.type,
+        };
+        const picked = if (index != null and index.? >= 0 and index.? < list.count())
+            try q.operators.itemAt(vm, list, @intCast(index.?))
+        else
+            try q.operators.nullLike(vm, list);
+        if (rest.len == 0) return picked;
+        defer picked.deref(vm.gpa);
+        return vm.applyImpl(picked, rest);
+    }
+
+    // Everything, or each of a list of indices, then the remaining indices item by item.
+    const selected = if (all) list.ref() else selected: {
+        const len = first.count();
+        if (len == 0) break :selected try vm.allocValue(.list, 0);
+        const items = try vm.gpa.alloc(*Value, len);
+        defer vm.gpa.free(items);
+        var done: usize = 0;
+        defer for (items[0..done]) |v| v.deref(vm.gpa);
+        for (0..len) |i| {
+            const index = try q.operators.itemAt(vm, first, i);
+            defer index.deref(vm.gpa);
+            var one = [_]*Value{index};
+            items[done] = try vm.indexList(list, &one);
+            done += 1;
+        }
+        break :selected try vm.enlist(items);
+    };
+    if (rest.len == 0) return selected;
+    defer selected.deref(vm.gpa);
+
+    const len = selected.count();
+    if (len == 0) return selected.ref();
+    const items = try vm.gpa.alloc(*Value, len);
+    defer vm.gpa.free(items);
+    var done: usize = 0;
+    defer for (items[0..done]) |v| v.deref(vm.gpa);
+    for (0..len) |i| {
+        const item = try q.operators.itemAt(vm, selected, i);
+        defer item.deref(vm.gpa);
+        items[done] = try vm.applyImpl(item, rest);
+        done += 1;
+    }
+    return vm.enlist(items);
+}
+
+/// A projection of `func` on `args`, which may hold `.empty` holes.
+fn project(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
+    const copies = try vm.gpa.alloc(*Value, args.len);
+    errdefer vm.gpa.free(copies);
+    for (copies, args) |*copy, a| copy.* = a.ref();
+    const callee = func.ref();
+    errdefer callee.deref(vm.gpa);
+    return vm.createValue(.projection, .{ .callee = callee, .args = copies });
 }
 
 /// `.z.P` and the other clock variables, which q reads from the clock at every reference
@@ -2685,4 +2889,166 @@ test "a type suffix belongs on the last token of a list literal" {
     try expectEval(vm, "parse \"1 0 1h 1b\"", "(1 0 1h;1b)");
     try testing.expectError(error.InvalidCharacter, vm.evalSource("3b", .q, "<test>"));
     try testing.expectError(error.InvalidCharacter, vm.evalSource("1 2 3b", .q, "<test>"));
+}
+
+test "lambdas take q's implicit parameters, locals and projections" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "{x} 1 2 3", "1 2 3");
+    try expectEval(vm, "{y}[1;2]", "2");
+    try expectEval(vm, "{z}[1;2;3]", "3");
+    try expectEval(vm, "{}[]", "::");
+    try expectEval(vm, "{x}[]", "::");
+    try expectEval(vm, "{[]1}[]", "1");
+    try expectEval(vm, "{[]1}[1]", "1");
+    try expectEval(vm, "{[]1} 5", "1");
+    try expectEval(vm, "{[]}[]", "::");
+    try expectEval(vm, "{[]}[1]", "::");
+    try expectEval(vm, "{}[1]", "::");
+    try expectEval(vm, "{[a]a}[]", "::");
+    try expectEval(vm, "(value {[]1})[1]", ",`");
+    try testing.expectError(error.rank, vm.evalSource("{[]1}[1;2]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("{}[1;2]", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("{[]x}[5]", .q, "<test>"));
+    try expectEval(vm, "{1}[]", "1");
+    try expectEval(vm, "{x}[1]", "1");
+    try expectEval(vm, "{[a;b]a+b}[1;2]", "3");
+    try expectEval(vm, "({x+y})[1;2]", "3");
+    try expectEval(vm, "{x;y}[1;2]", "2");
+    try expectEval(vm, "{x+y;}[1;2]", "::");
+    try expectEval(vm, "{x+y}[1]", "{x+y}[1]");
+    try expectEval(vm, "{x+y}[1;] 2", "3");
+    try expectEval(vm, "{x+y}[;2] 1", "3");
+    try expectEval(vm, "{a:1;a+x} 2", "3");
+    try expectEval(vm, "{a:x;a}[5]", "5");
+    try expectEval(vm, "{x:x+1;x} 1", "2");
+    try expectEval(vm, "{x::5;x} 1", "5");
+    try expectEval(vm, "{{x+y}[x;1]} 2", "3");
+    try expectEval(vm, "{x y}[{x*2};3]", "6");
+    try expectEval(vm, "{x} {y}", "{y}");
+    try expectEval(vm, "{count x} 1 2 3", "3");
+    try expectEval(vm, "{x*2}@3", "6");
+    try expectEval(vm, "{[x]x*2} 3", "6");
+    try expectEval(vm, "{(x;y)}[1;`a]", "(1;`a)");
+    try expectEval(vm, "{.z.s} 1", "{.z.s}");
+    try expectEval(vm, "-3!{x+y}", "\"{x+y}\"");
+    try expectEval(vm, "(value {x+y})[1 2 3]", "(`x`y;`symbol$();,`)");
+    try expectEval(vm, "(value {a:1;b::2;c})[1 2 3]", "(,`x;,`a;``b`c)");
+    try expectEval(vm, "(value {[a]x})[1 2 3]", "(,`a;`symbol$();``x)");
+    try testing.expectError(error.rank, vm.evalSource("{x}[1;2]", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("{[a]x}[1]", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("{r:a;a:1;r}[]", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("{a:1;{a}[]}[]", .q, "<test>"));
+}
+
+test "lambdas resolve bare globals in their defining namespace and inline keywords" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // A keyword is inlined when the lambda is parsed, so a later change to `.q` is not seen.
+    try expectEval(vm, "f:{neg x};.q.neg:{x*10};f 1", "-1");
+    try expectEval(vm, "neg 1", "10");
+    try expectEvalMode(vm, .k, ".q.neg:-:", "-:");
+    try expectEval(vm, "neg 1", "-1");
+
+    for ([_][:0]const u8{ "value \"\\\\d .foo\"", "t0:{x+1}", "f:{t0 x}", "g:{neg x}", "h:{x+y}", "a:5", "k:{a}", "k2:{.foo.a}", "s:{b::x}", "later:{t1 x}", "value \"\\\\d .\"" }) |source| {
+        const value = try vm.evalSource(source, .q, "<test>");
+        value.deref(vm.gpa);
+    }
+    try expectEval(vm, "t1:{x+100};a:7", "7");
+
+    try expectEval(vm, ".foo.f 1", "2");
+    try expectEval(vm, ".foo.g 1", "-1");
+    try expectEval(vm, ".foo.h[1;2]", "3");
+    try expectEval(vm, ".foo.k[]", "5");
+    try expectEval(vm, ".foo.k2[]", "5");
+    // A bare name is looked up in `.foo` only, never in the root, and binds at call time.
+    try testing.expectError(error.identifier, vm.evalSource(".foo.later 1", .q, "<test>"));
+    try expectEval(vm, ".foo.t1:{x+200};.foo.later 1", "201");
+    // `::` assigns into the lambda's namespace.
+    try expectEval(vm, ".foo.s 3;.foo.b", "3");
+    try testing.expectError(error.identifier, vm.evalSource("b", .q, "<test>"));
+    try expectEval(vm, "(value .foo.f)[3]", "`foo`t0");
+    try expectEval(vm, "(value t1)[3]", ",`");
+}
+
+test "indexing and the apply operators follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "1 2 3[0 2]", "1 3");
+    try expectEval(vm, "1 2 3[-1]", "0N");
+    try expectEval(vm, "1 2 3[0N]", "0N");
+    try expectEval(vm, "1 2 3[::]", "1 2 3");
+    try expectEval(vm, "1 2 3[1i]", "2");
+    try expectEval(vm, "1 2 3[1h]", "2");
+    try expectEval(vm, "1 2 3[1b]", "2");
+    try expectEval(vm, "1 2 3[()]", "()");
+    try expectEval(vm, "1 2 3[(0;1)]", "1 2");
+    try expectEval(vm, "(1;`a)[0 1]", "(1;`a)");
+    try expectEval(vm, "(1;`a) 5", "0N");
+    try expectEval(vm, "\"abc\" 5", "\" \"");
+    try expectEval(vm, "`a`b`c 1", "`b");
+    try expectEval(vm, "(1;\"ab\")[1 1]", "(\"ab\";\"ab\")");
+    try expectEval(vm, "(1 2;3 4)[1;0]", "3");
+    try expectEval(vm, "(1 2;3 4)[;0]", "1 3");
+    try expectEval(vm, "{x[1]}[1 2 3]", "2");
+    try testing.expectError(error.type, vm.evalSource("1 2 3[1.5]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3[1;2]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3[0 1;]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3 sum", .q, "<test>"));
+
+    try expectEval(vm, "{x+y}@1", "{x+y}[1]");
+    try expectEval(vm, "{x+y} . 1 2", "3");
+    try expectEval(vm, "{x+y} . (1;2)", "3");
+    try expectEval(vm, "{x} . enlist 5", "5");
+    try expectEval(vm, "(+) . 1 2", "3");
+    try expectEval(vm, "@[{x*2};3]", "6");
+    try expectEval(vm, ".[{x+y};1 2]", "3");
+    try expectEval(vm, "neg@1", "-1");
+    try expectEval(vm, "(neg)@1 2", "-1 -2");
+}
+
+test "a symbol-valued .q entry reads as an alias and cannot be assigned" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Verified against q 5.0; q 4.0 differs only in allowing the assignments.
+    try expectEval(vm, ".q.a:`alias", "`alias");
+    try testing.expectError(error.identifier, vm.evalSource("a", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("{a}[]", .q, "<test>"));
+    try expectEval(vm, "parse \"a 1\"", "(`alias;1)");
+    try expectEval(vm, "alias:42;a", "42");
+    try expectEval(vm, "{a}[]", "42");
+    try expectEval(vm, "{[alias]a}[3]", "3");
+    try expectEval(vm, "(value {a})[3]", "``alias");
+    // The entry must exist before the line using it is parsed, in q as well.
+    try expectEval(vm, ".q.b:`x", "`x");
+    try expectEval(vm, "{b}[7]", "7");
+    try expectEval(vm, "(value {b})[1]", ",`x");
+    try testing.expectError(error.assign, vm.evalSource("a:5", .q, "<test>"));
+    try testing.expectError(error.assign, vm.evalSource("a::5", .q, "<test>"));
+    try testing.expectError(error.assign, vm.evalSource("parse \"a:5\"", .q, "<test>"));
+    try testing.expectError(error.assign, vm.evalSource("f:{a:5;a}", .q, "<test>"));
+    try testing.expectError(error.assign, vm.evalSource("{a::5;alias}", .q, "<test>"));
+    try expectEval(vm, ".q.d:5", "5");
+    try testing.expectError(error.assign, vm.evalSource("{d:1}", .q, "<test>"));
+    try testing.expectError(error.assign, vm.evalSource("d:1", .q, "<test>"));
+    try expectEval(vm, "alias", "42");
+
+    // The alias is a name in the lambda's namespace like any other, and not transitive.
+    for ([_][:0]const u8{ "value \"\\\\d .foo\"", "f:{a}", "value \"\\\\d .\"" }) |source| {
+        const value = try vm.evalSource(source, .q, "<test>");
+        value.deref(vm.gpa);
+    }
+    try testing.expectError(error.identifier, vm.evalSource(".foo.f[]", .q, "<test>"));
+    try expectEval(vm, ".foo.alias:9;.foo.f[]", "9");
+    try expectEval(vm, ".q.c:`neg", "`neg");
+    try testing.expectError(error.identifier, vm.evalSource("c 1", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("{c x}[1]", .q, "<test>"));
 }

@@ -769,6 +769,7 @@ pub const Lambda = struct {
     locals: []const Symbol,
     globals: []const Symbol,
     constants: []*Value,
+    namespace: Symbol,
     source: []const u8,
 };
 
