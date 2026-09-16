@@ -284,14 +284,38 @@ fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .list => unreachable,
         .boolean => unreachable,
         .boolean_list => unreachable,
+        .byte => unreachable,
+        .byte_list => unreachable,
+        .short => unreachable,
+        .short_list => unreachable,
+        .int => unreachable,
+        .int_list => unreachable,
         .long => unreachable,
         .long_list => unreachable,
+        .real => unreachable,
+        .real_list => unreachable,
         .float => unreachable,
         .float_list => unreachable,
         .char => unreachable,
         .char_list => unreachable,
         .symbol => unreachable,
         .symbol_list => unreachable,
+        .timestamp => unreachable,
+        .timestamp_list => unreachable,
+        .month => unreachable,
+        .month_list => unreachable,
+        .date => unreachable,
+        .date_list => unreachable,
+        .datetime => unreachable,
+        .datetime_list => unreachable,
+        .timespan => unreachable,
+        .timespan_list => unreachable,
+        .minute => unreachable,
+        .minute_list => unreachable,
+        .second => unreachable,
+        .second_list => unreachable,
+        .time => unreachable,
+        .time_list => unreachable,
         .dict => unreachable,
         .lambda => return error.nyi,
         .unary_primitive => |unary_primitive| {
@@ -393,10 +417,22 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
         const first_type = switch (args[0].as) {
             .list,
             .boolean_list,
+            .byte_list,
+            .short_list,
+            .int_list,
             .long_list,
+            .real_list,
             .float_list,
             .char_list,
             .symbol_list,
+            .timestamp_list,
+            .month_list,
+            .date_list,
+            .datetime_list,
+            .timespan_list,
+            .minute_list,
+            .second_list,
+            .time_list,
             .lambda,
             .unary_primitive,
             .operator,
@@ -409,7 +445,25 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_right,
             .each_left,
             => break :is_vector false,
-            .boolean, .long, .float, .char, .symbol, .dict => @backingInt(args[0].as),
+            .boolean,
+            .byte,
+            .short,
+            .int,
+            .long,
+            .real,
+            .float,
+            .char,
+            .symbol,
+            .timestamp,
+            .month,
+            .date,
+            .datetime,
+            .timespan,
+            .minute,
+            .second,
+            .time,
+            .dict,
+            => @backingInt(args[0].as),
         };
         break :is_vector for (args[1..]) |a| {
             if (first_type != @backingInt(a.as)) break false;
@@ -419,10 +473,22 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
         switch (args[0].as) {
             .list,
             .boolean_list,
+            .byte_list,
+            .short_list,
+            .int_list,
             .long_list,
+            .real_list,
             .float_list,
             .char_list,
             .symbol_list,
+            .timestamp_list,
+            .month_list,
+            .date_list,
+            .datetime_list,
+            .timespan_list,
+            .minute_list,
+            .second_list,
+            .time_list,
             .lambda,
             .unary_primitive,
             .operator,
@@ -435,34 +501,28 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_right,
             .each_left,
             => unreachable,
-            .boolean => {
-                const value = try vm.allocValue(.boolean_list, args.len);
+            inline .boolean,
+            .byte,
+            .short,
+            .int,
+            .long,
+            .real,
+            .float,
+            .char,
+            .symbol,
+            .timestamp,
+            .month,
+            .date,
+            .datetime,
+            .timespan,
+            .minute,
+            .second,
+            .time,
+            => |_, tag| {
+                const list_tag = @field(Value.Type, @tagName(tag) ++ "_list");
+                const value = try vm.allocValue(list_tag, args.len);
                 errdefer comptime unreachable;
-                for (value.as.boolean_list, args) |*v, a| v.* = a.as.boolean;
-                return value;
-            },
-            .long => {
-                const value = try vm.allocValue(.long_list, args.len);
-                errdefer comptime unreachable;
-                for (value.as.long_list, args) |*v, a| v.* = a.as.long;
-                return value;
-            },
-            .float => {
-                const value = try vm.allocValue(.float_list, args.len);
-                errdefer comptime unreachable;
-                for (value.as.float_list, args) |*v, a| v.* = a.as.float;
-                return value;
-            },
-            .char => {
-                const value = try vm.allocValue(.char_list, args.len);
-                errdefer comptime unreachable;
-                for (value.as.char_list, args) |*v, a| v.* = a.as.char;
-                return value;
-            },
-            .symbol => {
-                const value = try vm.allocValue(.symbol_list, args.len);
-                errdefer comptime unreachable;
-                for (value.as.symbol_list, args) |*v, a| v.* = a.as.symbol;
+                for (@field(value.as, @tagName(list_tag)), args) |*v, a| v.* = @field(a.as, @tagName(tag));
                 return value;
             },
             .dict => return error.nyi,
@@ -1280,78 +1340,54 @@ pub fn createNumberLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Value 
 }
 
 pub fn createNumberLiteralSlice(vm: *Vm, slice: []const u8) !*Value {
-    switch (slice[slice.len - 1]) {
-        'b' => switch (slice.len - 1) {
-            0 => unreachable,
-            1 => return vm.createValue(.boolean, slice[0] == '1'),
-            else => {
-                const boolean_list = try vm.allocValue(.boolean_list, slice.len - 1);
-                errdefer comptime unreachable;
-                for (boolean_list.as.boolean_list, slice[0 .. slice.len - 1]) |*b, c| b.* = c == '1';
-                return boolean_list;
-            },
-        },
-        'j' => return vm.createValue(.long, try q.parseLong(slice[0 .. slice.len - 1])),
-        'f' => return vm.createValue(.float, try q.parseFloat(slice[0 .. slice.len - 1])),
-        else => return switch (try q.parseNumber(slice)) {
-            .long => |v| vm.createValue(.long, v),
-            .float => |v| vm.createValue(.float, v),
-        },
+    if (slice.len >= 2 and slice[0] == '0' and slice[1] == 'x') return vm.createByteLiteral(slice[2..]);
+    // `101b` is a boolean list in one token; every other literal is an atom.
+    if (slice[slice.len - 1] == 'b' and slice.len > 2) {
+        const boolean_list = try vm.allocValue(.boolean_list, slice.len - 1);
+        errdefer comptime unreachable;
+        for (boolean_list.as.boolean_list, slice[0 .. slice.len - 1]) |*b, c| b.* = c == '1';
+        return boolean_list;
+    }
+    switch (try q.literal.parse(slice)) {
+        inline else => |value, kind| return vm.createValue(comptime kind.atomType(), value),
     }
 }
 
+/// `0x0102` is a byte list, `0x01` a byte atom and `0x` the empty byte list.
+fn createByteLiteral(vm: *Vm, hex: []const u8) !*Value {
+    if (hex.len % 2 != 0) return error.InvalidCharacter;
+    const len = hex.len / 2;
+    if (len == 1) return vm.createValue(.byte, try std.fmt.parseInt(u8, hex, 16));
+    const list = try vm.allocValue(.byte_list, len);
+    errdefer list.deref(vm.gpa);
+    for (list.as.byte_list, 0..) |*b, i| b.* = try std.fmt.parseInt(u8, hex[2 * i ..][0..2], 16);
+    return list;
+}
+
+/// A list literal takes its type from its last item, as `1 0Nh` or `2023.04.17 0Nd`; a list
+/// of untyped numbers is long unless one of them needs to be a float.
 pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Value {
     assert(tree.nodeTag(node) == .number_list_literal);
     const first_token = tree.nodeMainToken(node);
     const last_token = tree.nodeData(node).token;
-    const len = last_token - first_token + 1;
 
-    const last_slice = tree.tokenSlice(last_token);
-    switch (last_slice[last_slice.len - 1]) {
-        'j' => {
-            var list: std.ArrayList(i64) = try .initCapacity(vm.gpa, len);
-            defer list.deinit(vm.gpa);
-            for (first_token..last_token) |tok| {
-                const slice = tree.tokenSlice(@intCast(tok));
-                list.appendAssumeCapacity(try q.parseLong(slice));
-            }
-            list.appendAssumeCapacity(try q.parseLong(last_slice[0 .. last_slice.len - 1]));
-            return vm.createValue(.long_list, list.toOwnedSliceAssert());
+    switch (try q.literal.kindOf(tree.tokenSlice(last_token))) {
+        .long => return vm.createTypedList(tree, .long, first_token, last_token) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return vm.createTypedList(tree, .float, first_token, last_token),
         },
-        'f', '.' => {
-            var list: std.ArrayList(f64) = try .initCapacity(vm.gpa, len);
-            defer list.deinit(vm.gpa);
-            for (first_token..last_token) |tok| {
-                const slice = tree.tokenSlice(@intCast(tok));
-                list.appendAssumeCapacity(try q.parseFloat(slice));
-            }
-            list.appendAssumeCapacity(try q.parseFloat(last_slice[0 .. last_slice.len - 1]));
-            return vm.createValue(.float_list, list.toOwnedSliceAssert());
-        },
-        '0'...'9' => {
-            long: {
-                var list: std.ArrayList(i64) = try .initCapacity(vm.gpa, len);
-                defer list.deinit(vm.gpa);
-                for (first_token..last_token + 1) |tok| {
-                    const slice = tree.tokenSlice(@intCast(tok));
-                    const number = q.parseNumber(slice) catch break :long;
-                    switch (number) {
-                        .long => |j| list.appendAssumeCapacity(j),
-                        else => break :long,
-                    }
-                }
-                return vm.createValue(.long_list, list.toOwnedSliceAssert());
-            }
-            var list: std.ArrayList(f64) = try .initCapacity(vm.gpa, len);
-            defer list.deinit(vm.gpa);
-            for (first_token..last_token + 1) |tok| {
-                const slice = tree.tokenSlice(@intCast(tok));
-                list.appendAssumeCapacity(try q.parseFloat(slice));
-            }
-            return vm.createValue(.float_list, list.toOwnedSliceAssert());
-        },
-        else => |c| std.debug.panic("NYI: {c}", .{c}),
+        inline else => |kind| return vm.createTypedList(tree, kind, first_token, last_token),
     }
+}
+
+fn createTypedList(vm: *Vm, tree: *const Ast, comptime kind: q.literal.Kind, first_token: Ast.TokenIndex, last_token: Ast.TokenIndex) !*Value {
+    const list = try vm.allocValue(comptime kind.listType(), last_token - first_token + 1);
+    errdefer list.deref(vm.gpa);
+    const items = @field(list.as, @tagName(kind.listType()));
+    for (items, first_token..) |*item, tok| {
+        item.* = @field(try q.literal.parseAs(kind, tree.tokenSlice(@intCast(tok))), @tagName(kind));
+    }
+    return list;
 }
 
 const testing = std.testing;
@@ -1543,7 +1579,7 @@ test "unknown system commands run in the shell" {
     try expectEval(vm, "\\printf 'a\\nb'", "(,\"a\";,\"b\")");
     try expectEval(vm, "\\true", "()");
     try expectEval(vm, "value \"\\\\echo hi\"", ",\"hi\"");
-    try expectEval(vm, "type value \"\\\\echo hi\"", "0");
+    try expectEval(vm, "type value \"\\\\echo hi\"", "0h");
 
     // As in q, the command runs as `sh -c "<command> >file"`: the capture binds to the last
     // simple command and wins over its own stdout redirection, and stderr is not captured.
@@ -1556,7 +1592,7 @@ test "unknown system commands run in the shell" {
     // Only the exact name `d` is the namespace command.
     try expectEval(vm, "\\d .Q", "::");
     try expectEval(vm, "\\d", "`.Q");
-    try expectEval(vm, "type value \"\\\\du -hs .\"", "0");
+    try expectEval(vm, "type value \"\\\\du -hs .\"", "0h");
     try testing.expectError(error.os, vm.evalSource("\\dx 2>/dev/null", .q, "<test>"));
     try testing.expectError(error.os, vm.evalSource("\\false", .q, "<test>"));
     try testing.expectError(error.os, vm.evalSource("\\nonexistent_cmd_xyz 2>/dev/null", .q, "<test>"));
@@ -1574,4 +1610,320 @@ test "assignment replaces an existing global" {
     try expectEval(vm, "z:`a", "`a");
     try expectEval(vm, "z:`b", "`b");
     try expectEval(vm, ".Q.z", "`b");
+}
+
+test "short, int, real and byte literals display as in q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "1h", "1h");
+    try expectEval(vm, "-1h", "-1h");
+    try expectEval(vm, "0Nh", "0Nh");
+    try expectEval(vm, "0Wh", "0Wh");
+    try expectEval(vm, "-0Wh", "-0Wh");
+    try expectEval(vm, "32767h", "0Wh");
+    try expectEval(vm, "1 2h", "1 2h");
+    try expectEval(vm, "1 0Nh", "1 0Nh");
+    try expectEval(vm, "0N 1h", "0N 1h");
+    try expectEval(vm, "0W -0W 1h", "0W -0W 1h");
+    try expectEval(vm, "enlist 1h", ",1h");
+
+    try expectEval(vm, "1i", "1i");
+    try expectEval(vm, "0Ni", "0Ni");
+    try expectEval(vm, "0Wi", "0Wi");
+    try expectEval(vm, "-0Wi", "-0Wi");
+    try expectEval(vm, "1 2i", "1 2i");
+    try expectEval(vm, "0N 1i", "0N 1i");
+    try expectEval(vm, "enlist 1i", ",1i");
+
+    try expectEval(vm, "1e", "1e");
+    try expectEval(vm, "1.5e", "1.5e");
+    try expectEval(vm, "0.1e", "0.1e");
+    try expectEval(vm, "0Ne", "0Ne");
+    try expectEval(vm, "0We", "0we");
+    try expectEval(vm, "-0We", "-0we");
+    try expectEval(vm, "1 2e", "1 2e");
+    try expectEval(vm, "1 2.5e", "1 2.5e");
+    try expectEval(vm, "1.5 2e", "1.5 2e");
+    try expectEval(vm, "1 0Ne", "1 0Ne");
+    try expectEval(vm, "0.1 0.2e", "0.1 0.2e");
+    try expectEval(vm, "100000e", "100000e");
+    try expectEval(vm, "1000000e", "1000000e");
+    try expectEval(vm, "enlist 1e", ",1e");
+
+    try expectEval(vm, "0x01", "0x01");
+    try expectEval(vm, "0x00", "0x00");
+    try expectEval(vm, "0xff", "0xff");
+    try expectEval(vm, "0x0102", "0x0102");
+    try expectEval(vm, "enlist 0x01", ",0x01");
+    try expectEval(vm, "0x", "`byte$()");
+    try expectEval(vm, "enlist 0x", ",`byte$()");
+
+    try expectEval(vm, "-3!(1h;2i;3e;0x04)", "\"(1h;2i;3e;0x04)\"");
+}
+
+test "type returns a short" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "type 1b", "-1h");
+    try expectEval(vm, "type 101b", "1h");
+    try expectEval(vm, "type 0x01", "-4h");
+    try expectEval(vm, "type 0x0102", "4h");
+    try expectEval(vm, "type 1h", "-5h");
+    try expectEval(vm, "type 1 2h", "5h");
+    try expectEval(vm, "type 1i", "-6h");
+    try expectEval(vm, "type 0N", "-7h");
+    try expectEval(vm, "type 1e", "-8h");
+    try expectEval(vm, "type 1.5", "-9h");
+    try expectEval(vm, "type \"a\"", "-10h");
+    try expectEval(vm, "type `a", "-11h");
+    try expectEval(vm, "type ()", "0h");
+    try expectEval(vm, "type `a`b!1 2", "99h");
+    try expectEval(vm, "type type 1", "-5h");
+}
+
+test "atom arithmetic promotes as q does" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "1+2", "3");
+    try expectEval(vm, "1+0.5", "1.5");
+    try expectEval(vm, "1.5+1", "2.5");
+    try expectEval(vm, "2*1.5", "3f");
+
+    // Booleans, bytes and shorts compute as ints; wider operands win.
+    try expectEval(vm, "1h+1h", "2i");
+    try expectEval(vm, "1h-2h", "-1i");
+    try expectEval(vm, "1h*2h", "2i");
+    try expectEval(vm, "1b+1b", "2i");
+    try expectEval(vm, "1b+1h", "2i");
+    try expectEval(vm, "1b*2h", "2i");
+    try expectEval(vm, "0x01+0x01", "2i");
+    try expectEval(vm, "0x02*3h", "6i");
+    try expectEval(vm, "1i+1h", "2i");
+    try expectEval(vm, "2h*3i", "6i");
+    try expectEval(vm, "1h+1", "2");
+    try expectEval(vm, "1i+1", "2");
+    try expectEval(vm, "2h*3", "6");
+    try expectEval(vm, "2h-3", "-1");
+    try expectEval(vm, "0x01+1", "2");
+    try expectEval(vm, "2e*3", "6e");
+    try expectEval(vm, "2e*3f", "6f");
+    try expectEval(vm, "1h+1f", "2f");
+
+    // Nulls propagate into the result kind; infinities are ordinary values that wrap.
+    try expectEval(vm, "0Nh+1h", "0Ni");
+    try expectEval(vm, "0Nh*2", "0N");
+    try expectEval(vm, "0Ni+1", "0N");
+    try expectEval(vm, "0Wh+1h", "32768i");
+    try expectEval(vm, "32767h+1h", "32768i");
+    try expectEval(vm, "0Wi+1i", "0Ni");
+
+    // Division is always float.
+    try expectEval(vm, "1h%2h", "0.5");
+    try expectEval(vm, "1%2", "0.5");
+    try expectEval(vm, "1e%2e", "0.5");
+    try expectEval(vm, "1i%2", "0.5");
+    try expectEval(vm, "2i%4i", "0.5");
+    try expectEval(vm, "2%0", "0w");
+    try expectEval(vm, "-2%0", "-0w");
+    try expectEval(vm, "0%0", "0n");
+    try expectEval(vm, "1h%0", "0w");
+
+    try testing.expectError(error.type, vm.evalSource("`a+1", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("1 2+3", .q, "<test>"));
+}
+
+test "neg, first, enlist and match on the numeric types" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "neg 1h", "-1h");
+    try expectEval(vm, "neg 0Nh", "0Nh");
+    try expectEval(vm, "neg 1e", "-1e");
+    try expectEval(vm, "neg 0x01", "-1i");
+    try expectEval(vm, "neg 1b", "-1i");
+    try expectEval(vm, "neg 1 2h", "-1 -2h");
+    try expectEval(vm, "neg 1 2e", "-1 -2e");
+    try expectEval(vm, "neg 0N 1i", "0N -1i");
+    try expectEval(vm, "neg 0x0102", "-1 -2i");
+    try expectEval(vm, "neg 101b", "-1 0 -1i");
+
+    try expectEval(vm, "first 1 2h", "1h");
+    try expectEval(vm, "first 1 2e", "1e");
+    try expectEval(vm, "first 0x0102", "0x01");
+    try expectEval(vm, "first 101b", "1b");
+
+    try expectEval(vm, "(1h;2h)", "1 2h");
+    try expectEval(vm, "(1e;2e)", "1 2e");
+    try expectEval(vm, "(0x01;0x02)", "0x0102");
+    try expectEval(vm, "(1h;2i)", "(1h;2i)");
+    try expectEval(vm, "(1e;2f)", "(1e;2f)");
+    try expectEval(vm, "(1b;1h)", "(1b;1h)");
+    try expectEval(vm, "(0x01;1h)", "(0x01;1h)");
+
+    try expectEval(vm, "1h~1h", "1b");
+    try expectEval(vm, "1h~1", "0b");
+    try expectEval(vm, "1 2h!3 4", "1 2h!3 4");
+}
+
+test "temporal literals display as in q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "2023.04.17", "2023.04.17");
+    try expectEval(vm, "2000.01.01", "2000.01.01");
+    try expectEval(vm, "1999.12.31", "1999.12.31");
+    try expectEval(vm, "2023.04.17d", "2023.04.17");
+    try expectEval(vm, "0Nd", "0Nd");
+    try expectEval(vm, "0Wd", "0Wd");
+    try expectEval(vm, "-0Wd", "-0Wd");
+    try expectEval(vm, "2023.04.17 2023.04.18", "2023.04.17 2023.04.18");
+    try expectEval(vm, "2023.04.17 0Nd", "2023.04.17 0N");
+    try expectEval(vm, "enlist 2023.04.17", ",2023.04.17");
+
+    try expectEval(vm, "2023.04m", "2023.04m");
+    try expectEval(vm, "2000.01m", "2000.01m");
+    try expectEval(vm, "0Nm", "0Nm");
+    try expectEval(vm, "0Wm", "0Wm");
+    try expectEval(vm, "2023.04 2023.05m", "2023.04 2023.05m");
+
+    try expectEval(vm, "2023.04.17D12:34:56.123456789", "2023.04.17D12:34:56.123456789");
+    try expectEval(vm, "2023.04.17D12:34:56", "2023.04.17D12:34:56.000000000");
+    try expectEval(vm, "2023.04.17D12:34", "2023.04.17D12:34:00.000000000");
+    try expectEval(vm, "2023.04.17D", "2023.04.17D00:00:00.000000000");
+    try expectEval(vm, "2023.04.17D12:34:56p", "2023.04.17D12:34:56.000000000");
+    try expectEval(vm, "0Np", "0Np");
+    try expectEval(vm, "0Wp", "0Wp");
+    try expectEval(vm, "-0Wp", "-0Wp");
+    try expectEval(vm, "2023.04.17D12:34:56.123456789 0Np", "2023.04.17D12:34:56.123456789 0N");
+
+    try expectEval(vm, "2023.04.17T12:34:56.123", "2023.04.17T12:34:56.123");
+    try expectEval(vm, "2023.04.17T12:34:56", "2023.04.17T12:34:56.000");
+    try expectEval(vm, "0Nz", "0Nz");
+    try expectEval(vm, "0Wz", "0wz");
+    try expectEval(vm, "-0Wz", "-0wz");
+    try expectEval(vm, "2023.04.17T12:34:56.123 0Nz", "2023.04.17T12:34:56.123 0N");
+
+    try expectEval(vm, "0D12:34:56.123456789", "0D12:34:56.123456789");
+    try expectEval(vm, "1D12:34:56", "1D12:34:56.000000000");
+    try expectEval(vm, "0D00:00:01", "0D00:00:01.000000000");
+    try expectEval(vm, "0D00:00", "0D00:00:00.000000000");
+    try expectEval(vm, "100D00:00:00", "100D00:00:00.000000000");
+    try expectEval(vm, "12:34:56.123456789n", "0D12:34:56.123456789");
+    try expectEval(vm, "0Nn", "0Nn");
+    try expectEval(vm, "0Wn", "0Wn");
+    try expectEval(vm, "-0Wn", "-0Wn");
+    try expectEval(vm, "0D12:34:56.123456789 0Nn", "0D12:34:56.123456789 0N");
+
+    try expectEval(vm, "12:34", "12:34");
+    try expectEval(vm, "12:34u", "12:34");
+    try expectEval(vm, "25:00", "25:00");
+    try expectEval(vm, "0Nu", "0Nu");
+    try expectEval(vm, "0Wu", "0Wu");
+    try expectEval(vm, "-0Wu", "-0Wu");
+    try expectEval(vm, "12:34 12:35", "12:34 12:35");
+    try expectEval(vm, "12:34 0Nu", "12:34 0N");
+
+    try expectEval(vm, "12:34:56", "12:34:56");
+    try expectEval(vm, "12:34:56v", "12:34:56");
+    try expectEval(vm, "0Nv", "0Nv");
+    try expectEval(vm, "0Wv", "0Wv");
+    try expectEval(vm, "12:34:56 0Nv", "12:34:56 0N");
+
+    try expectEval(vm, "12:34:56.123", "12:34:56.123");
+    try expectEval(vm, "12:34:56.123t", "12:34:56.123");
+    try expectEval(vm, "12:34:56t", "12:34:56.000");
+    try expectEval(vm, "0Nt", "0Nt");
+    try expectEval(vm, "0Wt", "0Wt");
+    try expectEval(vm, "-0Wt", "-0Wt");
+    try expectEval(vm, "12:34:56.123 0Nt", "12:34:56.123 0N");
+
+    try expectEval(vm, "type 2023.04.17", "-14h");
+    try expectEval(vm, "type 2023.04.17 2023.04.18", "14h");
+    try expectEval(vm, "type 2023.04m", "-13h");
+    try expectEval(vm, "type 2023.04.17D12:34:56", "-12h");
+    try expectEval(vm, "type 2023.04.17T12:34:56", "-15h");
+    try expectEval(vm, "type 0D00:00:01", "-16h");
+    try expectEval(vm, "type 12:34", "-17h");
+    try expectEval(vm, "type 12:34:56", "-18h");
+    try expectEval(vm, "type 12:34:56.123", "-19h");
+}
+
+test "temporal arithmetic follows q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // An integer keeps the type; the same type subtracted gives an int for dates and months.
+    try expectEval(vm, "2023.04.17+1", "2023.04.18");
+    try expectEval(vm, "2023.04.17+1h", "2023.04.18");
+    try expectEval(vm, "2023.04.17+1i", "2023.04.18");
+    try expectEval(vm, "1+2023.04.17", "2023.04.18");
+    try expectEval(vm, "2023.04.17-1", "2023.04.16");
+    try expectEval(vm, "2023.04.17-2023.04.16", "1i");
+    try expectEval(vm, "2023.04.17-2000.01.01", "8507i");
+    try expectEval(vm, "2023.04.17+2023.04.17", "17014i");
+    try expectEval(vm, "2023.04.17*2", "2046.08.01");
+    try expectEval(vm, "2023.04.17%2", "4253.5");
+    try expectEval(vm, "neg 2023.04.17", "1976.09.16");
+    try expectEval(vm, "2023.04m+1", "2023.05m");
+    try expectEval(vm, "2023.04m-1", "2023.03m");
+    try expectEval(vm, "2023.04m-2023.01m", "3i");
+    try expectEval(vm, "2023.04m+0.5", "279.5");
+
+    // Times of day combine at the finer resolution and stay temporal when subtracted.
+    try expectEval(vm, "12:34+1", "12:35");
+    try expectEval(vm, "12:35-12:34", "00:01");
+    try expectEval(vm, "12:34+12:34", "25:08");
+    try expectEval(vm, "12:34:56+1", "12:34:57");
+    try expectEval(vm, "12:34:57-12:34:56", "00:00:01");
+    try expectEval(vm, "12:34:56.123+1", "12:34:56.124");
+    try expectEval(vm, "12:34:56.124-12:34:56.123", "00:00:00.001");
+    try expectEval(vm, "12:34+12:34:56", "25:08:56");
+    try expectEval(vm, "12:34:56+12:34:56.123", "25:09:52.123");
+    try expectEval(vm, "0D00:00:01+1", "0D00:00:01.000000001");
+    try expectEval(vm, "0D00:00:02-0D00:00:01", "0D00:00:01.000000000");
+    try expectEval(vm, "0D00:00:01*2", "0D00:00:02.000000000");
+    // `0D00:00:02%2` is the float 1e9, whose q display needs the pending %g formatting.
+    try expectEval(vm, "0D00:00:01+12:00", "0D12:00:01.000000000");
+    try expectEval(vm, "neg 0D00:00:01", "-0D00:00:01.000000000");
+
+    // A date-like value plus a time of day is a timestamp; a fraction of a day is a datetime.
+    try expectEval(vm, "2023.04.17+12:00", "2023.04.17D12:00:00.000000000");
+    try expectEval(vm, "2023.04.17+12:00:00", "2023.04.17D12:00:00.000000000");
+    try expectEval(vm, "2023.04.17+12:00:00.000", "2023.04.17D12:00:00.000000000");
+    try expectEval(vm, "2023.04.17+0D12:00:00", "2023.04.17D12:00:00.000000000");
+    try expectEval(vm, "1899.12.31+0D12:00:00", "1899.12.31D12:00:00.000000000");
+    try expectEval(vm, "2023.04.17+0.5", "2023.04.17T12:00:00.000");
+    try expectEval(vm, "2023.04.17D12:00:00+1", "2023.04.17D12:00:00.000000001");
+    try expectEval(vm, "2023.04.17D12:00:01-2023.04.17D12:00:00", "0D00:00:01.000000000");
+    try expectEval(vm, "2023.04.17D12:00:00+0D01:00:00", "2023.04.17D13:00:00.000000000");
+    try expectEval(vm, "0D01:00:00+2023.04.17D12:00:00", "2023.04.17D13:00:00.000000000");
+    try expectEval(vm, "2023.04.17D12:00:00-0D01:00:00", "2023.04.17D11:00:00.000000000");
+    try expectEval(vm, "2023.04.17D12:00:00+12:00", "2023.04.18D00:00:00.000000000");
+    try expectEval(vm, "2023.04.17T12:00:00+1", "2023.04.18T12:00:00.000");
+    try expectEval(vm, "2023.04.17T12:00:00+0.5", "2023.04.18T00:00:00.000");
+    try expectEval(vm, "2023.04.17T12:00:00-2023.04.17T00:00:00", "0.5");
+    try expectEval(vm, "2023.04.17T12:00:00+0D01:00:00", "2023.04.17D13:00:00.000000000");
+    try expectEval(vm, "2023.04.17T12:00:00.000+0D00:00:00.5", "2023.04.17D12:00:00.500000000");
+    try testing.expectError(error.type, vm.evalSource("2023.04.17+2023.04m", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("2023.04.17D12:00:00-2023.04.17", .q, "<test>"));
+
+    // Nulls propagate and infinities wrap.
+    try expectEval(vm, "0Nd+1", "0Nd");
+    try expectEval(vm, "0Wd+1", "0Nd");
+    try expectEval(vm, "0Nd-0Nd", "0Ni");
+
+    try expectEval(vm, "(2023.04.17;2023.04.18)", "2023.04.17 2023.04.18");
+    try expectEval(vm, "(2023.04.17;12:00)", "(2023.04.17;12:00)");
+    try expectEval(vm, "first 2023.04.17 2023.04.18", "2023.04.17");
+    try expectEval(vm, "2023.04.17~2023.04.17", "1b");
+    try expectEval(vm, "12:00 12:01!1 2", "12:00 12:01!1 2");
 }

@@ -17,6 +17,7 @@ pub const Value = @import("Value.zig");
 pub const Compiler = @import("Compiler.zig");
 pub const operators = @import("functions/operators.zig");
 pub const unary_primitives = @import("functions/unary_primitives.zig");
+pub const literal = @import("literal.zig");
 
 pub fn printAstErrorsToStderr(gpa: Allocator, io: Io, tree: Ast, path: []const u8, color: Color) !void {
     var wip_errors: ErrorBundle.Wip = undefined;
@@ -66,14 +67,14 @@ pub fn putAstErrorsIntoBundle(gpa: Allocator, tree: Ast, src_path: []const u8, e
 pub fn parseNumber(s: []const u8) !union(enum) { long: i64, float: f64 } {
     switch (s.len) {
         2 => if (s[0] == '0') switch (s[1]) {
-            'N' => return .{ .long = @intFromEnum(Value.Long.null) },
+            'N' => return .{ .long = @backingInt(Value.Long.null) },
             'n' => return .{ .float = std.math.nan(f64) },
-            'W' => return .{ .long = @intFromEnum(Value.Long.inf) },
+            'W' => return .{ .long = @backingInt(Value.Long.inf) },
             'w' => return .{ .float = std.math.inf(f64) },
             else => {},
         },
         3 => if (s[0] == '-' and s[1] == '0') switch (s[2]) {
-            'W' => return .{ .long = @intFromEnum(Value.Long.neg_inf) },
+            'W' => return .{ .long = @backingInt(Value.Long.neg_inf) },
             'w' => return .{ .float = -std.math.inf(f64) },
             else => {},
         },
@@ -87,34 +88,37 @@ pub fn parseNumber(s: []const u8) !union(enum) { long: i64, float: f64 } {
     }
 }
 
-pub fn parseLong(s: []const u8) !i64 {
+/// Parses an integer literal without its type suffix, accepting the `0N`, `0W` and `-0W` forms.
+pub fn parseInteger(comptime I: type, s: []const u8) !@typeInfo(I).@"enum".tag_type {
+    const T = @typeInfo(I).@"enum".tag_type;
     return switch (s.len) {
         2 => if (s[0] == '0') switch (s[1]) {
-            'N', 'n' => @intFromEnum(Value.Long.null),
-            'W', 'w' => @intFromEnum(Value.Long.inf),
+            'N', 'n' => @backingInt(I.null),
+            'W', 'w' => @backingInt(I.inf),
             else => null,
         } else null,
         3 => if (s[0] == '-' and s[1] == '0') switch (s[2]) {
-            'W', 'w' => @intFromEnum(Value.Long.neg_inf),
+            'W', 'w' => @backingInt(I.neg_inf),
             else => null,
         } else null,
         else => null,
-    } orelse std.fmt.parseInt(i64, s, 10);
+    } orelse std.fmt.parseInt(T, s, 10);
 }
 
-pub fn parseFloat(s: []const u8) !f64 {
+/// Parses a floating-point literal without its type suffix, accepting `0n`, `0w` and `-0w`.
+pub fn parseFloat(comptime T: type, s: []const u8) !T {
     return switch (s.len) {
         2 => if (s[0] == '0') switch (s[1]) {
-            'N', 'n' => std.math.nan(f64),
-            'W', 'w' => std.math.inf(f64),
+            'N', 'n' => std.math.nan(T),
+            'W', 'w' => std.math.inf(T),
             else => null,
         } else null,
         3 => if (s[0] == '-' and s[1] == '0') switch (s[2]) {
-            'W', 'w' => -std.math.inf(f64),
+            'W', 'w' => -std.math.inf(T),
             else => null,
         } else null,
         else => null,
-    } orelse std.fmt.parseFloat(f64, s);
+    } orelse std.fmt.parseFloat(T, s);
 }
 
 test {

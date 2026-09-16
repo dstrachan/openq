@@ -25,6 +25,7 @@ pub fn neg(vm: *Vm, x: *Value) !*Value {
             var i: usize = 0;
             errdefer {
                 for (v.as.list[0..i]) |elem| elem.deref(vm.gpa);
+                vm.gpa.free(v.as.list);
                 vm.gpa.destroy(v);
             }
             for (v.as.list, val) |*vv, elem| {
@@ -33,20 +34,52 @@ pub fn neg(vm: *Vm, x: *Value) !*Value {
             }
             return v;
         },
-        .boolean => return error.nyi,
-        .boolean_list => return error.nyi,
-        .long => |val| return vm.createValue(.long, -val),
-        .long_list => |val| {
-            const v = try vm.allocValue(.long_list, val.len);
-            errdefer v.deref(vm.gpa);
-            for (v.as.long_list, val) |*vv, elem| vv.* = -elem;
+        // Booleans and bytes negate to ints, as q does; nulls wrap back onto themselves.
+        .boolean => |val| return vm.createValue(.int, -%@as(i32, @intFromBool(val))),
+        .boolean_list => |val| {
+            const v = try vm.allocValue(.int_list, val.len);
+            errdefer comptime unreachable;
+            for (v.as.int_list, val) |*vv, elem| vv.* = -%@as(i32, @intFromBool(elem));
             return v;
         },
-        .float => |val| return vm.createValue(.float, -val),
-        .float_list => |val| {
-            const v = try vm.allocValue(.float_list, val.len);
-            errdefer v.deref(vm.gpa);
-            for (v.as.float_list, val) |*vv, elem| vv.* = -elem;
+        .byte => |val| return vm.createValue(.int, -%@as(i32, val)),
+        .byte_list => |val| {
+            const v = try vm.allocValue(.int_list, val.len);
+            errdefer comptime unreachable;
+            for (v.as.int_list, val) |*vv, elem| vv.* = -%@as(i32, elem);
+            return v;
+        },
+        inline .short,
+        .int,
+        .long,
+        .real,
+        .float,
+        .timestamp,
+        .month,
+        .date,
+        .datetime,
+        .timespan,
+        .minute,
+        .second,
+        .time,
+        => |val, tag| return vm.createValue(tag, negate(val)),
+        inline .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |val, tag| {
+            const v = try vm.allocValue(tag, val.len);
+            errdefer comptime unreachable;
+            for (@field(v.as, @tagName(tag)), val) |*vv, elem| vv.* = negate(elem);
             return v;
         },
         .char => return error.nyi,
@@ -68,14 +101,34 @@ pub fn neg(vm: *Vm, x: *Value) !*Value {
     }
 }
 
+/// Negation that keeps an integer null (the minimum value) a null by wrapping.
+fn negate(number: anytype) @TypeOf(number) {
+    return switch (@typeInfo(@TypeOf(number))) {
+        .int => -%number,
+        else => -number,
+    };
+}
+
 pub fn first(vm: *Vm, x: *Value) !*Value {
     switch (x.as) {
         .list => |val| return val[0].ref(),
         .boolean,
+        .byte,
+        .short,
+        .int,
         .long,
+        .real,
         .float,
         .char,
         .symbol,
+        .timestamp,
+        .month,
+        .date,
+        .datetime,
+        .timespan,
+        .minute,
+        .second,
+        .time,
         .lambda,
         .unary_primitive,
         .operator,
@@ -89,9 +142,21 @@ pub fn first(vm: *Vm, x: *Value) !*Value {
         .each_left,
         => return x.ref(),
         .boolean_list => |val| return vm.createValue(.boolean, val[0]),
+        .byte_list => |val| return vm.createValue(.byte, val[0]),
+        .short_list => |val| return vm.createValue(.short, val[0]),
+        .int_list => |val| return vm.createValue(.int, val[0]),
         .long_list => |val| return vm.createValue(.long, val[0]),
+        .real_list => |val| return vm.createValue(.real, val[0]),
         .float_list => |val| return vm.createValue(.float, val[0]),
         .char_list => |val| return vm.createValue(.char, val[0]),
+        .timestamp_list => |val| return vm.createValue(.timestamp, val[0]),
+        .month_list => |val| return vm.createValue(.month, val[0]),
+        .date_list => |val| return vm.createValue(.date, val[0]),
+        .datetime_list => |val| return vm.createValue(.datetime, val[0]),
+        .timespan_list => |val| return vm.createValue(.timespan, val[0]),
+        .minute_list => |val| return vm.createValue(.minute, val[0]),
+        .second_list => |val| return vm.createValue(.second, val[0]),
+        .time_list => |val| return vm.createValue(.time, val[0]),
         .symbol_list => |val| return vm.createValue(.symbol, val[0]),
         .dict => |val| return first(vm, val.values),
     }
@@ -172,6 +237,14 @@ pub fn key(vm: *Vm, x: *Value) !*Value {
         .list => return error.nyi,
         .boolean => return error.nyi,
         .boolean_list => return error.nyi,
+        .byte => return error.nyi,
+        .byte_list => return error.nyi,
+        .short => return error.nyi,
+        .short_list => return error.nyi,
+        .int => return error.nyi,
+        .int_list => return error.nyi,
+        .real => return error.nyi,
+        .real_list => return error.nyi,
         .long => |val| {
             if (val < 0) return error.domain;
             const long_list = try vm.allocValue(.long_list, @intCast(val));
@@ -186,6 +259,22 @@ pub fn key(vm: *Vm, x: *Value) !*Value {
         .char_list => return error.nyi,
         .symbol => return error.nyi,
         .symbol_list => return error.nyi,
+        .timestamp => return error.nyi,
+        .timestamp_list => return error.nyi,
+        .month => return error.nyi,
+        .month_list => return error.nyi,
+        .date => return error.nyi,
+        .date_list => return error.nyi,
+        .datetime => return error.nyi,
+        .datetime_list => return error.nyi,
+        .timespan => return error.nyi,
+        .timespan_list => return error.nyi,
+        .minute => return error.nyi,
+        .minute_list => return error.nyi,
+        .second => return error.nyi,
+        .second_list => return error.nyi,
+        .time => return error.nyi,
+        .time_list => return error.nyi,
         .dict => return error.nyi,
         .lambda => return error.nyi,
         .unary_primitive => return error.nyi,
@@ -208,7 +297,7 @@ pub fn distinct(vm: *Vm, x: *Value) !*Value {
 }
 
 pub fn @"type"(vm: *Vm, x: *Value) !*Value {
-    return vm.createValue(.long, @backingInt(x.as));
+    return vm.createValue(.short, @backingInt(x.as));
 }
 
 pub fn value(vm: *Vm, x: *Value) !*Value {
@@ -217,8 +306,16 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
         .list => return error.nyi,
         .boolean => return error.nyi,
         .boolean_list => return error.nyi,
+        .byte => return error.nyi,
+        .byte_list => return error.nyi,
+        .short => return error.nyi,
+        .short_list => return error.nyi,
+        .int => return error.nyi,
+        .int_list => return error.nyi,
         .long => return error.nyi,
         .long_list => return error.nyi,
+        .real => return error.nyi,
+        .real_list => return error.nyi,
         .float => return error.nyi,
         .float_list => return error.nyi,
         .char => return error.nyi,
@@ -239,6 +336,22 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
             return dict.values.as.list[index].ref();
         },
         .symbol_list => return error.nyi,
+        .timestamp => return error.nyi,
+        .timestamp_list => return error.nyi,
+        .month => return error.nyi,
+        .month_list => return error.nyi,
+        .date => return error.nyi,
+        .date_list => return error.nyi,
+        .datetime => return error.nyi,
+        .datetime_list => return error.nyi,
+        .timespan => return error.nyi,
+        .timespan_list => return error.nyi,
+        .minute => return error.nyi,
+        .minute_list => return error.nyi,
+        .second => return error.nyi,
+        .second_list => return error.nyi,
+        .time => return error.nyi,
+        .time_list => return error.nyi,
         .dict => return error.nyi,
         .lambda => |lambda| {
             const bytecode = try vm.allocValue(.long_list, lambda.bytecode.len);
@@ -306,10 +419,22 @@ pub fn enlist(vm: *Vm, x: *Value) !*Value {
     switch (x.as) {
         .list,
         .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
         .long_list,
+        .real_list,
         .float_list,
         .char_list,
         .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
         .lambda,
         .unary_primitive,
         .operator,
@@ -327,34 +452,28 @@ pub fn enlist(vm: *Vm, x: *Value) !*Value {
             v.as.list[0] = x.ref();
             return v;
         },
-        .boolean => |val| {
-            const v = try vm.allocValue(.boolean_list, 1);
+        inline .boolean,
+        .byte,
+        .short,
+        .int,
+        .long,
+        .real,
+        .float,
+        .char,
+        .symbol,
+        .timestamp,
+        .month,
+        .date,
+        .datetime,
+        .timespan,
+        .minute,
+        .second,
+        .time,
+        => |val, tag| {
+            const list_tag = @field(Value.Type, @tagName(tag) ++ "_list");
+            const v = try vm.allocValue(list_tag, 1);
             errdefer comptime unreachable;
-            v.as.boolean_list[0] = val;
-            return v;
-        },
-        .long => |val| {
-            const v = try vm.allocValue(.long_list, 1);
-            errdefer comptime unreachable;
-            v.as.long_list[0] = val;
-            return v;
-        },
-        .float => |val| {
-            const v = try vm.allocValue(.float_list, 1);
-            errdefer comptime unreachable;
-            v.as.float_list[0] = val;
-            return v;
-        },
-        .char => |val| {
-            const v = try vm.allocValue(.char_list, 1);
-            errdefer comptime unreachable;
-            v.as.char_list[0] = val;
-            return v;
-        },
-        .symbol => |val| {
-            const v = try vm.allocValue(.symbol_list, 1);
-            errdefer comptime unreachable;
-            v.as.symbol_list[0] = val;
+            @field(v.as, @tagName(list_tag))[0] = val;
             return v;
         },
         .dict => return error.nyi,
