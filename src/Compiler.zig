@@ -25,6 +25,8 @@ params: std.ArrayList(Symbol) = .empty,
 locals: std.ArrayList(Symbol) = .empty,
 globals: std.ArrayList(Symbol) = .empty,
 constants: std.ArrayList(*Value) = .empty,
+/// Every name the body mentions, in source order, from which the globals are numbered.
+names: std.ArrayList(Symbol) = .empty,
 /// Set when the lambda has no parameter list, so its parameters are the implicit `x`, `y`
 /// and `z`, as many as the body uses.
 implicit_params: bool = false,
@@ -42,6 +44,7 @@ pub fn deinit(c: *Compiler) void {
     c.params.deinit(c.vm.gpa);
     c.locals.deinit(c.vm.gpa);
     c.globals.deinit(c.vm.gpa);
+    c.names.deinit(c.vm.gpa);
     for (c.constants.items) |v| v.deref(c.vm.gpa);
     c.constants.deinit(c.vm.gpa);
 }
@@ -78,6 +81,13 @@ pub fn compile(c: *Compiler, node: Node.Index) Error!*Value {
         for ("xyz"[0..@max(1, c.implicit_valence)]) |letter| {
             try c.params.append(vm.gpa, try vm.intern(&.{letter}));
         }
+    }
+    // Globals are numbered by first appearance in the source, as q numbers them.
+    for (c.names.items) |symbol| {
+        if (std.mem.findScalar(Symbol, c.params.items, symbol) != null) continue;
+        if (std.mem.findScalar(Symbol, c.locals.items, symbol) != null) continue;
+        if (std.mem.findScalar(Symbol, c.globals.items, symbol) != null) continue;
+        try c.globals.append(vm.gpa, symbol);
     }
 
     for (body, 0..) |n, i| {
@@ -167,9 +177,12 @@ fn noteName(c: *Compiler, name: []const u8, assigned: bool) Error!void {
         }
         if (name[0] == 'x' or name[0] == 'y' or name[0] == 'z') return;
     }
+    // `.z.s` is the lambda itself, not a global.
+    if (std.mem.eql(u8, name, ".z.s")) return;
+    const symbol = try c.vm.intern(name);
+    if (std.mem.findScalar(Symbol, c.names.items, symbol) == null) try c.names.append(c.vm.gpa, symbol);
     // Only a bare name assigned with `:` is a local; a dotted name is always global.
     if (!assigned or name[0] == '.') return;
-    const symbol = try c.vm.intern(name);
     if (std.mem.findScalar(Symbol, c.params.items, symbol) != null) return;
     if (std.mem.findScalar(Symbol, c.locals.items, symbol) != null) return;
     try c.locals.append(c.vm.gpa, symbol);
@@ -207,13 +220,16 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
                 try c.compileArgs(args);
             }
             try c.compileNode(nodes[0]);
-            try c.emitCall(args.len);
+            // One argument applies with `@`, as q compiles `x[1]`; more need `call n`.
+            if (args.len == 1) try c.emitCode(.apply_at) else try c.emitCall(args.len);
         },
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
             try c.compileNode(rhs);
+            // A primitive is an instruction of its own, as q compiles `neg x` to `neg`.
+            if (try c.directOpcode(lhs, 1)) |code| return c.emitCode(code);
             try c.compileFunction(lhs);
-            try c.emitCall(1);
+            try c.emitCode(.apply_at);
         },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
@@ -229,11 +245,18 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .keyword) return error.assign;
             // Indexed and compound assignment are still to come.
             if (op_tag == .colon) return error.nyi;
-            if (maybe_rhs.unwrap()) |rhs| try c.compileNode(rhs);
+            if (maybe_rhs.unwrap()) |rhs| {
+                try c.compileNode(rhs);
+                try c.compileNode(lhs);
+                // An operator is an instruction of its own, as q compiles `x+y` to `+`.
+                if (try c.directOpcode(op, 2)) |code| return c.emitCode(code);
+                try c.compileConstantNode(op);
+                return c.emitCall(2);
+            }
+            // A missing right operand projects, so `1+` is `+[1]`.
             try c.compileNode(lhs);
             try c.compileConstantNode(op);
-            // A missing right operand projects, so `1+` is `+[1]`.
-            try c.emitCall(if (maybe_rhs == .none) 1 else 2);
+            try c.emitCode(.apply_at);
         },
 
         .identifier => try c.compileIdentifier(tree.tokenSlice(tree.nodeMainToken(node))),
@@ -243,16 +266,6 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             const slice = tree.tokenSlice(tree.nodeMainToken(node));
             if (c.aliasOf(node)) |name| return c.compileIdentifier(name);
             if (vm.qEntry(slice)) |entry| try c.emitConstant(entry.ref()) else try c.compileGlobal(slice);
-        },
-        .builtin => {
-            const slice = tree.tokenSlice(tree.nodeMainToken(node));
-            const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
-            switch (builtin) {
-                inline else => |t| if (@hasField(ByteCode, @tagName(t)))
-                    try c.emitCode(@field(ByteCode, @tagName(t)))
-                else
-                    try c.compileConstantNode(node),
-            }
         },
 
         .system,
@@ -269,6 +282,17 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         .backslash_colon,
         => return error.nyi,
 
+        // `0` and `1` have instructions of their own; every other literal is a constant.
+        .number_literal => {
+            const slice = tree.tokenSlice(tree.nodeMainToken(node));
+            if (slice.len == 1 or (slice.len == 2 and slice[1] == 'j')) switch (slice[0]) {
+                '0' => return c.emitCode(.zero),
+                '1' => return c.emitCode(.one),
+                else => {},
+            };
+            try c.compileConstantNode(node);
+        },
+
         // Literals, nested lambdas and the glyphs are values that need no evaluation.
         else => try c.compileConstantNode(node),
     }
@@ -280,6 +304,34 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
 fn aliasOf(c: *Compiler, node: Node.Index) ?[]const u8 {
     const entry = c.vm.qEntry(c.tree.tokenSlice(c.tree.nodeMainToken(node))) orelse return null;
     return if (entry.as == .symbol) c.vm.internedString(entry.as.symbol) else null;
+}
+
+/// The instruction that applies the primitive or operator a node stands for, or null when
+/// the node is not one (a lambda, a name, an expression) or the primitive has no opcode.
+/// Only the opcodes between `identity` and `self` apply a value this way.
+fn directOpcode(c: *Compiler, node: Node.Index, arity: u8) Error!?ByteCode {
+    const tree = c.tree;
+    const value: *Value = switch (tree.nodeTag(node)) {
+        .keyword => (c.vm.qEntry(tree.tokenSlice(tree.nodeMainToken(node))) orelse return null).ref(),
+        .identifier,
+        .call,
+        .grouped_expression,
+        .apply_unary,
+        .apply_binary,
+        .list,
+        .expr_block,
+        .lambda,
+        => return null,
+        else => if (arity == 1) try c.vm.parseUnaryNode(node) else try c.vm.parseNode(node),
+    };
+    defer value.deref(c.vm.gpa);
+    const name = switch (value.as) {
+        .unary_primitive => |p| if (arity == 1) @tagName(p) else return null,
+        .operator => |o| if (arity == 2) @tagName(o) else return null,
+        else => return null,
+    };
+    const code = std.meta.stringToEnum(ByteCode, name) orelse return null;
+    return if (@backingInt(code) >= @backingInt(ByteCode.identity) and @backingInt(code) < @backingInt(ByteCode.self)) code else null;
 }
 
 /// The function of `f x`: a glyph is its monadic form, as `-:`; anything else compiles.
@@ -329,31 +381,46 @@ fn compileIdentifier(c: *Compiler, name: []const u8) Error!void {
     try c.compileGlobal(name);
 }
 
+/// A global is one byte, `global` plus its index, as q numbers them.
 fn compileGlobal(c: *Compiler, name: []const u8) Error!void {
-    try c.emitCode(.global);
-    try c.emitByte(try c.globalIndex(name));
+    try c.emitByte(try c.globalByte(name));
 }
 
 /// Assigns the value on top of the stack, which stays there as the expression's value.
-/// `x::v` reaches the global unless `x` is a parameter or local, as in q.
+/// A parameter or local is `assign` with its slot; a global is `amend` on `()` with the
+/// `:` operator, which is how q compiles `x::v` (`.[`x;();:;v]`). `x::v` reaches the
+/// global unless `x` is a parameter or local, as in q.
 fn compileAssign(c: *Compiler, name: []const u8, global: bool) Error!void {
     if (name[0] != '.') {
         const symbol = try c.vm.intern(name);
-        if (std.mem.findScalar(Symbol, c.params.items, symbol)) |i| return c.emitAssign(i);
-        if (std.mem.findScalar(Symbol, c.locals.items, symbol)) |i| return c.emitAssign(c.params.items.len + i);
+        if (std.mem.findScalar(Symbol, c.params.items, symbol)) |i| return c.emitAssign(paramSlot(i));
+        if (std.mem.findScalar(Symbol, c.locals.items, symbol)) |i| return c.emitAssign(localSlot(i));
         assert(global);
     }
-    try c.emitCode(.assign_global);
-    try c.emitByte(try c.globalIndex(name));
+    try c.emitCode(.empty_list);
+    try c.emitCode(.amend);
+    try c.emitByte(try c.globalByte(name));
+    try c.emitByte(@backingInt(Value.Operator.assign));
 }
 
-fn globalIndex(c: *Compiler, name: []const u8) Error!u8 {
+/// The byte naming a global in an instruction: `global` plus its index, at most 30.
+fn globalByte(c: *Compiler, name: []const u8) Error!u8 {
     const symbol = try c.vm.intern(name);
     const index = std.mem.findScalar(Symbol, c.globals.items, symbol) orelse index: {
         try c.globals.append(c.vm.gpa, symbol);
         break :index c.globals.items.len - 1;
     };
-    return std.math.cast(u8, index) orelse error.nyi;
+    if (index >= @as(usize, @backingInt(ByteCode.constant)) - @backingInt(ByteCode.global)) return error.nyi;
+    return @intCast(@backingInt(ByteCode.global) + index);
+}
+
+/// q numbers slots from 1: parameters take 1 to 8 and locals start at 9.
+fn paramSlot(index: usize) usize {
+    return index + 1;
+}
+
+fn localSlot(index: usize) usize {
+    return index + 9;
 }
 
 fn emitParam(c: *Compiler, index: usize) Error!void {
@@ -364,7 +431,7 @@ fn emitParam(c: *Compiler, index: usize) Error!void {
 fn emitLocal(c: *Compiler, index: usize) Error!void {
     if (index < 22) return c.emitByte(@intCast(@backingInt(ByteCode.local_1) + index));
     try c.emitCode(.local_wide);
-    try c.emitByte(std.math.cast(u8, index) orelse return error.nyi);
+    try c.emitByte(std.math.cast(u8, localSlot(index)) orelse return error.nyi);
 }
 
 fn emitAssign(c: *Compiler, slot: usize) Error!void {
@@ -397,15 +464,17 @@ fn emitConstant(c: *Compiler, value: *Value) Error!void {
     try c.emitByte(@intCast(@backingInt(ByteCode.constant) + c.constants.items.len - 1));
 }
 
-/// One byte per instruction; `call`, `assign`, `assign_global`, `global` and `local_wide`
-/// take a one-byte operand, and `constant` plus an index pushes that constant.
+/// q's instruction set. Most instructions are one byte: a primitive or operator between
+/// `identity` and `self` applies to the value(s) on the stack, `param_n`, `local_n`,
+/// `global` plus an index and `constant` plus an index push, `call` takes the argument
+/// count, `assign` takes a slot (parameters 1 to 8, locals from 9), `local_wide` a slot,
+/// and `amend` a target (a slot, or `global` plus an index) and an operator index.
 pub const ByteCode = enum(u8) {
     @"return" = 0,
     print = 1,
     pop = 2,
     assign = 3,
     amend = 4,
-    assign_global = 5,
     call = 10,
 
     // builtins
@@ -468,7 +537,7 @@ pub const ByteCode = enum(u8) {
     @"and" = 69,
     @"or" = 70,
     fill = 71,
-    equals = 72,
+    equal = 72,
     less_than = 73,
     greater_than = 74,
     cast = 75,

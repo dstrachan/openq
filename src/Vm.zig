@@ -1279,16 +1279,31 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
 
     const code = lambda.bytecode;
     var pc: usize = 0;
+    // q returns `::` from a lambda whose last statement was an amend (`{a::5}[]`), while
+    // the amend still has its value inside an expression (`{(a::5)+1}[]` is 6).
+    var after_amend = false;
     while (pc < code.len) {
         const byte = code[pc];
         pc += 1;
         if (byte >= @backingInt(Compiler.ByteCode.constant)) {
             try stack.append(vm.gpa, lambda.constants[byte - @backingInt(Compiler.ByteCode.constant)].ref());
+            after_amend = false;
+            continue;
+        }
+        if (byte >= @backingInt(Compiler.ByteCode.global)) {
+            try stack.append(vm.gpa, try vm.readGlobal(lambda.globals[byte - @backingInt(Compiler.ByteCode.global)]));
+            after_amend = false;
             continue;
         }
         const op: Compiler.ByteCode = @fromBackingInt(byte);
+        defer after_amend = op == .amend;
         switch (op) {
-            .@"return" => return stack.pop().?,
+            .@"return" => {
+                const result = stack.pop().?;
+                if (!after_amend) return result;
+                result.deref(vm.gpa);
+                return vm.getUnaryPrimitive(.identity);
+            },
             .pop => stack.pop().?.deref(vm.gpa),
             .nil => try stack.append(vm.gpa, vm.getUnaryPrimitive(.identity)),
             .empty => try stack.append(vm.gpa, vm.getUnaryPrimitive(.empty)),
@@ -1297,24 +1312,34 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             .one => try stack.append(vm.gpa, vm.getConstant(.one)),
             .null_symbol => try stack.append(vm.gpa, vm.getConstant(.null_symbol)),
             .self => try stack.append(vm.gpa, func.ref()),
-            .global => {
-                const index = code[pc];
-                pc += 1;
-                try stack.append(vm.gpa, try vm.readGlobal(lambda.globals[index]));
-            },
+            .global => unreachable, // handled above with the indexed forms
             .assign => {
-                const slot = code[pc];
+                const slot = slotIndex(lambda, code[pc]);
                 pc += 1;
                 const value = stack.items[stack.items.len - 1];
                 if (slots[slot]) |old| old.deref(vm.gpa);
                 slots[slot] = value.ref();
             },
-            .assign_global => {
-                const index = code[pc];
-                pc += 1;
-                const target = try vm.createValue(.symbol, lambda.globals[index]);
-                defer target.deref(vm.gpa);
-                _ = try q.operators.assign(vm, target, stack.items[stack.items.len - 1]);
+            .amend => {
+                // `.[target;index;op;value]` with the value pushed first, then the index.
+                // Only the plain assignment `index` `()` with `:` is done so far; compound
+                // and indexed amends are still to come.
+                const target = code[pc];
+                const operator: Operator = @fromBackingInt(@as(@typeInfo(Operator).@"enum".tag_type, @intCast(code[pc + 1])));
+                pc += 2;
+                const index = stack.pop().?;
+                defer index.deref(vm.gpa);
+                const value = stack.items[stack.items.len - 1];
+                if (operator != .assign or !index.isList() or index.count() != 0) return error.nyi;
+                if (target >= @backingInt(Compiler.ByteCode.global)) {
+                    const symbol = try vm.createValue(.symbol, lambda.globals[target - @backingInt(Compiler.ByteCode.global)]);
+                    defer symbol.deref(vm.gpa);
+                    _ = try q.operators.assign(vm, symbol, value);
+                } else {
+                    const slot = slotIndex(lambda, target);
+                    if (slots[slot]) |old| old.deref(vm.gpa);
+                    slots[slot] = value.ref();
+                }
             },
             .call => {
                 const count = code[pc];
@@ -1332,11 +1357,11 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
             },
             .local_wide => {
-                const slot = lambda.params.len + code[pc];
+                const slot = slotIndex(lambda, code[pc]);
                 pc += 1;
                 try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
             },
-            .print, .amend, .comma => unreachable,
+            .print, .comma => unreachable,
             inline else => |t| {
                 const name = @tagName(t);
                 if (comptime std.mem.startsWith(u8, name, "local_")) {
@@ -1345,9 +1370,24 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 } else if (@hasField(Iterator, name)) {
                     try stack.append(vm.gpa, vm.getIterator(@field(Iterator, name)));
                 } else if (@hasField(UnaryPrimitive, name)) {
-                    try stack.append(vm.gpa, vm.getUnaryPrimitive(@field(UnaryPrimitive, name)));
+                    // A primitive applies to the value on top of the stack.
+                    const x = stack.pop().?;
+                    defer x.deref(vm.gpa);
+                    const primitive = vm.getUnaryPrimitive(@field(UnaryPrimitive, name));
+                    defer primitive.deref(vm.gpa);
+                    var operands = [_]*Value{x};
+                    try stack.append(vm.gpa, try vm.applyImpl(primitive, &operands));
                 } else if (@hasField(Operator, name)) {
-                    try stack.append(vm.gpa, vm.getOperator(@field(Operator, name)));
+                    // An operator applies to the top two: the left operand is on top, as
+                    // the right one was pushed first.
+                    const x = stack.pop().?;
+                    defer x.deref(vm.gpa);
+                    const y = stack.pop().?;
+                    defer y.deref(vm.gpa);
+                    const operator = vm.getOperator(@field(Operator, name));
+                    defer operator.deref(vm.gpa);
+                    var operands = [_]*Value{ x, y };
+                    try stack.append(vm.gpa, try vm.applyImpl(operator, &operands));
                 } else {
                     unreachable;
                 }
@@ -1355,6 +1395,11 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         }
     }
     unreachable;
+}
+
+/// The array index of a q slot: parameters are slots 1 to 8, locals start at 9.
+fn slotIndex(lambda: Value.Lambda, slot: u8) usize {
+    return if (slot <= 8) slot - 1 else lambda.params.len + slot - 9;
 }
 
 /// Indexing a list, as `x[i]` or `x i`: an integer picks an item, with a null shaped like
@@ -3051,4 +3096,36 @@ test "a symbol-valued .q entry reads as an alias and cannot be assigned" {
     try expectEval(vm, ".q.c:`neg", "`neg");
     try testing.expectError(error.identifier, vm.evalSource("c 1", .q, "<test>"));
     try testing.expectError(error.identifier, vm.evalSource("{c x}[1]", .q, "<test>"));
+}
+
+test "lambda bytecode follows q's encoding" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // The bytes q shows through `value`, minus its trailing stack-size byte.
+    try expectEval(vm, "(value {x+y})[0]", "98 97 65 0");
+    try expectEval(vm, "(value {neg x})[0]", "97 34 0");
+    try expectEval(vm, "(value {x in y})[0]", "98 97 87 0");
+    try expectEval(vm, "(value {x=y})[0]", "98 97 72 0");
+    try expectEval(vm, "(value {x@y})[0]", "98 97 82 0");
+    try expectEval(vm, "(value {x;y})[0]", "97 2 98 0");
+    try expectEval(vm, "(value {x[1]})[0]", "13 97 82 0");
+    try expectEval(vm, "(value {f[1;2]})[0]", "160 13 129 10 2 0");
+    try expectEval(vm, "(value {(x;y)})[0]", "98 97 160 10 2 0");
+    try expectEval(vm, "(value {a:1})[0]", "13 3 9 0");
+    try expectEval(vm, "(value {x:1;x})[0]", "13 3 1 2 97 0");
+    try expectEval(vm, "(value {a::1})[0]", "13 11 4 129 0 0");
+    try expectEval(vm, "(value {a::1;a})[0]", "13 11 4 129 0 2 129 0");
+    try expectEval(vm, "(value {[p]l:1;p+g1+g2})[0]", "13 3 9 2 130 129 65 97 65 0");
+    try expectEval(vm, "(value {`a})[0]", "160 0");
+    try expectEval(vm, "(value {})[0]", "16 0");
+
+    // An amend as the last statement returns `::`, but has its value inside an expression.
+    try expectEval(vm, "{a::5}[]", "::");
+    try expectEval(vm, "{(a::5)+1}[]", "6");
+    try expectEval(vm, "{r:(a::7);r}[]", "7");
+    try expectEval(vm, "a", "7");
+    try expectEval(vm, "{a:5}[]", "5");
+    try expectEval(vm, "{x:5}[1]", "5");
 }
