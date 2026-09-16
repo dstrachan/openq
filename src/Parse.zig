@@ -899,7 +899,9 @@ fn parseNumberLiteral(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    while (p.tokenTag(p.tok_i) == .number_literal and !p.tokenIsBoolOrByte(p.tok_i - 1)) {
+    // A boolean or byte literal is a value of its own that never joins a number list, so
+    // `1 0 1b` is `1 0` applied to `1b`, as is `1b 1 0` the other way round.
+    while (p.tokenTag(p.tok_i) == .number_literal and !p.tokenIsBoolOrByte(p.tok_i) and !p.tokenIsBoolOrByte(p.tok_i - 1)) {
         try p.scratch.append(p.gpa, @fromBackingInt(@intCast(try p.nextToken())));
     }
 
@@ -1623,13 +1625,19 @@ test "boolean or byte literal ends number list literal" {
     try testParse(
         "0 1 2 010b",
         &.{ .number_literal, .number_literal, .number_literal, .number_literal },
-        &.{.number_list_literal},
+        &.{ .number_list_literal, .apply_unary, .number_literal },
         &.{},
     );
     try testParse(
         "0 1 2 0x000102",
         &.{ .number_literal, .number_literal, .number_literal, .number_literal },
-        &.{.number_list_literal},
+        &.{ .number_list_literal, .apply_unary, .number_literal },
+        &.{},
+    );
+    try testParse(
+        "1 0 1b",
+        &.{ .number_literal, .number_literal, .number_literal },
+        &.{ .number_list_literal, .apply_unary, .number_literal },
         &.{},
     );
     try testParse(

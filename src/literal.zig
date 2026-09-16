@@ -120,6 +120,17 @@ pub fn kindOf(slice: []const u8) !Kind {
     return .long;
 }
 
+/// Whether a token ends in a type letter, as `1h`, `1e` or `0Nd` do and `0N`, `0n`, `1e3`
+/// and `0D01` do not. q allows the letter only on the last token of a list literal, so
+/// `0N 0W -0Wh` is a short list but `0Nh 0N` is an error.
+pub fn hasSuffix(slice: []const u8) bool {
+    if (slice.len < 2 or isNull(slice) or isInfinity(slice)) return false;
+    return switch (slice[slice.len - 1]) {
+        'b', 'h', 'i', 'j', 'e', 'f', 'p', 'm', 'd', 'z', 'n', 'u', 'v', 't' => true,
+        else => false,
+    };
+}
+
 /// Parses a token as a given kind, tolerating a trailing type letter: `0N` and `0Nd` are
 /// both the null date when the kind is date.
 pub fn parseAs(kind: Kind, slice: []const u8) !Atom {
@@ -196,10 +207,12 @@ fn parseMonth(s: []const u8) !i32 {
     return (y - 2000) * 12 + m - 1;
 }
 
-/// `YYYY.MM.DD`, optionally followed by `D` and a time of day.
+/// `YYYY.MM.DD`, optionally followed by `D` and a time of day. A bare integer counts hours
+/// from 2000.01.01, as q reads `1p` and `3600p`.
 fn parseTimestamp(s: []const u8) !i64 {
     if (specialInteger(Value.Long, s)) |v| return v;
     const d = std.mem.findScalar(u8, s, 'D') orelse s.len;
+    if (d == s.len and !isDate(s)) return parseTimespan(s);
     const days: i64 = try parseDate(s[0..d]);
     const nanos: i64 = if (d + 1 < s.len) try parseTimeOfDay(i64, s[d + 1 ..], 1) else 0;
     return days * ns_per_day + nanos;
@@ -234,7 +247,21 @@ fn parseTimespan(s: []const u8) !i64 {
 fn parseTimeOfDay(comptime T: type, s: []const u8, unit: i64) !T {
     if (specialInteger(if (T == i64) Value.Long else Value.Int, s)) |v| return v;
     const negative = s.len > 0 and s[0] == '-';
-    var it = std.mem.splitScalar(u8, if (negative) s[1..] else s, ':');
+    const body = if (negative) s[1..] else s;
+    if (allDigits(body)) {
+        // Bare digits are a compact clock time, as q reads them: `1` and `25` are hours,
+        // `100` and `12345` are hours and minutes (`1:00`, `123:45`) and `123456` is
+        // `12:34:56`. q gives seven or more digits other meanings that are not copied.
+        const compact: i64 = switch (body.len) {
+            1, 2 => try std.fmt.parseInt(i64, body, 10) * 3600,
+            3, 4, 5 => try std.fmt.parseInt(i64, body[0 .. body.len - 2], 10) * 3600 + try std.fmt.parseInt(i64, body[body.len - 2 ..], 10) * 60,
+            6 => try std.fmt.parseInt(i64, body[0..2], 10) * 3600 + try std.fmt.parseInt(i64, body[2..4], 10) * 60 + try std.fmt.parseInt(i64, body[4..6], 10),
+            else => return error.InvalidCharacter,
+        };
+        const compact_units = @divTrunc(compact * ns_per_second, unit);
+        return @intCast(if (negative) -compact_units else compact_units);
+    }
+    var it = std.mem.splitScalar(u8, body, ':');
     var nanos: i64 = 0;
     const hours = it.next() orelse return error.InvalidCharacter;
     nanos += try std.fmt.parseInt(i64, hours, 10) * 3600 * ns_per_second;

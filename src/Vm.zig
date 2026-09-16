@@ -15,7 +15,7 @@ const Compiler = q.Compiler;
 
 const Vm = @This();
 
-const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error;
+const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || error{parse};
 const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     assign,
     domain,
@@ -1404,13 +1404,19 @@ pub fn createNumberLiteralSlice(vm: *Vm, slice: []const u8) !*Value {
 }
 
 /// `0x0102` is a byte list, `0x01` a byte atom and `0x` the empty byte list.
+/// An odd number of digits is padded with a leading zero, so `0x1` is `0x01` and `0x123` is
+/// `0x0123`.
 fn createByteLiteral(vm: *Vm, hex: []const u8) !*Value {
-    if (hex.len % 2 != 0) return error.InvalidCharacter;
-    const len = hex.len / 2;
+    const len = (hex.len + 1) / 2;
     if (len == 1) return vm.createValue(.byte, try std.fmt.parseInt(u8, hex, 16));
     const list = try vm.allocValue(.byte_list, len);
     errdefer list.deref(vm.gpa);
-    for (list.as.byte_list, 0..) |*b, i| b.* = try std.fmt.parseInt(u8, hex[2 * i ..][0..2], 16);
+    // With an odd count the first byte has a single digit; every later one has two.
+    const lead = hex.len % 2;
+    for (list.as.byte_list, 0..) |*b, i| {
+        const digits = if (i == 0) hex[0 .. 2 - lead] else hex[2 * i - lead ..][0..2];
+        b.* = try std.fmt.parseInt(u8, digits, 16);
+    }
     return list;
 }
 
@@ -1421,7 +1427,13 @@ pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Va
     const first_token = tree.nodeMainToken(node);
     const last_token = tree.nodeData(node).token;
 
+    // Only the last token may carry a type letter (`1 2 3h`, not `1h 2h`).
+    for (first_token..last_token) |tok| {
+        if (q.literal.hasSuffix(tree.tokenSlice(@intCast(tok)))) return error.parse;
+    }
     switch (try q.literal.kindOf(tree.tokenSlice(last_token))) {
+        // The parser keeps boolean and byte literals out of number lists.
+        .boolean, .byte => unreachable,
         .long => {
             // Any float-shaped item, including a lowercase `0n`, makes the whole list float.
             for (first_token..last_token) |tok| {
@@ -1711,6 +1723,15 @@ test "short, int, real and byte literals display as in q" {
     try expectEval(vm, "0x00", "0x00");
     try expectEval(vm, "0xff", "0xff");
     try expectEval(vm, "0x0102", "0x0102");
+    try expectEval(vm, "0x1", "0x01");
+    try expectEval(vm, "0x0", "0x00");
+    try expectEval(vm, "0x123", "0x0123");
+    try expectEval(vm, "0x01234", "0x001234");
+    try expectEval(vm, "count 0x01234", "3");
+    try expectEval(vm, "type 0x1", "-4h");
+    try expectEval(vm, "type 0x123", "4h");
+    try expectEval(vm, "0xfF", "0xff");
+    try testing.expectError(error.InvalidCharacter, vm.evalSource("0xg", .q, "<test>"));
     try expectEval(vm, "enlist 0x01", ",0x01");
     try expectEval(vm, "0x", "`byte$()");
     try expectEval(vm, "enlist 0x", ",`byte$()");
@@ -2614,4 +2635,54 @@ test "string literal escapes decode as in q" {
     try testing.expectError(error.parse, vm.evalSource("\"\\400\"", .q, "<test>"));
     try testing.expectError(error.parse, vm.evalSource("\"\\8\"", .q, "<test>"));
     try testing.expectError(error.parse, vm.evalSource("\"\\x41\"", .q, "<test>"));
+}
+
+test "a type suffix belongs on the last token of a list literal" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "0N 0W -0Wh", "0N 0W -0Wh");
+    try expectEval(vm, "0N 0Nh", "0N 0Nh");
+    try expectEval(vm, "1e3 2", "1000 2f");
+    try expectEval(vm, "0n 0w", "0n 0w");
+    try expectEval(vm, "1 0n", "1 0n");
+    try expectEval(vm, "1 2j", "1 2");
+    try expectEval(vm, "2023.04.17 0Nd", "2023.04.17 0N");
+    try expectEval(vm, "12:34 0Nu", "12:34 0N");
+    try expectEval(vm, "1 2p", "2000.01.01D01:00:00.000000000 2000.01.01D02:00:00.000000000");
+    try expectEval(vm, "3600p", "2000.01.02D12:00:00.000000000");
+    try expectEval(vm, "25p", "2000.01.02D01:00:00.000000000");
+    try expectEval(vm, "-1p", "1999.12.31D23:00:00.000000000");
+    try expectEval(vm, "12345p", "2000.01.06D03:45:00.000000000");
+    try expectEval(vm, "100n", "0D01:00:00.000000000");
+    try expectEval(vm, "-100n", "-0D01:00:00.000000000");
+    try expectEval(vm, "123456n", "0D12:34:56.000000000");
+    try expectEval(vm, "100t", "01:00:00.000");
+    try expectEval(vm, "3600t", "36:00:00.000");
+    try expectEval(vm, "123456t", "12:34:56.000");
+    try expectEval(vm, "1234u", "12:34");
+    try expectEval(vm, "3600v", "36:00:00");
+    try testing.expectError(error.InvalidCharacter, vm.evalSource("1234567n", .q, "<test>"));
+    try testing.expectError(error.InvalidCharacter, vm.evalSource("1e9p", .q, "<test>"));
+    try expectEval(vm, "0D01 0D02", "0D01:00:00.000000000 0D02:00:00.000000000");
+    for ([_][:0]const u8{
+        "1h 2h",   "1 2h 3", "1h 2",   "1e 2e",     "1f 2",             "1e 2", "0Nh 0N", "0Nd 2023.04.17",
+        "0Np 0Np", "1j 2",   "1i 2 3", "0Nu 12:34", "0Nt 12:34:56.000", "1p 2", "1n 2n",
+    }) |source| {
+        try testing.expectError(error.parse, vm.evalSource(source, .q, "<test>"));
+    }
+
+    // Boolean and byte literals never join a number list: they are juxtaposed instead.
+    try expectEval(vm, "parse \"1 0 1b\"", "(1 0;1b)");
+    try expectEval(vm, "parse \"1 0 101b\"", "(1 0;101b)");
+    try expectEval(vm, "parse \"1 0 0x01\"", "(1 0;0x01)");
+    try expectEval(vm, "parse \"1 0 0x0001\"", "(1 0;0x0001)");
+    try expectEval(vm, "parse \"1b 1 0\"", "(1b;1 0)");
+    try expectEval(vm, "parse \"1 0 1b 2\"", "(1 0;(1b;2))");
+    try expectEval(vm, "parse \"1 0 1b 1b\"", "(1 0;(1b;1b))");
+    try expectEval(vm, "parse \"1 0 1.5 1b\"", "(1 0 1.5;1b)");
+    try expectEval(vm, "parse \"1 0 1h 1b\"", "(1 0 1h;1b)");
+    try testing.expectError(error.InvalidCharacter, vm.evalSource("3b", .q, "<test>"));
+    try testing.expectError(error.InvalidCharacter, vm.evalSource("1 2 3b", .q, "<test>"));
 }

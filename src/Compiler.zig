@@ -12,7 +12,7 @@ const Symbol = Value.Symbol;
 
 const Compiler = @This();
 
-const Error = Allocator.Error || std.fmt.ParseIntError;
+const Error = Allocator.Error || std.fmt.ParseIntError || error{parse};
 
 vm: *Vm,
 tree: *const Ast,
