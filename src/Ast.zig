@@ -121,9 +121,19 @@ pub fn deinit(tree: *Ast, gpa: Allocator) void {
 }
 
 pub const Mode = enum { k, q };
+
+/// Answers, for a bare name met while parsing q, what the environment says it is: the valence
+/// of the `.q` entry of that name, or null when `.q` has no such entry. q resolves its keywords
+/// this way at parse time, so a valence-2 entry applies infix and any other entry is a noun.
+pub const Resolver = struct {
+    context: *anyopaque,
+    valence: *const fn (context: *anyopaque, name: []const u8) ?usize,
+};
+
 pub const ParseOptions = struct {
     skip_comments: bool = true,
     mode: Mode,
+    resolver: ?Resolver = null,
 };
 
 pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Allocator.Error!Ast {
@@ -138,6 +148,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Alloca
         .extra_data = .empty,
         .scratch = .empty,
         .mode = options.mode,
+        .resolver = options.resolver,
         .ends_expression = .empty,
     };
     defer parser.tokens.deinit(gpa);
@@ -431,6 +442,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .symbol_list_literal,
         .identifier,
         .builtin,
+        .keyword,
         => return tree.nodeMainToken(n) - end_offset,
 
         .select,
@@ -543,6 +555,7 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         .symbol_list_literal => return tree.nodeData(n).token + end_offset,
         .identifier => return tree.nodeMainToken(n) + end_offset,
         .builtin => return tree.nodeMainToken(n) + end_offset,
+        .keyword => return tree.nodeMainToken(n) + end_offset,
 
         inline .select, .exec, .update, .delete_rows => |t| {
             const sql = tree.extraData(tree.nodeData(n).extra, switch (t) {
@@ -916,8 +929,15 @@ pub const Node = struct {
         symbol_list_literal,
         /// The `main_token` field is the identifier token.
         identifier,
-        /// The `main_token` field is the builtin token.
+        /// A native from `.Q.res`, such as `abs` or `in`, known in both q and k.
+        ///
+        /// The `main_token` field is the identifier token.
         builtin,
+        /// A bare name that was a `.q` entry when parsed as q, such as `neg`. It evaluates to
+        /// that entry, so `parse "neg 1"` holds `-:` rather than a symbol.
+        ///
+        /// The `main_token` field is the identifier token.
+        keyword,
 
         /// `select ...`.
         ///
@@ -1020,29 +1040,69 @@ pub const Node = struct {
         from: Index,
     };
 
+    /// The natives of `.Q.res`: the names q knows without q.k, in both q and k mode. Every
+    /// other keyword (`neg`, `count`, `til`, ...) is an entry of `.q`.
     pub const Builtin = enum {
-        flip,
-        neg,
-        first,
-        reciprocal,
-        where,
-        reverse,
-        null,
-        group,
-        asc,
-        desc,
-        string,
+        // Monadic.
+        avg,
+        last,
+        sum,
+        prd,
+        min,
+        max,
+        exit,
+        getenv,
+        abs,
+        sqrt,
+        log,
+        exp,
+        sin,
+        asin,
+        cos,
+        acos,
+        tan,
+        atan,
+        @"var",
+        dev,
+        hopen,
+        // Variadic.
         enlist,
-        count,
-        lower,
-        not,
-        key,
-        distinct,
-        type,
-        value,
+        // Dyadic, and so applied infix between two nouns.
+        in,
+        within,
+        like,
+        bin,
+        ss,
+        insert,
+        wsum,
+        wavg,
+        div,
+        xexp,
+        setenv,
+        binr,
+        cov,
+        cor,
 
-        parse,
-        eval,
+        pub fn isDyadic(builtin: Builtin) bool {
+            return switch (builtin) {
+                .in,
+                .within,
+                .like,
+                .bin,
+                .ss,
+                .insert,
+                .wsum,
+                .wavg,
+                .div,
+                .xexp,
+                .setenv,
+                .binr,
+                .cov,
+                .cor,
+                => true,
+                else => false,
+            };
+        }
     };
 };
 

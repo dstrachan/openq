@@ -209,34 +209,16 @@ fn compileNode(c: *Compiler, node: Node.Index) !void {
         .symbol_literal => unreachable,
         .symbol_list_literal => unreachable,
         .identifier => unreachable,
+        .keyword => unreachable,
         .builtin => {
             const main_token = tree.nodeMainToken(node);
             const slice = tree.tokenSlice(main_token);
             const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
             switch (builtin) {
-                .flip => unreachable,
-                .neg => unreachable,
-                // .first => try c.emitCode(.first),
-                .first => unreachable,
-                .reciprocal => unreachable,
-                .where => unreachable,
-                .reverse => unreachable,
-                .null => unreachable,
-                .group => unreachable,
-                .asc => unreachable,
-                .desc => unreachable,
-                .string => unreachable,
-                .enlist => unreachable,
-                .count => unreachable,
-                .lower => unreachable,
-                .not => unreachable,
-                .key => unreachable,
-                .distinct => unreachable,
-                .type => unreachable,
-                .value => try c.emitCode(.value),
-
-                .parse => unreachable,
-                .eval => unreachable,
+                inline else => |t| if (@hasField(ByteCode, @tagName(t)))
+                    try c.emitCode(@field(ByteCode, @tagName(t)))
+                else
+                    unreachable,
             }
         },
 

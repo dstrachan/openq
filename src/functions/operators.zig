@@ -11,33 +11,13 @@ const Symbol = Value.Symbol;
 pub fn assign(vm: *Vm, x: *Value, y: *Value) !*Value {
     std.log.debug("assign: {f}", .{x.fmt(vm)});
     switch (x.as) {
-        .list => @panic("NYI"),
-        .boolean => @panic("NYI"),
-        .boolean_list => @panic("NYI"),
-        .long => @panic("NYI"),
-        .long_list => @panic("NYI"),
-        .float => @panic("NYI"),
-        .float_list => @panic("NYI"),
-        .char => @panic("NYI"),
-        .char_list => @panic("NYI"),
         .symbol => |identifier| {
             const home = (try vm.identifierHome(identifier, true)).?;
             try vm.namespaceSet(home.namespace, home.name, y);
             return y;
         },
-        .symbol_list => @panic("NYI"),
-        .dict => @panic("NYI"),
-        .lambda => @panic("NYI"),
-        .unary_primitive => @panic("NYI"),
-        .operator => @panic("NYI"),
-        .iterator => @panic("NYI"),
-        .projection => @panic("NYI"),
-        .each => @panic("NYI"),
-        .over => @panic("NYI"),
-        .scan => @panic("NYI"),
-        .each_prior => @panic("NYI"),
-        .each_right => @panic("NYI"),
-        .each_left => @panic("NYI"),
+        // A keyword resolved while parsing q arrives here as its value, never as a name.
+        else => return error.assign,
     }
 }
 
@@ -588,4 +568,102 @@ pub fn dynamic_load(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = x; // autofix
     _ = y; // autofix
     unreachable;
+}
+
+pub fn in(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn within(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn like(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn bin(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn binr(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn ss(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn insert(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn wsum(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn wavg(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn div(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn xexp(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn cor(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn cov(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
+}
+
+pub fn setenv(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    _ = y; // autofix
+    return error.nyi;
 }

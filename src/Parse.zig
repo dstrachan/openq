@@ -28,6 +28,7 @@ nodes: Ast.NodeList,
 extra_data: std.ArrayList(u32),
 scratch: std.ArrayList(Node.Index),
 mode: Mode,
+resolver: ?Ast.Resolver,
 ends_expression: std.ArrayList(Token.Tag),
 
 fn tokenTag(p: *const Parse, token_index: TokenIndex) Token.Tag {
@@ -593,6 +594,21 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
         else => {},
     };
 
+    // A dyadic keyword after a noun applies infix, as in `x in y`; without a right operand it
+    // projects, so `1 in` is `in[1]`. Natives count in both modes, `.q` entries only in q.
+    if (!lhs_is_verb and p.isInfix(rhs)) {
+        return p.setNode(apply_index, .{
+            .tag = .apply_binary,
+            .main_token = @backingInt(rhs),
+            .data = .{
+                .node_and_opt_node = .{
+                    lhs,
+                    try p.parseExpr(sql_identifier),
+                },
+            },
+        });
+    }
+
     const verb = try p.parseVerb(rhs, sql_identifier);
     return p.setNode(apply_index, .{
         .tag = .apply_unary,
@@ -604,6 +620,26 @@ fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifie
             },
         },
     });
+}
+
+/// Whether a node names a dyadic function that q applies infix.
+fn isInfix(p: *const Parse, node: Node.Index) bool {
+    return switch (p.nodeTag(node)) {
+        .builtin => p.builtin(node).isDyadic(),
+        .keyword => p.valence(p.tokenSlice(p.nodeMainToken(node))) == 2,
+        else => false,
+    };
+}
+
+fn builtin(p: *const Parse, node: Node.Index) Node.Builtin {
+    assert(p.nodeTag(node) == .builtin);
+    return std.meta.stringToEnum(Node.Builtin, p.tokenSlice(p.nodeMainToken(node))).?;
+}
+
+/// The valence of the `.q` entry called `name`, when a resolver was supplied.
+fn valence(p: *const Parse, name: []const u8) ?usize {
+    const resolver = p.resolver orelse return null;
+    return resolver.valence(resolver.context, name);
 }
 
 /// Whether a node is a verb: an operator glyph or a derived function, as opposed to a noun.
@@ -911,8 +947,15 @@ fn parseIdentifier(p: *Parse) !Node.Index {
     const identifier = try p.assertToken(.identifier);
 
     const slice = p.tokenSlice(identifier);
+    // Natives are known everywhere; q also resolves bare names through `.q` while parsing.
+    const tag: Node.Tag = if (std.meta.stringToEnum(Node.Builtin, slice) != null)
+        .builtin
+    else if (p.mode == .q and p.valence(slice) != null)
+        .keyword
+    else
+        .identifier;
     return p.addNode(.{
-        .tag = if (std.meta.stringToEnum(Node.Builtin, slice)) |_| .builtin else .identifier,
+        .tag = tag,
         .main_token = identifier,
         .data = undefined,
     });
@@ -1660,6 +1703,138 @@ test "system commands" {
     );
 }
 
+test "infix keywords" {
+    // Dyadic natives apply infix in both modes and project without a right operand.
+    try testParse(
+        "x in y",
+        &.{ .identifier, .identifier, .identifier },
+        &.{ .identifier, .apply_binary, .builtin, .identifier },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "(*t)in 1 4 10h",
+        &.{ .l_paren, .asterisk, .identifier, .r_paren, .identifier, .number_literal, .number_literal, .number_literal },
+        &.{ .grouped_expression, .asterisk, .apply_unary, .identifier, .apply_binary, .builtin, .number_list_literal },
+        &.{},
+    );
+    try testParseMode(
+        .k,
+        "(n:x)bin y",
+        &.{ .l_paren, .identifier, .colon, .identifier, .r_paren, .identifier, .identifier },
+        &.{ .grouped_expression, .identifier, .apply_binary, .colon, .identifier, .apply_binary, .builtin, .identifier },
+        &.{},
+    );
+    try testParse(
+        "1 in",
+        &.{ .number_literal, .identifier },
+        &.{ .number_literal, .apply_binary, .builtin },
+        &.{},
+    );
+    try testParse(
+        "x in y in z",
+        &.{ .identifier, .identifier, .identifier, .identifier, .identifier },
+        &.{ .identifier, .apply_binary, .builtin, .identifier, .apply_binary, .builtin, .identifier },
+        &.{},
+    );
+
+    // Monadic natives are nouns in the grammar: `1 2 sum` is `1 2[sum]`.
+    try testParse(
+        "abs x",
+        &.{ .identifier, .identifier },
+        &.{ .builtin, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParse(
+        "1 2 sum",
+        &.{ .number_literal, .number_literal, .identifier },
+        &.{ .number_list_literal, .apply_unary, .builtin },
+        &.{},
+    );
+
+    // Without a resolver every other name is an identifier and juxtaposes.
+    try testParse(
+        "x f y",
+        &.{ .identifier, .identifier, .identifier },
+        &.{ .identifier, .apply_unary, .identifier, .apply_unary, .identifier },
+        &.{},
+    );
+    try testParse(
+        "neg 1",
+        &.{ .identifier, .number_literal },
+        &.{ .identifier, .apply_unary, .number_literal },
+        &.{},
+    );
+
+    // With a resolver, q resolves `.q` entries: valence 2 applies infix, others are nouns.
+    try testParseResolved(
+        test_resolver,
+        .q,
+        "1 f 2",
+        &.{ .number_literal, .identifier, .number_literal },
+        &.{ .number_literal, .apply_binary, .keyword, .number_literal },
+        &.{},
+    );
+    try testParseResolved(
+        test_resolver,
+        .q,
+        "1 f",
+        &.{ .number_literal, .identifier },
+        &.{ .number_literal, .apply_binary, .keyword },
+        &.{},
+    );
+    try testParseResolved(
+        test_resolver,
+        .q,
+        "neg 1",
+        &.{ .identifier, .number_literal },
+        &.{ .keyword, .apply_unary, .number_literal },
+        &.{},
+    );
+    try testParseResolved(
+        test_resolver,
+        .q,
+        "1 neg 2",
+        &.{ .number_literal, .identifier, .number_literal },
+        &.{ .number_literal, .apply_unary, .keyword, .apply_unary, .number_literal },
+        &.{},
+    );
+    try testParseResolved(
+        test_resolver,
+        .q,
+        "1 h 2",
+        &.{ .number_literal, .identifier, .number_literal },
+        &.{ .number_literal, .apply_unary, .identifier, .apply_unary, .number_literal },
+        &.{},
+    );
+    try testParseResolved(
+        test_resolver,
+        .q,
+        "neg 1 f 2",
+        &.{ .identifier, .number_literal, .identifier, .number_literal },
+        &.{ .keyword, .apply_unary, .number_literal, .apply_binary, .keyword, .number_literal },
+        &.{},
+    );
+
+    // k never consults `.q`.
+    try testParseResolved(
+        test_resolver,
+        .k,
+        "1 f 2",
+        &.{ .number_literal, .identifier, .number_literal },
+        &.{ .number_literal, .apply_unary, .identifier, .apply_unary, .number_literal },
+        &.{},
+    );
+    try testParseResolved(
+        test_resolver,
+        .k,
+        "neg 1",
+        &.{ .identifier, .number_literal },
+        &.{ .identifier, .apply_unary, .number_literal },
+        &.{},
+    );
+}
+
 test "monadic operators" {
     // In k a verb followed by a noun is monadic application.
     try testParseMode(
@@ -1805,8 +1980,31 @@ fn testParseMode(
     expected_nodes: []const Node.Tag,
     expected_errors: []const AstError.Tag,
 ) !void {
+    try testParseResolved(null, mode, source, expected_tokens, expected_nodes, expected_errors);
+}
+
+var test_resolver_context: u8 = 0;
+
+/// A stand-in for the VM's `.q`: `f` is dyadic, `neg` and `v` have valence 1, nothing else exists.
+fn testValence(_: *anyopaque, name: []const u8) ?usize {
+    if (std.mem.eql(u8, name, "f")) return 2;
+    if (std.mem.eql(u8, name, "neg")) return 1;
+    if (std.mem.eql(u8, name, "v")) return 1;
+    return null;
+}
+
+const test_resolver: Ast.Resolver = .{ .context = &test_resolver_context, .valence = testValence };
+
+fn testParseResolved(
+    resolver: ?Ast.Resolver,
+    mode: Mode,
+    source: [:0]const u8,
+    expected_tokens: []const Token.Tag,
+    expected_nodes: []const Node.Tag,
+    expected_errors: []const AstError.Tag,
+) !void {
     const gpa = std.testing.allocator;
-    var tree: Ast = try .parse(gpa, source, .{ .mode = mode });
+    var tree: Ast = try .parse(gpa, source, .{ .mode = mode, .resolver = resolver });
     defer tree.deinit(gpa);
 
     const actual_errors = try gpa.alloc(AstError.Tag, tree.errors.len);

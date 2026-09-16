@@ -467,6 +467,32 @@ pub const UnaryPrimitive = enum {
     read_text, // 0::
     read_binary, // 1::
 
+    _unused,
+
+    // Natives of `.Q.res`, which print by name.
+    avg,
+    last,
+    sum,
+    prd,
+    min,
+    max,
+    exit,
+    getenv,
+    abs,
+    sqrt,
+    log,
+    exp,
+    sin,
+    asin,
+    cos,
+    acos,
+    tan,
+    atan,
+    enlist,
+    @"var",
+    dev,
+    hopen,
+
     empty,
 
     pub fn format(self: UnaryPrimitive, w: *Io.Writer) !void {
@@ -493,6 +519,32 @@ pub const UnaryPrimitive = enum {
             .value => try w.writeAll(".:"),
             .read_text => try w.writeAll("0::"),
             .read_binary => try w.writeAll("1::"),
+
+            ._unused => unreachable,
+
+            inline .avg,
+            .last,
+            .sum,
+            .prd,
+            .min,
+            .max,
+            .exit,
+            .getenv,
+            .abs,
+            .sqrt,
+            .log,
+            .exp,
+            .sin,
+            .asin,
+            .cos,
+            .acos,
+            .tan,
+            .atan,
+            .enlist,
+            .@"var",
+            .dev,
+            .hopen,
+            => |t| try w.writeAll(@tagName(t)),
         }
     }
 };
@@ -522,6 +574,24 @@ pub const Operator = enum {
     file_binary, // 1:
     dynamic_load, // 2:
 
+    _unused,
+
+    // Named operators: the dyadic natives of `.Q.res`.
+    in,
+    within,
+    like,
+    bin,
+    ss,
+    insert,
+    wsum,
+    wavg,
+    div,
+    xexp,
+    setenv,
+    binr,
+    cov,
+    cor,
+
     pub fn format(self: Operator, w: *Io.Writer) !void {
         switch (self) {
             .assign => try w.writeByte(':'),
@@ -547,6 +617,24 @@ pub const Operator = enum {
             .file_text => try w.writeAll("0:"),
             .file_binary => try w.writeAll("1:"),
             .dynamic_load => try w.writeAll("2:"),
+
+            ._unused => unreachable,
+
+            inline .in,
+            .within,
+            .like,
+            .bin,
+            .ss,
+            .insert,
+            .wsum,
+            .wavg,
+            .div,
+            .xexp,
+            .setenv,
+            .binr,
+            .cov,
+            .cor,
+            => |t| try w.writeAll(@tagName(t)),
         }
     }
 };

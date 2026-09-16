@@ -17,6 +17,7 @@ const Vm = @This();
 
 const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error;
 const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
+    assign,
     domain,
     identifier,
     length,
@@ -130,9 +131,107 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
         _ = dict.as.dict.keys.ref();
         break :state dict;
     };
+    errdefer vm.state.deref(gpa);
+
+    try vm.seedKeywords();
     errdefer comptime unreachable;
 
     return vm;
+}
+
+/// Seeds `.q` with the keywords q.k defines as plain aliases of primitives (`neg:-:`,
+/// `count:#:`, `parse:-5!`...), so they work before q.k itself can be loaded. Loading q.k
+/// simply reassigns them. Names that q.k defines as lambdas are left for q.k.
+fn seedKeywords(vm: *Vm) !void {
+    const namespace = (try vm.namespaceAt(".q", true)).?;
+
+    const unary = .{
+        .{ "neg", UnaryPrimitive.neg },
+        .{ "not", UnaryPrimitive.not },
+        .{ "null", UnaryPrimitive.null },
+        .{ "string", UnaryPrimitive.string },
+        .{ "reciprocal", UnaryPrimitive.reciprocal },
+        .{ "floor", UnaryPrimitive.lower },
+        .{ "lower", UnaryPrimitive.lower },
+        .{ "count", UnaryPrimitive.count },
+        .{ "first", UnaryPrimitive.first },
+        .{ "reverse", UnaryPrimitive.reverse },
+        .{ "distinct", UnaryPrimitive.distinct },
+        .{ "group", UnaryPrimitive.group },
+        .{ "where", UnaryPrimitive.where },
+        .{ "flip", UnaryPrimitive.flip },
+        .{ "type", UnaryPrimitive.type },
+        .{ "key", UnaryPrimitive.key },
+        .{ "til", UnaryPrimitive.key },
+        .{ "inv", UnaryPrimitive.key },
+        .{ "iasc", UnaryPrimitive.asc },
+        .{ "idesc", UnaryPrimitive.desc },
+        .{ "value", UnaryPrimitive.value },
+        .{ "get", UnaryPrimitive.value },
+        .{ "read0", UnaryPrimitive.read_text },
+        .{ "read1", UnaryPrimitive.read_binary },
+    };
+    inline for (unary) |entry| {
+        const value = vm.getUnaryPrimitive(entry[1]);
+        defer value.deref(vm.gpa);
+        try vm.namespaceSet(namespace, try vm.intern(entry[0]), value);
+    }
+
+    const binary = .{
+        .{ "and", Operator.@"and" },
+        .{ "or", Operator.@"or" },
+        .{ "mmu", Operator.cast },
+        .{ "lsq", Operator.dict },
+    };
+    inline for (binary) |entry| {
+        const value = vm.getOperator(entry[1]);
+        defer value.deref(vm.gpa);
+        try vm.namespaceSet(namespace, try vm.intern(entry[0]), value);
+    }
+
+    const internal = .{
+        .{ "parse", -5 },
+        .{ "eval", -6 },
+        .{ "attr", -2 },
+        .{ "hcount", -7 },
+        .{ "md5", -15 },
+    };
+    inline for (internal) |entry| {
+        const value = try vm.internalFunction(entry[1]);
+        defer value.deref(vm.gpa);
+        try vm.namespaceSet(namespace, try vm.intern(entry[0]), value);
+    }
+}
+
+/// The projection `n!`, which is how q.k defines `parse` (`-5!`) and `eval` (`-6!`).
+pub fn internalFunction(vm: *Vm, n: i64) !*Value {
+    const args = try vm.gpa.alloc(*Value, 1);
+    errdefer vm.gpa.free(args);
+    args[0] = try vm.createValue(.long, n);
+    errdefer args[0].deref(vm.gpa);
+    const callee = vm.getOperator(.dict);
+    errdefer callee.deref(vm.gpa);
+    return vm.createValue(.projection, .{ .callee = callee, .args = args });
+}
+
+/// The parser's view of `.q`, so that q resolves keywords the way kdb+ does.
+pub fn resolver(vm: *Vm) Ast.Resolver {
+    return .{ .context = vm, .valence = qValence };
+}
+
+fn qValence(context: *anyopaque, name: []const u8) ?usize {
+    const vm: *Vm = @ptrCast(@alignCast(context));
+    const entry = vm.qEntry(name) orelse return null;
+    return entry.rank();
+}
+
+/// The `.q` entry called `name`, borrowed, or null when there is none.
+pub fn qEntry(vm: *Vm, name: []const u8) ?*Value {
+    const symbol = vm.lookupSymbol(name) orelse return null;
+    const namespace = (vm.namespaceAt(".q", false) catch return null) orelse return null;
+    const dict = namespace.as.dict;
+    const index = std.mem.findScalar(Symbol, dict.keys.as.symbol_list, symbol) orelse return null;
+    return dict.values.as.list[index];
 }
 
 pub fn deinit(vm: *Vm) void {
@@ -196,9 +295,10 @@ fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .dict => unreachable,
         .lambda => return error.nyi,
         .unary_primitive => |unary_primitive| {
-            if (unary_primitive == .list and args.len > 1) return vm.enlist(args);
+            if (unary_primitive == .enlist and args.len > 1) return vm.enlist(args);
             if (args.len > 1) return error.rank;
             switch (unary_primitive) {
+                ._unused => unreachable,
                 .empty => return q.unary_primitives.identity(vm, args[0]),
                 inline else => |t| return @field(q.unary_primitives, @tagName(t))(vm, args[0]),
             }
@@ -242,6 +342,7 @@ fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 });
             } else {
                 switch (operator) {
+                    ._unused => unreachable,
                     inline else => |t| return @field(q.operators, @tagName(t))(vm, args[0], args[1]),
                 }
             }
@@ -380,7 +481,7 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
 
         if (is_projection) {
             return vm.createValue(.projection, .{
-                .callee = vm.getUnaryPrimitive(.list),
+                .callee = vm.getUnaryPrimitive(.enlist),
                 .args = list,
             });
         } else {
@@ -395,17 +496,18 @@ pub fn parse(vm: *Vm, x: *Value) !*Value {
     const slice = try vm.gpa.dupeSentinel(u8, x.as.char_list, 0);
     defer vm.gpa.free(slice);
 
-    return vm.parseSource(slice, .q);
+    return vm.parseSource(slice, .q, "<parse>");
 }
 
-pub fn parseSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode) !*Value {
+fn parseSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode, path: []const u8) !*Value {
     var tree: Ast = try .parse(vm.gpa, source, .{
         .skip_comments = false,
         .mode = mode,
+        .resolver = vm.resolver(),
     });
     defer tree.deinit(vm.gpa);
     if (tree.errors.len > 0) {
-        try q.printAstErrorsToStderr(vm.gpa, vm.io, tree, "<parse>", .auto);
+        try q.printAstErrorsToStderr(vm.gpa, vm.io, tree, path, .auto);
         return error.parse;
     }
 
@@ -423,8 +525,8 @@ pub fn createCharList(vm: *Vm, comptime fmt: []const u8, args: anytype) !*Value 
     return vm.createValue(.char_list, slice);
 }
 
-pub fn evalSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode) RunError!*Value {
-    const value = try vm.parseSource(source, mode);
+pub fn evalSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode, path: []const u8) RunError!*Value {
+    const value = try vm.parseSource(source, mode, path);
     defer value.deref(vm.gpa);
     return vm.eval(value);
 }
@@ -528,7 +630,7 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             defer values.deinit(gpa);
             errdefer for (values.items) |v| v.deref(gpa);
 
-            values.appendAssumeCapacity(vm.getUnaryPrimitive(.list));
+            values.appendAssumeCapacity(vm.getUnaryPrimitive(.enlist));
             for (nodes) |n| values.appendAssumeCapacity(try vm.parseNode(n));
 
             const list = try vm.createValue(.list, &.{});
@@ -684,16 +786,14 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
 
-            var values: std.ArrayList(*Value) = try .initCapacity(gpa, 3);
+            var values: std.ArrayList(*Value) = try .initCapacity(gpa, if (maybe_rhs == .none) 2 else 3);
             defer values.deinit(gpa);
             errdefer for (values.items) |v| v.deref(gpa);
 
             values.appendAssumeCapacity(try vm.parseNode(op));
             values.appendAssumeCapacity(try vm.parseNode(lhs));
-            values.appendAssumeCapacity(if (maybe_rhs.unwrap()) |rhs|
-                try vm.parseNode(rhs)
-            else
-                vm.getUnaryPrimitive(.empty));
+            // A missing right operand projects on the left one, so `1+` is `+[1]`.
+            if (maybe_rhs.unwrap()) |rhs| values.appendAssumeCapacity(try vm.parseNode(rhs));
 
             return vm.createValue(.list, values.toOwnedSliceAssert());
         },
@@ -780,50 +880,22 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             const symbol = try vm.intern(slice);
             return vm.createValue(.symbol, symbol);
         },
+        .keyword => {
+            // q resolves keywords while parsing: `parse "neg 1"` holds `-:`, not `neg`. The
+            // entry was there when the parser looked, so it is only missing if `.q` changed
+            // since, in which case the name is left to run-time lookup.
+            const slice = tree.tokenSlice(tree.nodeMainToken(node));
+            if (vm.qEntry(slice)) |entry| return entry.ref();
+            return vm.createValue(.symbol, try vm.intern(slice));
+        },
         .builtin => {
-            const main_token = tree.nodeMainToken(node);
-            const slice = tree.tokenSlice(main_token);
-            const builtin = std.meta.stringToEnum(Node.Builtin, slice).?;
-            return switch (builtin) {
-                .flip => vm.getUnaryPrimitive(.flip),
-                .neg => vm.getUnaryPrimitive(.neg),
-                .first => vm.getUnaryPrimitive(.first),
-                .reciprocal => vm.getUnaryPrimitive(.reciprocal),
-                .where => vm.getUnaryPrimitive(.where),
-                .reverse => vm.getUnaryPrimitive(.reverse),
-                .null => vm.getUnaryPrimitive(.null),
-                .group => vm.getUnaryPrimitive(.group),
-                .asc => vm.getUnaryPrimitive(.asc),
-                .desc => vm.getUnaryPrimitive(.desc),
-                .string => vm.getUnaryPrimitive(.string),
-                .enlist => vm.getUnaryPrimitive(.list),
-                .count => vm.getUnaryPrimitive(.count),
-                .lower => vm.getUnaryPrimitive(.lower),
-                .not => vm.getUnaryPrimitive(.not),
-                .key => vm.getUnaryPrimitive(.key),
-                .distinct => vm.getUnaryPrimitive(.distinct),
-                .type => vm.getUnaryPrimitive(.type),
-                .value => vm.getUnaryPrimitive(.value),
-
-                inline .parse, .eval => |t| blk: {
-                    var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
-                    defer values.deinit(vm.gpa);
-
-                    const long = try vm.createValue(.long, switch (t) {
-                        .parse => -5,
-                        .eval => -6,
-                        else => comptime unreachable,
-                    });
-                    errdefer long.deref(vm.gpa);
-
-                    values.appendAssumeCapacity(long);
-
-                    break :blk vm.createValue(.projection, .{
-                        .callee = vm.getOperator(.dict),
-                        .args = values.toOwnedSliceAssert(),
-                    });
-                },
-            };
+            const builtin = std.meta.stringToEnum(Node.Builtin, tree.tokenSlice(tree.nodeMainToken(node))).?;
+            switch (builtin) {
+                inline else => |t| return if (comptime t.isDyadic())
+                    vm.getOperator(@field(Operator, @tagName(t)))
+                else
+                    vm.getUnaryPrimitive(@field(UnaryPrimitive, @tagName(t))),
+            }
         },
 
         .select,
@@ -930,7 +1002,7 @@ fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
         defer list.deinit(vm.gpa);
         errdefer for (list.items) |v| v.deref(vm.gpa);
 
-        list.appendAssumeCapacity(vm.getUnaryPrimitive(.list));
+        list.appendAssumeCapacity(vm.getUnaryPrimitive(.enlist));
         list.appendSliceAssumeCapacity(values.items);
 
         const value = try vm.createValue(.list, &.{});
@@ -1186,6 +1258,15 @@ pub fn intern(vm: *Vm, bytes: []const u8) !Symbol {
     }
 }
 
+/// The symbol for `bytes` if it has been interned, without interning it.
+pub fn lookupSymbol(vm: *Vm, bytes: []const u8) ?Symbol {
+    const index = vm.string_table.getKeyAdapted(
+        bytes,
+        std.hash_map.StringIndexAdapter{ .bytes = &vm.string_bytes },
+    ) orelse return null;
+    return @fromBackingInt(@intCast(index));
+}
+
 pub fn internedString(vm: *Vm, index: Symbol) [:0]const u8 {
     const slice = vm.string_bytes.items[@backingInt(index)..];
     return slice[0..std.mem.findScalar(u8, slice, 0).? :0];
@@ -1276,7 +1357,7 @@ pub fn createNumberListLiteral(vm: *Vm, tree: *const Ast, node: Node.Index) !*Va
 const testing = std.testing;
 
 fn expectEval(vm: *Vm, source: [:0]const u8, expected: []const u8) !void {
-    const value = try vm.evalSource(source, .q);
+    const value = try vm.evalSource(source, .q, "<test>");
     defer value.deref(vm.gpa);
 
     var buffer: Io.Writer.Allocating = .init(testing.allocator);
@@ -1299,12 +1380,12 @@ test "\\d sets the namespace for bare names" {
     try expectEval(vm, "\\d .", "::");
     try expectEval(vm, "\\d", "`.");
     try expectEval(vm, ".Q.qt", "1");
-    try testing.expectError(error.identifier, vm.evalSource("qt", .q));
+    try testing.expectError(error.identifier, vm.evalSource("qt", .q, "<test>"));
 
     // Root names are not visible from inside a namespace.
     try expectEval(vm, "x:2", "2");
     try expectEval(vm, "\\d .Q", "::");
-    try testing.expectError(error.identifier, vm.evalSource("x", .q));
+    try testing.expectError(error.identifier, vm.evalSource("x", .q, "<test>"));
     try expectEval(vm, "\\d .", "::");
     try expectEval(vm, "x", "2");
 
@@ -1321,7 +1402,7 @@ test "\\d creates a namespace only on assignment" {
     try expectEval(vm, "\\d .bar", "::");
     try expectEval(vm, "\\d", "`.bar");
     try expectEval(vm, "\\d .", "::");
-    try testing.expectError(error.identifier, vm.evalSource(".bar", .q));
+    try testing.expectError(error.identifier, vm.evalSource(".bar", .q, "<test>"));
 
     try expectEval(vm, "\\d .bar", "::");
     try expectEval(vm, "y:3", "3");
@@ -1338,7 +1419,7 @@ test ".x is a root directory entry, not the global x" {
     defer vm.deinit();
 
     try expectEval(vm, ".x:1", "1");
-    try testing.expectError(error.identifier, vm.evalSource("x", .q));
+    try testing.expectError(error.identifier, vm.evalSource("x", .q, "<test>"));
     try expectEval(vm, "x:2", "2");
     try expectEval(vm, ".x", "1");
     try expectEval(vm, "x", "2");
@@ -1346,7 +1427,7 @@ test ".x is a root directory entry, not the global x" {
 
     // The root directory is reached the same way from inside a namespace.
     try expectEval(vm, "\\d .foo", "::");
-    try testing.expectError(error.identifier, vm.evalSource("x", .q));
+    try testing.expectError(error.identifier, vm.evalSource("x", .q, "<test>"));
     try expectEval(vm, ".x", "1");
     try expectEval(vm, "x:3", "3");
     try expectEval(vm, ".x", "1");
@@ -1359,7 +1440,84 @@ test ".x is a root directory entry, not the global x" {
     try expectEval(vm, ".foo", "``x!(::;3)");
 
     // Namespaces are not visible as bare globals of the root namespace.
-    try testing.expectError(error.identifier, vm.evalSource("foo", .q));
+    try testing.expectError(error.identifier, vm.evalSource("foo", .q, "<test>"));
+}
+
+fn expectEvalMode(vm: *Vm, mode: Ast.Mode, source: [:0]const u8, expected: []const u8) !void {
+    const value = try vm.evalSource(source, mode, "<test>");
+    defer value.deref(vm.gpa);
+
+    var buffer: Io.Writer.Allocating = .init(testing.allocator);
+    defer buffer.deinit();
+    try buffer.writer.print("{f}", .{value.fmt(vm)});
+    try testing.expectEqualStrings(expected, buffer.written());
+}
+
+test "keywords are .q entries resolved while parsing q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // The seeded aliases behave as q.k defines them, and only in q mode, as in kdb+.
+    try expectEval(vm, "neg 1", "-1");
+    try expectEval(vm, "neg", "-:");
+    try expectEval(vm, ".q.neg", "-:");
+    try expectEval(vm, "parse \"neg 1\"", "(-:;1)");
+    try expectEval(vm, "-5!\"neg 1\"", "(-:;1)");
+    try expectEval(vm, "first 1 2", "1");
+    try expectEval(vm, "1+", "+[1]");
+    try expectEval(vm, "til 3", "0 1 2");
+    try expectEval(vm, "1 and", "&[1]");
+    try testing.expectError(error.identifier, vm.evalSource("neg 1", .k, "<test>"));
+    try expectEvalMode(vm, .k, "-:1", "-1");
+
+    // A valence-2 function placed in .q is infix from the next statement on, not in the same one.
+    try expectEval(vm, ".q.p:+", "+");
+    try expectEval(vm, "1 p 2", "3");
+    try expectEval(vm, "1 p", "+[1]");
+    try expectEval(vm, "p", "+");
+    try expectEval(vm, "parse \"1 p 2\"", "(+;1;2)");
+    try testing.expectError(error.identifier, vm.evalSource("1 p 2", .k, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource(".q.p2:+;1 p2 2", .q, "<test>"));
+
+    // Entries of other valence are inlined as nouns.
+    try expectEval(vm, ".q.v:5", "5");
+    try expectEval(vm, "v", "5");
+    try expectEval(vm, "v+1", "6");
+
+    // Keyword names cannot be assigned bare, in any namespace; k mode still can, as q.k does.
+    try testing.expectError(error.assign, vm.evalSource("neg:1", .q, "<test>"));
+    try expectEval(vm, "\\d .foo", "::");
+    try testing.expectError(error.assign, vm.evalSource("p:1", .q, "<test>"));
+    try expectEval(vm, "\\d .", "::");
+    try expectEvalMode(vm, .k, "\\d .q", "::");
+    try expectEvalMode(vm, .k, "neg:-:", "-:");
+    try expectEvalMode(vm, .k, "\\d .", "::");
+    try expectEval(vm, "neg 1", "-1");
+}
+
+test "natives from .Q.res work in both modes" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "enlist 1", ",1");
+    try expectEvalMode(vm, .k, "enlist 1", ",1");
+    try expectEval(vm, "enlist", "enlist");
+    try expectEvalMode(vm, .k, ",:", ",:");
+    try expectEval(vm, "abs", "abs");
+    try testing.expectError(error.nyi, vm.evalSource("abs[-1]", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("abs[-1]", .k, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("count[1 2]", .k, "<test>"));
+
+    try expectEval(vm, "in", "in");
+    try expectEval(vm, "1 in", "in[1]");
+    try expectEvalMode(vm, .k, "1 in", "in[1]");
+    try expectEval(vm, "2 xexp", "xexp[2]");
+    try expectEval(vm, "(1 in;2 bin)", "(in[1];bin[2])");
+    try testing.expectError(error.nyi, vm.evalSource("1 in 1 2", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("(*1 2)in 1 4", .k, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("(n:1 2)bin 2", .k, "<test>"));
 }
 
 test "system commands through value" {
@@ -1372,7 +1530,7 @@ test "system commands through value" {
     try expectEval(vm, "value \"\\\\d\"", "`.Q");
     try expectEval(vm, "value \"1+2\"", "3");
     try expectEval(vm, "value \"\"", "::");
-    try testing.expectError(error.domain, vm.evalSource("\\d Q", .q));
+    try testing.expectError(error.domain, vm.evalSource("\\d Q", .q, "<test>"));
 }
 
 test "unknown system commands run in the shell" {
@@ -1399,9 +1557,9 @@ test "unknown system commands run in the shell" {
     try expectEval(vm, "\\d .Q", "::");
     try expectEval(vm, "\\d", "`.Q");
     try expectEval(vm, "type value \"\\\\du -hs .\"", "0");
-    try testing.expectError(error.os, vm.evalSource("\\dx 2>/dev/null", .q));
-    try testing.expectError(error.os, vm.evalSource("\\false", .q));
-    try testing.expectError(error.os, vm.evalSource("\\nonexistent_cmd_xyz 2>/dev/null", .q));
+    try testing.expectError(error.os, vm.evalSource("\\dx 2>/dev/null", .q, "<test>"));
+    try testing.expectError(error.os, vm.evalSource("\\false", .q, "<test>"));
+    try testing.expectError(error.os, vm.evalSource("\\nonexistent_cmd_xyz 2>/dev/null", .q, "<test>"));
 }
 
 test "assignment replaces an existing global" {

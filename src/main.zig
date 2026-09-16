@@ -191,17 +191,7 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             }
             if (source.len == 2 and source[0] == '\\' and source[1] == '\\') break;
 
-            var tree: Ast = try .parse(gpa, source, .{
-                .skip_comments = false,
-                .mode = mode,
-            });
-            defer tree.deinit(gpa);
-            if (tree.errors.len > 0) {
-                try q.printAstErrorsToStderr(gpa, io, tree, "<stdin>", .auto);
-                continue;
-            }
-
-            const value = vm.evalTree(&tree) catch |err| switch (err) {
+            const value = vm.evalSource(source, mode, "<stdin>") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCharacter => return error.InvalidCharacter,
                 else => {
@@ -219,17 +209,7 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
 
         const source = buffer.written()[0..len :0];
 
-        var tree: Ast = try .parse(gpa, source, .{
-            .skip_comments = false,
-            .mode = .q,
-        });
-        defer tree.deinit(gpa);
-        if (tree.errors.len > 0) {
-            try q.printAstErrorsToStderr(gpa, io, tree, "<stdin>", .auto);
-            return;
-        }
-
-        const value = try vm.evalTree(&tree);
+        const value = try vm.evalSource(source, .q, "<stdin>");
         defer value.deref(gpa);
 
         try printResult(stdout, vm, value);

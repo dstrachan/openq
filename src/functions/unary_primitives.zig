@@ -146,62 +146,7 @@ pub fn string(vm: *Vm, x: *Value) !*Value {
 }
 
 pub fn list(vm: *Vm, x: *Value) !*Value {
-    switch (x.as) {
-        .list,
-        .boolean_list,
-        .long_list,
-        .float_list,
-        .char_list,
-        .symbol_list,
-        .lambda,
-        .unary_primitive,
-        .operator,
-        .iterator,
-        .projection,
-        .each,
-        .over,
-        .scan,
-        .each_prior,
-        .each_right,
-        .each_left,
-        => {
-            const v = try vm.allocValue(.list, 1);
-            errdefer comptime unreachable;
-            v.as.list[0] = x.ref();
-            return v;
-        },
-        .boolean => |val| {
-            const v = try vm.allocValue(.boolean_list, 1);
-            errdefer comptime unreachable;
-            v.as.boolean_list[0] = val;
-            return v;
-        },
-        .long => |val| {
-            const v = try vm.allocValue(.long_list, 1);
-            errdefer comptime unreachable;
-            v.as.long_list[0] = val;
-            return v;
-        },
-        .float => |val| {
-            const v = try vm.allocValue(.float_list, 1);
-            errdefer comptime unreachable;
-            v.as.float_list[0] = val;
-            return v;
-        },
-        .char => |val| {
-            const v = try vm.allocValue(.char_list, 1);
-            errdefer comptime unreachable;
-            v.as.char_list[0] = val;
-            return v;
-        },
-        .symbol => |val| {
-            const v = try vm.allocValue(.symbol_list, 1);
-            errdefer comptime unreachable;
-            v.as.symbol_list[0] = val;
-            return v;
-        },
-        .dict => return error.nyi,
-    }
+    return enlist(vm, x);
 }
 
 pub fn count(vm: *Vm, x: *Value) !*Value {
@@ -283,7 +228,7 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
             if (std.mem.trim(u8, source, " \t\r\n").len == 0) return vm.getUnaryPrimitive(.identity);
             const slice = try vm.gpa.dupeSentinel(u8, source, 0);
             defer vm.gpa.free(slice);
-            return vm.evalSource(slice, .q);
+            return vm.evalSource(slice, .q, "<value>");
         },
         .symbol => |identifier| {
             if (identifier == .empty) return vm.state.ref();
@@ -355,4 +300,189 @@ pub fn read_binary(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
     unreachable;
+}
+
+pub fn enlist(vm: *Vm, x: *Value) !*Value {
+    switch (x.as) {
+        .list,
+        .boolean_list,
+        .long_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .lambda,
+        .unary_primitive,
+        .operator,
+        .iterator,
+        .projection,
+        .each,
+        .over,
+        .scan,
+        .each_prior,
+        .each_right,
+        .each_left,
+        => {
+            const v = try vm.allocValue(.list, 1);
+            errdefer comptime unreachable;
+            v.as.list[0] = x.ref();
+            return v;
+        },
+        .boolean => |val| {
+            const v = try vm.allocValue(.boolean_list, 1);
+            errdefer comptime unreachable;
+            v.as.boolean_list[0] = val;
+            return v;
+        },
+        .long => |val| {
+            const v = try vm.allocValue(.long_list, 1);
+            errdefer comptime unreachable;
+            v.as.long_list[0] = val;
+            return v;
+        },
+        .float => |val| {
+            const v = try vm.allocValue(.float_list, 1);
+            errdefer comptime unreachable;
+            v.as.float_list[0] = val;
+            return v;
+        },
+        .char => |val| {
+            const v = try vm.allocValue(.char_list, 1);
+            errdefer comptime unreachable;
+            v.as.char_list[0] = val;
+            return v;
+        },
+        .symbol => |val| {
+            const v = try vm.allocValue(.symbol_list, 1);
+            errdefer comptime unreachable;
+            v.as.symbol_list[0] = val;
+            return v;
+        },
+        .dict => return error.nyi,
+    }
+}
+
+pub fn abs(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn acos(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn asin(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn atan(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn avg(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn cos(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn dev(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn exit(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn exp(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn getenv(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn hopen(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn last(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn log(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn max(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn min(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn prd(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn sin(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn sqrt(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn sum(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn tan(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
+}
+
+pub fn @"var"(vm: *Vm, x: *Value) !*Value {
+    _ = vm; // autofix
+    _ = x; // autofix
+    return error.nyi;
 }
