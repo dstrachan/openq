@@ -172,6 +172,8 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
             } else {
                 try c.scan(lhs);
             }
+            // The operator may be an expression of its own, as a derived function `f'`.
+            try c.scan(op);
             if (maybe_rhs.unwrap()) |rhs| try c.scan(rhs);
         },
         else => {},
@@ -244,9 +246,14 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         },
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
-            // q does not take the composition syntax inside a lambda (`{-_-:}` is a parse
-            // error there); `'[f;g]` builds one at run time instead.
-            if (Vm.isFunctionForm(tree, rhs)) return error.parse;
+            // Applied to a function form, anything composes, as at the top level: the two
+            // functions are pushed and `'` called on them (`{-_-:}` gives `-_-:`).
+            if (Vm.isFunctionForm(tree, rhs)) {
+                try c.compileOperand(rhs);
+                try c.compileFunction(lhs);
+                try c.emitConstant(vm.getIterator(.each));
+                return c.emitCall(2);
+            }
             try c.compileNode(rhs);
             // `'x` signals an error; `f'x` is the each of `f`.
             if (tree.nodeTag(lhs) == .apostrophe and tree.nodeData(lhs).opt_node == .none) return c.emitCode(.signal);

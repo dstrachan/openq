@@ -131,6 +131,7 @@ pub fn eql(a: *Value, b: *Value) bool {
     if (@as(Type, a.as) != @as(Type, b.as)) return false;
     switch (a.as) {
         .list => |a_list| {
+            if (a_list.len != b.as.list.len) return false;
             for (a_list, b.as.list) |a_val, b_val| {
                 if (!a_val.eql(b_val)) return false;
             }
@@ -178,6 +179,7 @@ pub fn eql(a: *Value, b: *Value) bool {
         .iterator => |a_val| return a_val == b.as.iterator,
         .projection => |a_val| {
             if (!a_val.callee.eql(b.as.projection.callee)) return false;
+            if (a_val.args.len != b.as.projection.args.len) return false;
             for (a_val.args, b.as.projection.args) |a_v, b_v| {
                 if (!a_v.eql(b_v)) return false;
             }

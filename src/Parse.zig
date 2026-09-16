@@ -66,9 +66,12 @@ fn tokenSlice(p: *const Parse, token_index: TokenIndex) []const u8 {
         .next_is_minus = false,
         .mode = p.mode,
     };
+    // The token may be preceded by an end-of-statement token or by the `;` a newline
+    // stands for in k mode; either is skipped.
     const token = token: {
         const token = tokenizer.next();
-        break :token if (token.tag == .eos) tokenizer.next() else token;
+        const synthesized = token.tag == .eos or (token.tag == .semicolon and p.source[token.loc.start] == '\n');
+        break :token if (synthesized) tokenizer.next() else token;
     };
     assert(token.tag == token_tag);
     return p.source[token.loc.start..token.loc.end];
@@ -479,6 +482,9 @@ fn parseVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier
         .one_colon_colon,
         .two_colon,
         => verb: {
+            // A verb with brackets is a noun, so a noun before it applies to it: `x+[1;2]` is
+            // `x` applied to `+[1;2]`, and `x+/[1 2]` to `+/[1 2]`, as q parses them.
+            if (!isVerb(p.nodeTag(lhs)) and p.bracketFollowsVerb()) break :verb try p.parseUnary(lhs, sql_identifier);
             if (!isVerb(p.nodeTag(lhs))) break :verb try p.parseBinary(lhs, sql_identifier);
             // A verb followed by another verb applies monadically in k; q has no such form.
             if (p.mode != .k) return p.fail(.expected_infix_expr);
@@ -562,6 +568,17 @@ fn parseIterator(p: *Parse, lhs: Node.Index) Error!Node.Index {
         .data = .{ .opt_node = lhs.toOptional() },
     });
     return p.parseCall(iterator);
+}
+
+/// Whether the verb at the current token is followed, after any iterators, by `[`.
+fn bracketFollowsVerb(p: *Parse) bool {
+    var tokenizer = p.tokenizer;
+    var token = tokenizer.next();
+    while (switch (token.tag) {
+        .apostrophe, .apostrophe_colon, .slash, .slash_colon, .backslash, .backslash_colon => true,
+        else => false,
+    }) token = tokenizer.next();
+    return token.tag == .l_bracket;
 }
 
 fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier) !Node.Index {

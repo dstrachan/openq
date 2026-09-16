@@ -225,6 +225,14 @@ pub fn eos(index: usize) Token {
     };
 }
 
+/// A `;` standing for the newline before an indented line in k mode.
+pub fn separator(index: usize) Token {
+    return .{
+        .tag = .semicolon,
+        .loc = .{ .start = index, .end = index + 1 },
+    };
+}
+
 pub fn eof(index: usize) Token {
     return .{
         .tag = .eof,

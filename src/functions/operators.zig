@@ -398,42 +398,42 @@ pub fn @"and"(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn @"or"(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn fill(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn equal(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn less_than(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn greater_than(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
@@ -1314,7 +1314,7 @@ pub fn drop(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
@@ -1447,7 +1447,7 @@ pub fn find(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 /// `f@x` applies or indexes with one argument: `{x*2}@3` is 6 and `neg@1 2` is `-1 -2`.
@@ -1479,21 +1479,21 @@ pub fn file_text(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn file_binary(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn dynamic_load(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn in(vm: *Vm, x: *Value, y: *Value) !*Value {

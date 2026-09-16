@@ -251,9 +251,12 @@ pub fn tokenSliceMode(tree: Ast, token_index: TokenIndex, mode: Mode) []const u8
         .next_is_minus = token_index != 0 and tree.tokenTag(token_index - 1).isNextMinus() and
             !Tokenizer.isDslPrefixParen(tree.source, tree.tokenStart(token_index - 1)),
     };
+    // The token may be preceded by an end-of-statement token or by the `;` a newline
+    // stands for in k mode; either is skipped.
     const token = token: {
         const token = tokenizer.next();
-        break :token if (token.tag == .eos) tokenizer.next() else token;
+        const synthesized = token.tag == .eos or (token.tag == .semicolon and tree.source[token.loc.start] == '\n');
+        break :token if (synthesized) tokenizer.next() else token;
     };
     assert(token.tag == token_tag);
     return tree.source[token.loc.start..token.loc.end];

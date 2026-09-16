@@ -15,7 +15,7 @@ pub fn identity(_: *Vm, x: *Value) !*Value {
 pub fn flip(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn neg(vm: *Vm, x: *Value) !*Value {
@@ -167,49 +167,49 @@ pub fn first(vm: *Vm, x: *Value) !*Value {
 pub fn reciprocal(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn where(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn reverse(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn @"null"(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn group(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn asc(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn desc(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn string(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn list(vm: *Vm, x: *Value) !*Value {
@@ -287,7 +287,7 @@ fn lowerSymbol(vm: *Vm, symbol: Symbol) !Symbol {
 pub fn not(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn key(vm: *Vm, x: *Value) !*Value {
@@ -352,7 +352,7 @@ pub fn key(vm: *Vm, x: *Value) !*Value {
 pub fn distinct(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn @"type"(vm: *Vm, x: *Value) !*Value {
@@ -462,13 +462,13 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
 pub fn read_text(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn read_binary(vm: *Vm, x: *Value) !*Value {
     _ = x; // autofix
     _ = vm; // autofix
-    unreachable;
+    return error.nyi;
 }
 
 pub fn enlist(vm: *Vm, x: *Value) !*Value {

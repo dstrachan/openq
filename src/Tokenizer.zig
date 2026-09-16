@@ -179,6 +179,21 @@ const State = enum {
     invalid,
 };
 
+/// The position of the newline just before a token, looking back over spaces and tabs, or
+/// null when the token does not start a line.
+fn newlineBefore(buffer: []const u8, start: usize) ?usize {
+    var i = start;
+    while (i > 0) {
+        i -= 1;
+        switch (buffer[i]) {
+            ' ', '\t' => continue,
+            '\n' => return i,
+            else => return null,
+        }
+    }
+    return null;
+}
+
 /// Whether the `)` at `index` closes a `k)` or `q)` mode prefix at the start of a statement.
 pub fn isDslPrefixParen(buffer: []const u8, index: usize) bool {
     if (index < 1 or buffer[index] != ')') return false;
@@ -950,9 +965,20 @@ pub fn next(self: *Tokenizer) Token {
             },
         }
 
-        if (result.loc.start != 0 and self.buffer[result.loc.start - 1] == '\n') {
-            self.next_token = result;
-            return .eos(result.loc.start - 1);
+        // A newline before an unindented line ends the statement. An indented line continues
+        // the previous one in q mode, while in k mode its newline is a `;`, which separates
+        // statements at the top level and items inside brackets alike: `(1\n 2)` is `(1;2)`
+        // and a lambda body may span lines without semicolons, as q reads q.k.
+        if (newlineBefore(self.buffer, result.loc.start)) |newline| {
+            const indented = self.buffer[result.loc.start - 1] != '\n';
+            if (!indented) {
+                self.next_token = result;
+                return .eos(newline);
+            }
+            if (self.mode == .k) {
+                self.next_token = result;
+                return .separator(newline);
+            }
         }
     }
 
@@ -1273,16 +1299,28 @@ test "tokenize line comment" {
         \\ /line comment 2
         \\2
     , &.{ .{ .number_literal, "1" }, .{ .number_literal, "2" } });
-    try testTokenize(
+    // In k mode the newline before an indented line is a `;`.
+    try testTokenizeMode(.q,
         \\1 /line comment 1
         \\/line comment 2
         \\ 2
     , &.{ .{ .number_literal, "1" }, .{ .number_literal, "2" } });
-    try testTokenize(
+    try testTokenizeMode(.k,
+        \\1 /line comment 1
+        \\/line comment 2
+        \\ 2
+    , &.{ .{ .number_literal, "1" }, .{ .semicolon, "\n" }, .{ .number_literal, "2" } });
+    // In k mode the newline before an indented line is a `;`.
+    try testTokenizeMode(.q,
         \\1 /line comment 1
         \\ /line comment 2
         \\ 2
     , &.{ .{ .number_literal, "1" }, .{ .number_literal, "2" } });
+    try testTokenizeMode(.k,
+        \\1 /line comment 1
+        \\ /line comment 2
+        \\ 2
+    , &.{ .{ .number_literal, "1" }, .{ .semicolon, "\n" }, .{ .number_literal, "2" } });
     try testTokenize(
         \\(1; /line comment 1
         \\/line comment 2
@@ -1305,7 +1343,8 @@ test "tokenize line comment" {
         .{ .number_literal, "2" },
         .{ .r_paren, ")" },
     });
-    try testTokenize(
+    // In k mode an indented newline inside brackets is a `;` of its own, as in q.
+    try testTokenizeMode(.q,
         \\(1; /line comment 1
         \\/line comment 2
         \\ 2)
@@ -1316,7 +1355,20 @@ test "tokenize line comment" {
         .{ .number_literal, "2" },
         .{ .r_paren, ")" },
     });
-    try testTokenize(
+    try testTokenizeMode(.k,
+        \\(1; /line comment 1
+        \\/line comment 2
+        \\ 2)
+    , &.{
+        .{ .l_paren, "(" },
+        .{ .number_literal, "1" },
+        .{ .semicolon, ";" },
+        .{ .semicolon, "\n" },
+        .{ .number_literal, "2" },
+        .{ .r_paren, ")" },
+    });
+    // In k mode an indented newline inside brackets is a `;` of its own, as in q.
+    try testTokenizeMode(.q,
         \\(1; /line comment 1
         \\ /line comment 2
         \\ 2)
@@ -1324,6 +1376,18 @@ test "tokenize line comment" {
         .{ .l_paren, "(" },
         .{ .number_literal, "1" },
         .{ .semicolon, ";" },
+        .{ .number_literal, "2" },
+        .{ .r_paren, ")" },
+    });
+    try testTokenizeMode(.k,
+        \\(1; /line comment 1
+        \\ /line comment 2
+        \\ 2)
+    , &.{
+        .{ .l_paren, "(" },
+        .{ .number_literal, "1" },
+        .{ .semicolon, ";" },
+        .{ .semicolon, "\n" },
         .{ .number_literal, "2" },
         .{ .r_paren, ")" },
     });
@@ -1340,7 +1404,8 @@ test "tokenize block comment" {
         \\\
         \\2
     , &.{ .{ .number_literal, "1" }, .{ .number_literal, "2" } });
-    try testTokenize(
+    // In k mode the newline before an indented line is a `;`.
+    try testTokenizeMode(.q,
         \\1
         \\/
         \\block comment 1
@@ -1350,6 +1415,16 @@ test "tokenize block comment" {
         \\\
         \\ 2
     , &.{ .{ .number_literal, "1" }, .{ .number_literal, "2" } });
+    try testTokenizeMode(.k,
+        \\1
+        \\/
+        \\block comment 1
+        \\\
+        \\/
+        \\block comment 2
+        \\\
+        \\ 2
+    , &.{ .{ .number_literal, "1" }, .{ .semicolon, "\n" }, .{ .number_literal, "2" } });
     try testTokenize(
         \\(1;
         \\/
@@ -1366,7 +1441,8 @@ test "tokenize block comment" {
         .{ .number_literal, "2" },
         .{ .r_paren, ")" },
     });
-    try testTokenize(
+    // In k mode an indented newline inside brackets is a `;` of its own, as in q.
+    try testTokenizeMode(.q,
         \\(1;
         \\/
         \\block comment 1
@@ -1379,6 +1455,23 @@ test "tokenize block comment" {
         .{ .l_paren, "(" },
         .{ .number_literal, "1" },
         .{ .semicolon, ";" },
+        .{ .number_literal, "2" },
+        .{ .r_paren, ")" },
+    });
+    try testTokenizeMode(.k,
+        \\(1;
+        \\/
+        \\block comment 1
+        \\\
+        \\/
+        \\block comment 2
+        \\\
+        \\ 2)
+    , &.{
+        .{ .l_paren, "(" },
+        .{ .number_literal, "1" },
+        .{ .semicolon, ";" },
+        .{ .semicolon, "\n" },
         .{ .number_literal, "2" },
         .{ .r_paren, ")" },
     });

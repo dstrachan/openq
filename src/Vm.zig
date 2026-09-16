@@ -247,10 +247,17 @@ pub fn resolver(vm: *Vm) Ast.Resolver {
     return .{ .context = vm, .valence = qValence };
 }
 
+/// The valence the parser gives a `.q` keyword: two makes it infix. A dyadic lambda, an
+/// operator, a projection with two left to fill and an each of a dyadic function are
+/// infix (`x mmu y`, `x f' y`), while over, scan, each-prior, each-right and each-left
+/// parse as monadic whatever they can take, so `prev prev x` nests and `sums x` applies.
 fn qValence(context: *anyopaque, name: []const u8) ?usize {
     const vm: *Vm = @ptrCast(@alignCast(context));
     const entry = vm.qEntry(name) orelse return null;
-    return entry.rank();
+    return switch (entry.as) {
+        .over, .scan, .each_prior, .each_right, .each_left => 1,
+        else => entry.rank(),
+    };
 }
 
 /// The `.q` entry called `name`, borrowed, or null when there is none.
@@ -890,24 +897,19 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 return vm.raiseSignal(v);
             }
 
-            const stack_top = vm.stack.items.len;
-            try vm.stack.ensureUnusedCapacity(vm.gpa, value.len);
-            for (0..value.len) |_| vm.stack.appendAssumeCapacity(vm.getConstant(.empty_list));
-            defer vm.stack.shrinkRetainingCapacity(stack_top);
-
-            const stack = vm.stack.items[stack_top..];
-            defer for (stack) |v| v.deref(vm.gpa);
-            assert(stack.len == value.len);
-
-            var it = std.mem.reverseIterator(value);
-            var stack_it = std.mem.reverseIterator(stack);
-            while (stack_it.nextPtr()) |entry| {
-                const prev_entry = entry.*;
-                entry.* = try vm.eval(it.next().?);
-                prev_entry.deref(vm.gpa);
+            // Items are evaluated right to left into an array of this call's own: a nested
+            // evaluation may grow a shared stack and move it under a slice held here.
+            const items = try vm.gpa.alloc(*Value, value.len);
+            defer vm.gpa.free(items);
+            var done: usize = 0;
+            defer for (items[items.len - done ..]) |v| v.deref(vm.gpa);
+            var i = value.len;
+            while (i > 0) {
+                i -= 1;
+                items[i] = try vm.eval(value[i]);
+                done += 1;
             }
-
-            return vm.applyImpl(stack[0], stack[1..]);
+            return vm.applyImpl(items[0], items[1..]);
         },
         .symbol => return q.unary_primitives.value(vm, x),
         .symbol_list => |value| {
@@ -4057,8 +4059,12 @@ test "compositions follow q" {
     try testing.expectError(error.type, vm.evalSource("f:{x*2};g:-f;g 3", .k, "<test>"));
     try testing.expectError(error.rank, vm.evalSource("'[-:;_:;+]", .k, "<test>"));
     try testing.expectError(error.rank, vm.evalSource("(-_-:)[1;2]", .k, "<test>"));
-    try testing.expectError(error.parse, vm.evalSource("{-_-:}", .k, "<test>"));
-    try testing.expectError(error.parse, vm.evalSource("{@1+}", .k, "<test>"));
+    // Inside a lambda the composition syntax works as at the top level.
+    try expectEvalMode(vm, .k, "{-_-:}[] -1.5", "-1");
+    try expectEvalMode(vm, .k, "{(-_-:) x} -1.5", "-1");
+    try expectEvalMode(vm, .k, "{f:-_-:;f x} -1.5", "-1");
+    try expectEvalMode(vm, .k, "{@1+}[]", "@+[1]");
+    try expectEvalMode(vm, .k, "-3!{-_-:}[]", "\"-_-:\"");
 }
 
 test "floor and lower share the underscore primitive" {
@@ -4152,4 +4158,69 @@ test "projections of internals and glyphs, amend and trap forms of dot and at" {
     try testing.expectError(error.type, vm.evalSource("@[`b;1;:;9]", .q, "<test>"));
     try testing.expectError(error.rank, vm.evalSource("@[+;1;{x};2]", .q, "<test>"));
     try testing.expectError(error.rank, vm.evalSource("+[1;2;3]", .q, "<test>"));
+}
+
+test "review fixes: precedence, k newlines, scans, equality, stubs and long lists" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // A bracketed verb after a noun is applied to, as q parses it.
+    try expectEval(vm, "parse \"x+[1;2]\"", "(`x;(+;1;2))");
+    try expectEval(vm, "parse \"x $[1;2;3]\"", "(`x;($;1;2;3))");
+    try expectEval(vm, "parse \"f +/[1 2]\"", "(`f;((/;+);1 2))");
+    try expectEval(vm, "parse \"x -[1]\"", "(`x;(-;1))");
+    try expectEval(vm, "parse \"k)x -1\"", "(`x;-1)");
+    try expectEval(vm, "parse \"k)x - 1\"", "(-;`x;1)");
+    try expectEval(vm, "1 2 3 $[1;0;2]", "1");
+
+    // An assignment inside a bracketed cond used after a name compiles (the scan pass
+    // walks the operator node), and compositions compile inside lambdas.
+    try expectEvalMode(vm, .k, "{n:1;n+.z.s$[p:x;n;p]}", "{n:1;n+.z.s$[p:x;n;p]}");
+    try expectEvalMode(vm, .k, "{$[1;2;f $[p:1;2;3]]}[]", "2");
+    try expectEvalMode(vm, .k, "{(!#:)'x}(1 2;3 4 5)", "(0 1;0 1 2)");
+
+    // k mode: an indented newline inside brackets is `;`, an indented line at the top
+    // level is a new statement; q mode joins indented lines.
+    try expectEvalMode(vm, .k, "{1\n 2}[]", "2");
+    try expectEvalMode(vm, .k, "(1\n 2)", "1 2");
+    try expectEvalMode(vm, .k, "(\"a b\";\"c d\"\n \"e f\";\"g h\")", "(\"a b\";\"c d\";\"e f\";\"g h\")");
+    try expectEvalMode(vm, .k, "a:1\n 2\na", "1");
+    try testing.expectError(error.rank, vm.evalSource("f:{x};f[1\n 2]", .k, "<test>"));
+    try expectEval(vm, "{1\n 2}[]", "1 2");
+    try expectEval(vm, "(1\n +2)", "3");
+
+    // Lists of different lengths are not equal (the compiler compares constants).
+    try expectEvalMode(vm, .k, "{((1;`a);(1;`a;2))}[]", "((1;`a);(1;`a;2))");
+    try expectEval(vm, "(1;`a)~(1;`a;2)", "0b");
+
+    // Stubs fail with nyi instead of crashing.
+    try testing.expectError(error.nyi, vm.evalSource("reverse 1 2 3", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("string 1", .q, "<test>"));
+
+    // A long list literal that fails part way is cleaned up (it used to move the stack).
+    try testing.expectError(error.type, vm.evalSource("(\"a\";\"b\";\"c\";\"d\";\"e\";\"f\";\"g\";\"h\";\"i\";\"j\";\"k\";\"l\";\"m\";\"n\";\"o\";\"p\";\"q\";\"r\";\"s\";\"t\";\"u\";\"v\" \"w\";\"x\")", .q, "<test>"));
+}
+
+test "keywords bound to derived functions parse as q parses them" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEvalMode(vm, .k, ".q.prev: :':", ":':");
+    try expectEvalMode(vm, .k, ".q.sums:+\\", "+\\");
+    try expectEvalMode(vm, .k, ".q.deltas:-':", "-':");
+    try expectEvalMode(vm, .k, ".q.f7:{x+y}'", "{x+y}'");
+    try expectEval(vm, "prev til 10", "0N 0 1 2 3 4 5 6 7 8");
+    try expectEval(vm, "prev prev til 10", "0N 0N 0 1 2 3 4 5 6 7");
+    try expectEval(vm, "parse \"prev prev 3\"", "(:':;(:':;3))");
+    try expectEval(vm, "parse \"1 sums 2\"", "(1;(+\\;2))");
+    try expectEval(vm, "parse \"sums sums 1 2\"", "(+\\;(+\\;1 2))");
+    try expectEval(vm, "parse \"1 deltas 2\"", "(1;(-':;2))");
+    try expectEval(vm, "parse \"1 mmu 2\"", "($;1;2)");
+    try expectEval(vm, "parse \"1 f7 2\"", "({x+y}';1;2)");
+    try expectEval(vm, "sums 1 2 3", "1 3 6");
+    try expectEval(vm, "deltas 1 3 6", "1 2 3");
+    try expectEval(vm, "1 2 f7 3 4", "4 6");
+    try expectEval(vm, "prev 0N 0 1", "0N 0N 0");
 }
