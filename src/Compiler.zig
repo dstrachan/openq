@@ -146,7 +146,12 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
         .keyword => if (c.aliasOf(node)) |name| try c.noteName(name, false),
         .grouped_expression => try c.scan(tree.nodeData(node).node_and_token[0]),
         .list, .call, .expr_block => {
-            for (tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index)) |n| try c.scan(n);
+            const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
+            for (nodes, 0..) |n, i| {
+                // `if`, `while` and `do` are control words, not globals.
+                if (i == 0 and tree.nodeTag(node) == .call and c.controlWord(n) != null) continue;
+                try c.scan(n);
+            }
         },
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
@@ -156,8 +161,11 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
-            if (tree.nodeTag(op) == .colon and tree.nodeTag(lhs) == .identifier) {
-                try c.noteName(tree.tokenSlice(tree.nodeMainToken(lhs)), true);
+            const op_tag = tree.nodeTag(op);
+            if (assignOperator(op_tag) != null and tree.nodeTag(lhs) == .identifier) {
+                // Only a plain `x:v` makes a name a local. `x::v`, `x+:v` and `x[i]:v` modify
+                // whatever the name already is: a parameter, a local, or otherwise a global.
+                try c.noteName(tree.tokenSlice(tree.nodeMainToken(lhs)), op_tag == .colon);
             } else {
                 try c.scan(lhs);
             }
@@ -213,6 +221,14 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         .call => {
             const nodes = tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index);
             const args = nodes[1..];
+            // `$[c;a;b]` with three or more arguments is the conditional, and the control
+            // words compile to jumps; none of them evaluates arguments ahead of time.
+            if (tree.nodeTag(nodes[0]) == .dollar and args.len >= 3) return c.compileCond(args);
+            if (c.controlWord(nodes[0])) |word| return switch (word) {
+                .@"if" => c.compileIf(args),
+                .@"while" => c.compileWhile(args),
+                .do => c.compileDo(args),
+            };
             // `f[]` applies `f` to `::`.
             if (args.len == 1 and tree.nodeTag(args[0]) == .empty) {
                 try c.emitCode(.nil);
@@ -226,8 +242,15 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
             try c.compileNode(rhs);
+            // `'x` signals an error.
+            if (tree.nodeTag(lhs) == .apostrophe) return c.emitCode(.signal);
             // A primitive is an instruction of its own, as q compiles `neg x` to `neg`.
-            if (try c.directOpcode(lhs, 1)) |code| return c.emitCode(code);
+            if (try c.directOpcode(lhs, 1)) |code| {
+                try c.emitCode(code);
+                // `:x` is the identity followed by a return, as q compiles it.
+                if (tree.nodeTag(lhs) == .colon) try c.emitCode(.@"return");
+                return;
+            }
             try c.compileFunction(lhs);
             try c.emitCode(.apply_at);
         },
@@ -235,16 +258,39 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
             const op_tag = tree.nodeTag(op);
-            if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .identifier) {
+            if (assignOperator(op_tag)) |operator| {
                 const rhs = maybe_rhs.unwrap() orelse return error.parse;
-                try c.compileNode(rhs);
-                return c.compileAssign(tree.tokenSlice(tree.nodeMainToken(lhs)), op_tag == .colon_colon);
+                switch (tree.nodeTag(lhs)) {
+                    .identifier => {
+                        try c.compileNode(rhs);
+                        const name = tree.tokenSlice(tree.nodeMainToken(lhs));
+                        if (operator == .assign) return c.compileAssign(name, op_tag == .colon_colon);
+                        // `x+:v` amends the whole value: `.[`x;();+;v]`.
+                        try c.emitCode(.empty_list);
+                        return c.emitAmend(name, operator);
+                    },
+                    // A `.q` name cannot be assigned, not even a symbol alias (q 5.0; q 4.0
+                    // assigned through the alias).
+                    .keyword => return error.assign,
+                    .call => {
+                        // `x[i;j]:v` amends at an index list built by `enlist`, as q does.
+                        const nodes = tree.extraDataSlice(tree.nodeData(lhs).extra_range, Node.Index);
+                        if (tree.nodeTag(nodes[0]) != .identifier) return error.nyi;
+                        try c.compileNode(rhs);
+                        const indices = nodes[1..];
+                        // An elided index, as in `a[;1]`, means every item: `::`.
+                        var i = indices.len;
+                        while (i > 0) {
+                            i -= 1;
+                            if (tree.nodeTag(indices[i]) == .empty) try c.emitCode(.nil) else try c.compileNode(indices[i]);
+                        }
+                        try c.emitConstant(vm.getUnaryPrimitive(.enlist));
+                        if (indices.len == 1) try c.emitCode(.apply_at) else try c.emitCall(indices.len);
+                        return c.emitAmend(tree.tokenSlice(tree.nodeMainToken(nodes[0])), operator);
+                    },
+                    else => return error.nyi,
+                }
             }
-            // A `.q` name cannot be assigned, not even a symbol alias (q 5.0; q 4.0 assigned
-            // through the alias).
-            if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .keyword) return error.assign;
-            // Indexed and compound assignment are still to come.
-            if (op_tag == .colon) return error.nyi;
             if (maybe_rhs.unwrap()) |rhs| {
                 try c.compileNode(rhs);
                 try c.compileNode(lhs);
@@ -282,6 +328,24 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         .backslash_colon,
         => return error.nyi,
 
+        // A symbol literal is a one-item list in a parse tree, so that evaluating it does
+        // not look the name up; as a constant it is the atom itself.
+        .symbol_literal => {
+            const literal = try vm.parseNode(node);
+            defer literal.deref(vm.gpa);
+            assert(literal.as == .symbol_list and literal.as.symbol_list.len == 1);
+            const atom = try vm.createValue(.symbol, literal.as.symbol_list[0]);
+            errdefer atom.deref(vm.gpa);
+            try c.emitConstant(atom);
+        },
+        // A symbol list literal is wrapped in a one-item list in a parse tree for the same
+        // reason; the constant is the list itself.
+        .symbol_list_literal => {
+            const wrapped = try vm.parseNode(node);
+            defer wrapped.deref(vm.gpa);
+            assert(wrapped.as == .list and wrapped.as.list.len == 1);
+            try c.emitConstant(wrapped.as.list[0].ref());
+        },
         // `0` and `1` have instructions of their own; every other literal is a constant.
         .number_literal => {
             const slice = tree.tokenSlice(tree.nodeMainToken(node));
@@ -398,9 +462,149 @@ fn compileAssign(c: *Compiler, name: []const u8, global: bool) Error!void {
         assert(global);
     }
     try c.emitCode(.empty_list);
+    try c.emitAmend(name, .assign);
+}
+
+/// `amend target op`: the index list is on top of the stack and the value below it. The
+/// target is a slot for a parameter or local and `global` plus an index otherwise.
+fn emitAmend(c: *Compiler, name: []const u8, operator: Value.Operator) Error!void {
     try c.emitCode(.amend);
+    if (name[0] != '.') {
+        const symbol = try c.vm.intern(name);
+        if (std.mem.findScalar(Symbol, c.params.items, symbol)) |i| {
+            try c.emitByte(@intCast(paramSlot(i)));
+            return c.emitByte(@backingInt(operator));
+        }
+        if (std.mem.findScalar(Symbol, c.locals.items, symbol)) |i| {
+            try c.emitByte(std.math.cast(u8, localSlot(i)) orelse return error.nyi);
+            return c.emitByte(@backingInt(operator));
+        }
+    }
     try c.emitByte(try c.globalByte(name));
-    try c.emitByte(@backingInt(Value.Operator.assign));
+    try c.emitByte(@backingInt(operator));
+}
+
+/// The operator an assignment glyph applies: `:` and `::` assign, `+:` adds and so on.
+fn assignOperator(tag: Node.Tag) ?Value.Operator {
+    return switch (tag) {
+        .colon, .colon_colon => .assign,
+        .plus_colon => .add,
+        .minus_colon => .subtract,
+        .asterisk_colon => .multiply,
+        .percent_colon => .divide,
+        .ampersand_colon => .@"and",
+        .pipe_colon => .@"or",
+        .caret_colon => .fill,
+        .equal_colon => .equal,
+        .l_angle_bracket_colon => .less_than,
+        .r_angle_bracket_colon => .greater_than,
+        .dollar_colon => .cast,
+        .comma_colon => .join,
+        .hash_colon => .take,
+        .underscore_colon => .drop,
+        .tilde_colon => .match,
+        .bang_colon => .dict,
+        .question_mark_colon => .find,
+        .at_colon => .apply_at,
+        .dot_colon => .apply,
+        else => null,
+    };
+}
+
+const ControlWord = enum { @"if", @"while", do };
+
+fn controlWord(c: *Compiler, node: Node.Index) ?ControlWord {
+    if (c.tree.nodeTag(node) != .identifier) return null;
+    return std.meta.stringToEnum(ControlWord, c.tree.tokenSlice(c.tree.nodeMainToken(node)));
+}
+
+/// `$[c1;a1;c2;a2;...;b]`: each condition jumps past its branch when false, each branch
+/// jumps to the end, and a missing final branch is `::`. An empty branch is `::` too.
+fn compileCond(c: *Compiler, args: []const Node.Index) Error!void {
+    var end_jumps: std.ArrayList(usize) = .empty;
+    defer end_jumps.deinit(c.vm.gpa);
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 2) {
+        try c.compileNode(args[i]);
+        const skip = try c.emitJump(.jump_if_false);
+        try c.compileBranch(args[i + 1]);
+        try end_jumps.append(c.vm.gpa, try c.emitJump(.jump));
+        try c.patchJump(skip);
+    }
+    if (i < args.len) try c.compileBranch(args[i]) else try c.emitCode(.nil);
+    for (end_jumps.items) |jump| try c.patchJump(jump);
+}
+
+fn compileBranch(c: *Compiler, node: Node.Index) Error!void {
+    if (c.tree.nodeTag(node) == .empty) return c.emitCode(.nil);
+    try c.compileNode(node);
+}
+
+/// `if[c;s1;s2...]` runs the statements when `c` holds and is `::`.
+fn compileIf(c: *Compiler, args: []const Node.Index) Error!void {
+    if (args.len == 0) return error.parse;
+    try c.compileNode(args[0]);
+    const skip = try c.emitJump(.jump_if_false);
+    try c.compileStatements(args[1..]);
+    try c.patchJump(skip);
+    try c.emitCode(.nil);
+}
+
+/// `while[c;s1;s2...]` runs the statements as long as `c` holds and is `::`.
+fn compileWhile(c: *Compiler, args: []const Node.Index) Error!void {
+    if (args.len == 0) return error.parse;
+    const top = c.bytecode.items.len;
+    try c.compileNode(args[0]);
+    const exit = try c.emitJump(.jump_if_false);
+    try c.compileStatements(args[1..]);
+    try c.emitJumpBack(top);
+    try c.patchJump(exit);
+    try c.emitCode(.nil);
+}
+
+/// `do[n;s1;s2...]` runs the statements `n` times and is `::`.
+fn compileDo(c: *Compiler, args: []const Node.Index) Error!void {
+    if (args.len == 0) return error.parse;
+    try c.compileNode(args[0]);
+    try c.emitCode(.do_init);
+    const top = c.bytecode.items.len;
+    const exit = try c.emitJump(.do_step);
+    try c.compileStatements(args[1..]);
+    try c.emitJumpBack(top);
+    try c.patchJump(exit);
+    try c.emitCode(.nil);
+}
+
+/// Statements inside a control word: each is run and its value dropped.
+fn compileStatements(c: *Compiler, nodes: []const Node.Index) Error!void {
+    for (nodes) |n| {
+        if (c.tree.nodeTag(n) == .empty) continue;
+        try c.compileNode(n);
+        try c.emitCode(.pop);
+    }
+}
+
+/// Emits a forward jump with a placeholder offset and returns where the offset lives.
+fn emitJump(c: *Compiler, code: ByteCode) Error!usize {
+    try c.emitCode(code);
+    const operand = c.bytecode.items.len;
+    try c.emitByte(0);
+    try c.emitByte(0);
+    return operand;
+}
+
+/// Points the jump whose offset lives at `operand` to the next instruction.
+fn patchJump(c: *Compiler, operand: usize) Error!void {
+    const offset = std.math.cast(u16, c.bytecode.items.len - operand) orelse return error.nyi;
+    std.mem.writeInt(u16, c.bytecode.items[operand..][0..2], offset, .little);
+}
+
+fn emitJumpBack(c: *Compiler, target: usize) Error!void {
+    try c.emitCode(.jump_back);
+    const operand = c.bytecode.items.len;
+    const offset = std.math.cast(u16, operand - target) orelse return error.nyi;
+    try c.emitByte(@truncate(offset));
+    try c.emitByte(@truncate(offset >> 8));
 }
 
 /// The byte naming a global in an instruction: `global` plus its index, at most 30.
@@ -471,10 +675,20 @@ fn emitConstant(c: *Compiler, value: *Value) Error!void {
 /// and `amend` a target (a slot, or `global` plus an index) and an operator index.
 pub const ByteCode = enum(u8) {
     @"return" = 0,
-    print = 1,
+    /// `'x`: raises the value on the stack as an error.
+    signal = 1,
     pop = 2,
     assign = 3,
     amend = 4,
+    /// The jumps take a two-byte little-endian offset relative to the operand's own
+    /// position: forward for `jump` and `jump_if_false` (which pops its condition) and
+    /// backward for `jump_back`. `do_init` pops the count and `do_step` counts it down,
+    /// jumping forward when it is spent.
+    jump = 5,
+    jump_if_false = 6,
+    do_init = 7,
+    do_step = 8,
+    jump_back = 9,
     call = 10,
 
     // builtins

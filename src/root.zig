@@ -43,8 +43,9 @@ pub fn putAstErrorsIntoBundle(gpa: Allocator, tree: Ast, src_path: []const u8, e
     for (tree.errors) |err| {
         const err_span: Span = blk: {
             const start = tree.tokenStart(err.token);
-            const end = start + @as(u32, @intCast(tree.tokenSlice(err.token).len));
-            break :blk .{ .start = start, .end = end, .main = start };
+            // An end-of-statement token has no text of its own.
+            const len: u32 = if (tree.tokenTag(err.token) == .eos) 0 else @intCast(tree.tokenSlice(err.token).len);
+            break :blk .{ .start = start, .end = start + len, .main = start };
         };
         const err_loc = zig.findLineColumn(tree.source, err_span.main);
 

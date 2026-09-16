@@ -194,6 +194,10 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             const value = vm.evalSource(source, mode, "<stdin>") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCharacter => return error.InvalidCharacter,
+                error.signal => {
+                    std.debug.print("'{s}\n", .{vm.signal_message orelse ""});
+                    continue;
+                },
                 else => {
                     std.debug.print("'{t}\n", .{err});
                     continue;

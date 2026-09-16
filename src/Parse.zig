@@ -565,9 +565,11 @@ fn parseIterator(p: *Parse, lhs: Node.Index) Error!Node.Index {
 }
 
 fn parseUnary(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier) !Node.Index {
-    // A verb applied by juxtaposition (`#x`, `+/x`) is monadic application, which only k allows.
+    // A verb applied by juxtaposition (`#x`, `+/x`) is monadic application, which only k
+    // allows; the signal `'x` and the return `:x` are the forms q has as well.
     const lhs_is_verb = isVerb(p.nodeTag(lhs));
-    if (lhs_is_verb and p.mode != .k) return p.fail(.expected_infix_expr);
+    const lhs_tag = p.nodeTag(lhs);
+    if (lhs_is_verb and p.mode != .k and lhs_tag != .apostrophe and lhs_tag != .colon) return p.fail(.expected_infix_expr);
 
     const apply_index = try p.reserveNode(.apply_unary);
     errdefer p.unreserveNode(apply_index);

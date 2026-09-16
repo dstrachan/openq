@@ -29,6 +29,7 @@ const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     os,
     parse,
     rank,
+    signal,
     type,
 };
 
@@ -55,6 +56,8 @@ namespace: Symbol = .empty,
 precision: u8 = 7,
 /// The time zone of `.z.P` and the other local clock variables, read once at init.
 local_zone: q.clock.LocalZone = .utc,
+/// The text of the last `'x` signal, which `error.signal` reports.
+signal_message: ?[]u8 = null,
 
 const Constant = enum(u8) {
     empty_list,
@@ -247,6 +250,7 @@ pub fn qEntry(vm: *Vm, name: []const u8) ?*Value {
 }
 
 pub fn deinit(vm: *Vm) void {
+    if (vm.signal_message) |message| vm.gpa.free(message);
     vm.local_zone.deinit();
     vm.string_table.deinit(vm.gpa);
     vm.string_bytes.deinit(vm.gpa);
@@ -389,13 +393,30 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .iterator => unreachable,
         .projection => |projection| {
             const rank = projection.callee.rank();
-            const args_len = len: {
-                var len: usize = projection.args.len;
-                for (projection.args) |a| {
-                    if (a.isEmpty()) len -= 1;
+            const holes = holes: {
+                var n: usize = 0;
+                for (projection.args) |a| n += @intFromBool(a.isEmpty());
+                break :holes n;
+            };
+            // Fewer arguments than holes fill the holes left to right and leave the rest:
+            // `{x+y+z}[;;3][1]` is `{x+y+z}[1;;3]`.
+            if (args.len < holes) {
+                const filled = try vm.gpa.alloc(*Value, projection.args.len);
+                errdefer vm.gpa.free(filled);
+                var j: usize = 0;
+                for (filled, projection.args) |*f, a| {
+                    if (a.isEmpty() and j < args.len) {
+                        f.* = args[j].ref();
+                        j += 1;
+                    } else {
+                        f.* = a.ref();
+                    }
                 }
-                break :len len;
-            } + args.len;
+                const callee = projection.callee.ref();
+                errdefer callee.deref(vm.gpa);
+                return vm.createValue(.projection, .{ .callee = callee, .args = filled });
+            }
+            const args_len = projection.args.len - holes + args.len;
             if (args_len > rank) return error.rank;
 
             var new_args: std.ArrayList(*Value) = try .initCapacity(vm.gpa, args_len);
@@ -621,6 +642,16 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 return vm.eval(value[value.len - 1]);
             }
 
+            // Compound and indexed assignment as q parses them at the top level: `x+:v` is
+            // `(+:;`x;v)`, `x[i]:v` is `(:;(`x;i);v)`, `x[i]+:v` is `(+:;(`x;i);v)` and
+            // `x::v` is `(::;`x;v)`. A plain `x:v` is handled below.
+            if (value.len == 3) if (amendOperatorOf(value[0])) |operator| {
+                const target = value[1];
+                const indexed = target.as == .list and target.as.list.len > 1 and target.as.list[0].as == .symbol;
+                const plain = operator == .assign and value[0].as == .operator;
+                if (indexed or (target.as == .symbol and !plain)) return vm.evalAmend(target, operator, value[2]);
+            };
+
             if (value[0].as == .operator and value[0].as.operator == .assign) {
                 if (value.len != 3 or value[2].isEmpty()) return error.rank;
 
@@ -628,6 +659,21 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 errdefer v.deref(vm.gpa);
 
                 return q.operators.assign(vm, value[1], v);
+            }
+
+            // The conditional and the control words evaluate their arguments as they go,
+            // as q does at the top level too; `$` with two arguments stays the cast.
+            if (value[0].as == .operator and value[0].as.operator == .cast and value.len > 3) return vm.evalCond(value[1..]);
+            if (value[0].as == .symbol) {
+                const name = vm.internedString(value[0].as.symbol);
+                if (std.mem.eql(u8, name, "if")) return vm.evalIf(value[1..]);
+                if (std.mem.eql(u8, name, "while")) return vm.evalWhile(value[1..]);
+                if (std.mem.eql(u8, name, "do")) return vm.evalDo(value[1..]);
+            }
+            if (value[0].as == .char and value[0].as.char == '\'' and value.len == 2) {
+                const v = try vm.eval(value[1]);
+                defer v.deref(vm.gpa);
+                return vm.raiseSignal(v);
             }
 
             const stack_top = vm.stack.items.len;
@@ -656,6 +702,158 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
         },
         else => return x.ref(),
     }
+}
+
+/// The operator behind an assignment glyph in a parse tree: `::` assigns, and `+:` and
+/// the other monadic glyphs stand for their dyadic operators.
+fn amendOperatorOf(head: *Value) ?Operator {
+    return switch (head.as) {
+        .operator => |o| if (o == .assign) .assign else null,
+        .unary_primitive => |p| switch (p) {
+            .identity => .assign,
+            .flip => .add,
+            .neg => .subtract,
+            .first => .multiply,
+            .reciprocal => .divide,
+            .where => .@"and",
+            .reverse => .@"or",
+            .null => .fill,
+            .group => .equal,
+            .asc => .less_than,
+            .desc => .greater_than,
+            .string => .cast,
+            .list => .join,
+            .count => .take,
+            .lower => .drop,
+            .not => .match,
+            .key => .dict,
+            .distinct => .find,
+            .type => .apply_at,
+            .value => .apply,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+/// `x op: v` and `x[i] op: v` at the top level: the global is read, amended and stored,
+/// and the statement is `::` as in q.
+fn evalAmend(vm: *Vm, target: *Value, operator: Operator, rhs: *Value) RunError!*Value {
+    const v = try vm.eval(rhs);
+    defer v.deref(vm.gpa);
+    const name = if (target.as == .symbol) target else target.as.list[0];
+    const new_value = if (target.as == .symbol and operator == .assign) v.ref() else amended: {
+        const old = try vm.readGlobal(name.as.symbol);
+        defer old.deref(vm.gpa);
+        const index = if (target.as == .symbol) try vm.allocValue(.list, 0) else try vm.evalIndex(target.as.list[1..]);
+        defer index.deref(vm.gpa);
+        break :amended try vm.amendValue(old, index, operator, v);
+    };
+    defer new_value.deref(vm.gpa);
+    _ = try q.operators.assign(vm, name, new_value);
+    return vm.getUnaryPrimitive(.identity);
+}
+
+/// The index list of `x[i;j]`, one item per dimension; an elided index is `::`.
+fn evalIndex(vm: *Vm, nodes: []*Value) RunError!*Value {
+    const items = try vm.gpa.alloc(*Value, nodes.len);
+    defer vm.gpa.free(items);
+    var done: usize = 0;
+    defer for (items[0..done]) |item| item.deref(vm.gpa);
+    for (nodes) |node| {
+        items[done] = if (node.isEmpty()) vm.getUnaryPrimitive(.identity) else try vm.eval(node);
+        done += 1;
+    }
+    return vm.enlist(items);
+}
+
+fn evalCond(vm: *Vm, args: []*Value) RunError!*Value {
+    var i: usize = 0;
+    while (i + 1 < args.len) : (i += 2) {
+        const condition = try vm.eval(args[i]);
+        defer condition.deref(vm.gpa);
+        if (try truthy(condition)) return vm.evalBranch(args[i + 1]);
+    }
+    return if (i < args.len) vm.evalBranch(args[i]) else vm.getUnaryPrimitive(.identity);
+}
+
+fn evalBranch(vm: *Vm, branch: *Value) RunError!*Value {
+    return if (branch.isEmpty()) vm.getUnaryPrimitive(.identity) else vm.eval(branch);
+}
+
+fn evalIf(vm: *Vm, args: []*Value) RunError!*Value {
+    if (args.len == 0) return error.rank;
+    const condition = try vm.eval(args[0]);
+    defer condition.deref(vm.gpa);
+    if (try truthy(condition)) try vm.evalStatements(args[1..]);
+    return vm.getUnaryPrimitive(.identity);
+}
+
+fn evalWhile(vm: *Vm, args: []*Value) RunError!*Value {
+    if (args.len == 0) return error.rank;
+    while (true) {
+        const condition = try vm.eval(args[0]);
+        defer condition.deref(vm.gpa);
+        if (!try truthy(condition)) break;
+        try vm.evalStatements(args[1..]);
+    }
+    return vm.getUnaryPrimitive(.identity);
+}
+
+fn evalDo(vm: *Vm, args: []*Value) RunError!*Value {
+    if (args.len == 0) return error.rank;
+    const count = try vm.eval(args[0]);
+    defer count.deref(vm.gpa);
+    var remaining = try loopCount(count);
+    while (remaining > 0) : (remaining -= 1) try vm.evalStatements(args[1..]);
+    return vm.getUnaryPrimitive(.identity);
+}
+
+fn evalStatements(vm: *Vm, statements: []*Value) RunError!void {
+    for (statements) |statement| {
+        if (statement.isEmpty()) continue;
+        const v = try vm.eval(statement);
+        v.deref(vm.gpa);
+    }
+}
+
+/// Whether a condition holds: an integer-like atom other than zero, as q reads it. A null
+/// is nonzero and so holds; floats, symbols, lists and functions are a type error.
+fn truthy(value: *Value) error{type}!bool {
+    return switch (value.as) {
+        .boolean => |b| b,
+        .byte => |b| b != 0,
+        .short => |v| v != 0,
+        .int, .month, .date, .minute, .second, .time => |v| v != 0,
+        .long, .timestamp, .timespan => |v| v != 0,
+        else => error.type,
+    };
+}
+
+fn loopCount(value: *Value) error{type}!i64 {
+    return switch (value.as) {
+        .boolean => |b| @intFromBool(b),
+        .byte => |b| b,
+        .short => |v| v,
+        .int => |v| v,
+        .long => |v| v,
+        else => error.type,
+    };
+}
+
+/// `'x`: records the message and fails with `error.signal`. A symbol or string names the
+/// error; anything else is q's `stype`.
+pub fn raiseSignal(vm: *Vm, value: *Value) RunError {
+    const text: []const u8 = switch (value.as) {
+        .symbol => |s| vm.internedString(s),
+        .char_list => |s| s,
+        .char => |ch| &[_]u8{ch},
+        else => "stype",
+    };
+    const message = try vm.gpa.dupe(u8, text);
+    if (vm.signal_message) |old| vm.gpa.free(old);
+    vm.signal_message = message;
+    return error.signal;
 }
 
 pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
@@ -1008,6 +1206,8 @@ pub fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
         .minus => vm.getUnaryPrimitive(.neg),
         .dot => vm.getUnaryPrimitive(.value),
         .colon => vm.getUnaryPrimitive(.identity),
+        // `'x` at the top level parses as the char `'` applied, which `eval` signals.
+        .apostrophe => vm.createValue(.char, '\''),
         .l_angle_bracket => vm.getUnaryPrimitive(.asc),
         .equal => vm.getUnaryPrimitive(.group),
         .r_angle_bracket => vm.getUnaryPrimitive(.desc),
@@ -1276,6 +1476,9 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         for (stack.items) |v| v.deref(vm.gpa);
         stack.deinit(vm.gpa);
     }
+    // The counts of the `do` loops in progress, innermost last.
+    var counters: std.ArrayList(i64) = .empty;
+    defer counters.deinit(vm.gpa);
 
     const code = lambda.bytecode;
     var pc: usize = 0;
@@ -1321,24 +1524,61 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 slots[slot] = value.ref();
             },
             .amend => {
-                // `.[target;index;op;value]` with the value pushed first, then the index.
-                // Only the plain assignment `index` `()` with `:` is done so far; compound
-                // and indexed amends are still to come.
+                // `.[target;index;op;value]` with the value pushed first, then the index:
+                // `x::v` has index `()` and `:`, `x+:v` index `()` and `+`, `x[i]:v` the
+                // index list `,i`. The value stays on the stack as the expression's value.
                 const target = code[pc];
                 const operator: Operator = @fromBackingInt(@as(@typeInfo(Operator).@"enum".tag_type, @intCast(code[pc + 1])));
                 pc += 2;
                 const index = stack.pop().?;
                 defer index.deref(vm.gpa);
                 const value = stack.items[stack.items.len - 1];
-                if (operator != .assign or !index.isList() or index.count() != 0) return error.nyi;
-                if (target >= @backingInt(Compiler.ByteCode.global)) {
+                const is_global = target >= @backingInt(Compiler.ByteCode.global);
+                const plain = operator == .assign and index.isList() and index.count() == 0;
+                const new_value = if (plain) value.ref() else amended: {
+                    const old = if (is_global)
+                        try vm.readGlobal(lambda.globals[target - @backingInt(Compiler.ByteCode.global)])
+                    else
+                        (slots[slotIndex(lambda, target)] orelse return error.identifier).ref();
+                    defer old.deref(vm.gpa);
+                    break :amended try vm.amendValue(old, index, operator, value);
+                };
+                defer new_value.deref(vm.gpa);
+                if (is_global) {
                     const symbol = try vm.createValue(.symbol, lambda.globals[target - @backingInt(Compiler.ByteCode.global)]);
                     defer symbol.deref(vm.gpa);
-                    _ = try q.operators.assign(vm, symbol, value);
+                    _ = try q.operators.assign(vm, symbol, new_value);
                 } else {
                     const slot = slotIndex(lambda, target);
                     if (slots[slot]) |old| old.deref(vm.gpa);
-                    slots[slot] = value.ref();
+                    slots[slot] = new_value.ref();
+                }
+            },
+            .signal => {
+                const v = stack.pop().?;
+                defer v.deref(vm.gpa);
+                return vm.raiseSignal(v);
+            },
+            .jump => pc = pc + std.mem.readInt(u16, code[pc..][0..2], .little),
+            .jump_back => pc = pc - std.mem.readInt(u16, code[pc..][0..2], .little),
+            .jump_if_false => {
+                const condition = stack.pop().?;
+                defer condition.deref(vm.gpa);
+                if (try truthy(condition)) pc += 2 else pc = pc + std.mem.readInt(u16, code[pc..][0..2], .little);
+            },
+            .do_init => {
+                const count = stack.pop().?;
+                defer count.deref(vm.gpa);
+                try counters.append(vm.gpa, try loopCount(count));
+            },
+            .do_step => {
+                const remaining = &counters.items[counters.items.len - 1];
+                if (remaining.* > 0) {
+                    remaining.* -= 1;
+                    pc += 2;
+                } else {
+                    _ = counters.pop();
+                    pc = pc + std.mem.readInt(u16, code[pc..][0..2], .little);
                 }
             },
             .call => {
@@ -1361,7 +1601,7 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 pc += 1;
                 try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
             },
-            .print, .comma => unreachable,
+            .comma => unreachable,
             inline else => |t| {
                 const name = @tagName(t);
                 if (comptime std.mem.startsWith(u8, name, "local_")) {
@@ -1400,6 +1640,118 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
 /// The array index of a q slot: parameters are slots 1 to 8, locals start at 9.
 fn slotIndex(lambda: Value.Lambda, slot: u8) usize {
     return if (slot <= 8) slot - 1 else lambda.params.len + slot - 9;
+}
+
+/// `.[old;index;op;value]` as compound and indexed assignment produce it: an empty index
+/// applies `op` to the whole value (`x+:v`), and otherwise `index` holds one index per
+/// dimension, each an integer, a list of integers or a hole for every item.
+pub fn amendValue(vm: *Vm, old: *Value, index: *Value, operator: Operator, value: *Value) RunError!*Value {
+    if (!index.isList()) return error.type;
+    if (index.count() == 0) return vm.applyOperator(operator, old, value);
+    return vm.amendAt(old, index, 0, operator, value);
+}
+
+fn applyOperator(vm: *Vm, operator: Operator, x: *Value, y: *Value) RunError!*Value {
+    if (operator == .assign) return y.ref();
+    const function = vm.getOperator(operator);
+    defer function.deref(vm.gpa);
+    var operands = [_]*Value{ x, y };
+    return vm.applyImpl(function, &operands);
+}
+
+fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, operator: Operator, value: *Value) RunError!*Value {
+    if (!old.isList()) return error.type;
+    const at = try q.operators.itemAt(vm, index, dim);
+    defer at.deref(vm.gpa);
+    const last = dim + 1 == index.count();
+    const all = at.isEmpty() or (at.as == .unary_primitive and at.as.unary_primitive == .identity);
+
+    if (!all and !at.isList()) {
+        // One position, with the value or the amended item put in its place.
+        const i = try position(at, old.count());
+        const item = try q.operators.itemAt(vm, old, i);
+        defer item.deref(vm.gpa);
+        const new_item = if (last) try vm.applyOperator(operator, item, value) else try vm.amendAt(item, index, dim + 1, operator, value);
+        defer new_item.deref(vm.gpa);
+        return vm.withItem(old, i, new_item);
+    }
+
+    // Every position, or each of a list of them; a value with one item per position is
+    // spread over them, anything else goes to each (`a[0 1]:8 9` and `a[0 1]:9`).
+    const count = if (all) old.count() else at.count();
+    const spread = value.isList() and value.count() == count;
+    var result = old.ref();
+    errdefer result.deref(vm.gpa);
+    for (0..count) |k| {
+        const i = if (all) k else i: {
+            const which = try q.operators.itemAt(vm, at, k);
+            defer which.deref(vm.gpa);
+            break :i try position(which, old.count());
+        };
+        const v = if (spread) try q.operators.itemAt(vm, value, k) else value.ref();
+        defer v.deref(vm.gpa);
+        const item = try q.operators.itemAt(vm, result, i);
+        defer item.deref(vm.gpa);
+        const new_item = if (last) try vm.applyOperator(operator, item, v) else try vm.amendAt(item, index, dim + 1, operator, v);
+        defer new_item.deref(vm.gpa);
+        const next = try vm.withItem(result, i, new_item);
+        result.deref(vm.gpa);
+        result = next;
+    }
+    return result;
+}
+
+/// An index into a list of `count` items: an integer in range, or `length` as q says.
+fn position(at: *Value, count: usize) error{ type, length }!usize {
+    const i: i64 = switch (at.as) {
+        .boolean => |b| @intFromBool(b),
+        .short => |v| v,
+        .int => |v| v,
+        .long => |v| v,
+        else => return error.type,
+    };
+    if (i < 0 or i >= count) return error.length;
+    return @intCast(i);
+}
+
+/// A copy of `list` with item `i` replaced. A typed list only takes an atom of its own
+/// type, as `1 2 3` cannot hold `` `s `` or `1h`; a general list takes anything.
+fn withItem(vm: *Vm, list: *Value, i: usize, item: *Value) RunError!*Value {
+    switch (list.as) {
+        .list => |items| {
+            const result = try vm.allocValue(.list, items.len);
+            for (result.as.list, items) |*r, v| r.* = v.ref();
+            result.as.list[i].deref(vm.gpa);
+            result.as.list[i] = item.ref();
+            return result;
+        },
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| {
+            const atom_tag = comptime @as(Value.Type, @fromBackingInt(-@backingInt(tag)));
+            if (item.as != atom_tag) return error.type;
+            const result = try vm.allocValue(tag, items.len);
+            @memcpy(@field(result.as, @tagName(tag)), items);
+            @field(result.as, @tagName(tag))[i] = @field(item.as, @tagName(atom_tag));
+            return result;
+        },
+        else => return error.type,
+    }
 }
 
 /// Indexing a list, as `x[i]` or `x i`: an integer picks an item, with a null shaped like
@@ -2966,6 +3318,14 @@ test "lambdas take q's implicit parameters, locals and projections" {
     try expectEval(vm, "{x+y}[1]", "{x+y}[1]");
     try expectEval(vm, "{x+y}[1;] 2", "3");
     try expectEval(vm, "{x+y}[;2] 1", "3");
+    try expectEval(vm, "{x+y+z}[;2][1;3]", "6");
+    try expectEval(vm, "{x+y+z}[1;;3][2]", "6");
+    try expectEval(vm, "{x+y+z}[1][2][3]", "6");
+    try expectEval(vm, "{x+y+z}[;;3][1]", "{x+y+z}[1;;3]");
+    try expectEval(vm, "{x+y+z}[;;3][1][2]", "6");
+    try expectEval(vm, "f:{x+y+z};g:f[1];h:g[2];h 3", "6");
+    try expectEval(vm, "hn:{(x;y)}[;0];hy:hn 1;hy", "1 0");
+    try expectEval(vm, "{x+y}[;][1;2]", "3");
     try expectEval(vm, "{a:1;a+x} 2", "3");
     try expectEval(vm, "{a:x;a}[5]", "5");
     try expectEval(vm, "{x:x+1;x} 1", "2");
@@ -3128,4 +3488,130 @@ test "lambda bytecode follows q's encoding" {
     try expectEval(vm, "a", "7");
     try expectEval(vm, "{a:5}[]", "5");
     try expectEval(vm, "{x:5}[1]", "5");
+}
+
+fn expectSignal(vm: *Vm, source: [:0]const u8, message: []const u8) !void {
+    try testing.expectError(error.signal, vm.evalSource(source, .q, "<test>"));
+    try testing.expectEqualStrings(message, vm.signal_message.?);
+}
+
+test "conditionals, control words, return and signal follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // `$[c;a;b]`, at the top level and compiled, takes integer-like atoms as conditions.
+    try expectEval(vm, "$[1b;1;2]", "1");
+    try expectEval(vm, "$[0;1;2]", "2");
+    try expectEval(vm, "$[0N;1;2]", "1");
+    try expectEval(vm, "$[0x00;1;2]", "2");
+    try expectEval(vm, "$[2023.01.01;1;2]", "1");
+    try expectEval(vm, "$[1;1;0;2;3]", "1");
+    try expectEval(vm, "$[0;1;0;2;3]", "3");
+    try expectEval(vm, "$[0;1;1;2;3]", "2");
+    try expectEval(vm, "$[0;1;0;2]", "::");
+    try expectEval(vm, "$[1;;2]", "::");
+    try expectEval(vm, "$[1;2;]", "2");
+    try expectEval(vm, "$[1;1;'`boom]", "1");
+    for ([_][:0]const u8{ "$[1 2;1;2]", "$[`a;1;2]", "$[1.0;1;2]", "$[0n;1;2]", "$[(::);1;2]", "$[1;2]" }) |source| {
+        try testing.expectError(error.type, vm.evalSource(source, .q, "<test>"));
+    }
+    try expectEval(vm, "{$[x;1;2]}[0]", "2");
+    try expectEval(vm, "{$[x;:1;2];3}[1]", "1");
+    try expectEval(vm, "{$[x;:1;2];3}[0]", "3");
+    try expectEval(vm, "{r:$[x;1;2];r*10}[0]", "20");
+    try expectEval(vm, "{$[x;:`yes;:`no]}[1]", "`yes");
+
+    try expectEval(vm, "if[1;2]", "::");
+    try expectEval(vm, "if[0;'`boom]", "::");
+    try expectEval(vm, "{if[x;:5];6}[1]", "5");
+    try expectEval(vm, "{if[x;:5];6}[0]", "6");
+    try expectEval(vm, "{if[x;'`boom];1}[0]", "1");
+    try expectSignal(vm, "{if[x;'`boom];1}[1]", "boom");
+
+    try expectEval(vm, "while[0;1]", "::");
+    try expectEval(vm, "{while[x;x-:1];x}[3]", "0");
+    try expectEval(vm, "n:3;while[n;n-:1];n", "0");
+    try expectEval(vm, "{do[3;x+:1];x}[0]", "3");
+    try expectEval(vm, "{do[0;x:1];x}[5]", "5");
+    try expectEval(vm, "a:0;b:0;{do[2;a+:1;b+:2];(a;b)}[]", "2 4");
+    try expectEval(vm, "c:0;do[4;c+:1];c", "4");
+
+    try expectEval(vm, "{:x;y}[1;2]", "1");
+    try expectEval(vm, "{:x}[3]", "3");
+    try expectEval(vm, "{`a}[]", "`a");
+    try expectEval(vm, "{`a`b}[]", "`a`b");
+    try expectEval(vm, "{(::)x}[3]", "3");
+
+    try expectSignal(vm, "{'`err}[]", "err");
+    try expectSignal(vm, "{'\"msg\"}[]", "msg");
+    try expectSignal(vm, "{'1}[]", "stype");
+    try expectSignal(vm, "{'x}[`]", "");
+    try expectSignal(vm, "'`boom", "boom");
+
+    // The bytes q shows through `value`, minus its trailing stack-size byte.
+    try expectEval(vm, "(value {$[x;1;2]})[0]", "97 6 6 0 13 5 3 0 160 0");
+    try expectEval(vm, "(value {if[x;:1];2})[0]", "97 6 6 0 13 32 0 2 16 2 160 0");
+    try expectEval(vm, "(value {:x})[0]", "97 32 0 0");
+    try expectEval(vm, "(value {:x;y})[0]", "97 32 0 2 98 0");
+    try expectEval(vm, "(value {while[x>0;x-:1];x})[0]", "12 97 74 6 11 0 13 11 4 1 2 2 9 13 0 16 2 97 0");
+    try expectEval(vm, "(value {do[3;x+:1];x})[0]", "160 7 8 11 0 13 11 4 1 1 2 9 10 0 16 2 97 0");
+    try expectEval(vm, "(value {'x})[0]", "97 1 0");
+    try expectEval(vm, "(value {if[x;1;2]})[0]", "97 6 6 0 13 2 160 2 16 0");
+}
+
+test "compound and indexed assignment amend as q does" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "{x+:1;x}[1]", "2");
+    try expectEval(vm, "{x-:1;x}[5]", "4");
+    try expectEval(vm, "{x*:3;x}[2]", "6");
+    try expectEval(vm, "{x*:2;x}[1 2 3]", "2 4 6");
+    try expectEval(vm, "g:1 2 3;{g+:10}[];g", "11 12 13");
+    try expectEval(vm, "(value {x+:1})[0]", "13 11 4 1 1 0");
+    try expectEval(vm, "(value {a+:1})[3]", "``a");
+    try expectEval(vm, "c:0;c+:1", "::");
+    try expectEval(vm, "c", "1");
+    try expectEval(vm, "c::9;c", "9");
+    try expectEval(vm, "x:1 2 3;x[0]:5;x", "5 2 3");
+    try expectEval(vm, "x[0]+:5;x", "10 2 3");
+    try expectEval(vm, "x[0 1]:7;x", "7 7 3");
+    try expectEval(vm, "m:(1 2;3 4);m[;1]:9;m", "(1 9;3 9)");
+
+    try expectEval(vm, "{a:1 2 3;a[0]:9;a}[]", "9 2 3");
+    try expectEval(vm, "{a:1 2 3;a[0]+:9;a}[]", "10 2 3");
+    try expectEval(vm, "{a:1 2 3;a[0 1]:9;a}[]", "9 9 3");
+    try expectEval(vm, "{a:1 2 3;a[0 1]:8 9;a}[]", "8 9 3");
+    try expectEval(vm, "{a:(1 2;3 4);a[0;1]:9;a}[]", "(1 9;3 4)");
+    try expectEval(vm, "{a:(1 2;3 4);a[;1]:9;a}[]", "(1 9;3 9)");
+    try expectEval(vm, "{a:(1 2;3 4);a[0]:9;a}[]", "(9;3 4)");
+    try expectEval(vm, "{a:(1;`s);a[0]:2.5;a}[]", "(2.5;`s)");
+    try expectEval(vm, "g:1 2 3;{g[0]:7}[]", "::");
+    try expectEval(vm, "g", "7 2 3");
+    try expectEval(vm, "{g[1]+:10}[];g", "7 12 3");
+    for ([_][:0]const u8{ "{a:1 2 3;a[0;1]:9;a}[]", "{a:1 2 3;a[0]:`s;a}[]", "{a:1 2 3;a[0]:1.5;a}[]", "{a:1 2 3;a[0]:1h;a}[]" }) |source| {
+        try testing.expectError(error.type, vm.evalSource(source, .q, "<test>"));
+    }
+    for ([_][:0]const u8{ "{a:1 2 3;a[5]:9;a}[]", "{a:1 2 3;a[-1]:9;a}[]" }) |source| {
+        try testing.expectError(error.length, vm.evalSource(source, .q, "<test>"));
+    }
+    try expectEval(vm, "(value {a[0]:1})[0]", "13 12 160 82 4 129 0 0");
+    try expectEval(vm, "(value {a[0;1]:1})[0]", "13 13 12 160 10 2 4 129 0 0");
+}
+
+test "lambdas span indented continuation lines" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // A line starting with whitespace continues the statement, as q reads scripts.
+    try expectEval(vm, "{\n x+1} 2", "3");
+    try expectEval(vm, "d:{[p]\n  q:p*2;\n\n  q+1}\nd 3", "7");
+    try expectEval(vm, "g:{\n  / a comment\n  x*3}\ng 2", "6");
+    try expectEval(vm, "e:{x\n\t+y}\ne[1;2]", "3");
+    try expectEval(vm, "a:1\n +2\na", "3");
+    // An unindented line ends the statement even inside a lambda, so this cannot parse.
+    try testing.expectError(error.parse, vm.evalSource("b:{\nx+1}\nb 2", .q, "<test>"));
 }
