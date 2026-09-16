@@ -34,21 +34,25 @@ pub fn multiply(vm: *Vm, x: *Value, y: *Value) !*Value {
 }
 
 /// Division always produces a float, with `0w`, `-0w` and `0n` for division by zero.
-pub fn divide(vm: *Vm, x: *Value, y: *Value) !*Value {
+pub fn divide(vm: *Vm, x: *Value, y: *Value) ArithmeticError!*Value {
+    if (x.isList() or y.isList()) return listArithmetic(vm, x, y, .divide);
     if (Temporal.of(x) != null or Temporal.of(y) != null) return temporalArithmetic(vm, x, y, .divide);
-    const a = Numeric.of(x) orelse return arithmeticError(x, y);
-    const b = Numeric.of(y) orelse return arithmeticError(x, y);
+    const a = Numeric.of(x) orelse return error.type;
+    const b = Numeric.of(y) orelse return error.type;
     return vm.createValue(.float, a.toFloat() / b.toFloat());
 }
 
 const Arithmetic = enum { add, subtract, multiply, divide };
 
+const ArithmeticError = Allocator.Error || error{ type, length, nyi };
+
 /// Atom arithmetic with q's promotion: booleans, bytes and shorts compute as ints, a null
 /// operand gives a null result, and the result takes the wider of the two kinds.
-fn arithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) !*Value {
+fn arithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) ArithmeticError!*Value {
+    if (x.isList() or y.isList()) return listArithmetic(vm, x, y, op);
     if (Temporal.of(x) != null or Temporal.of(y) != null) return temporalArithmetic(vm, x, y, op);
-    const a = Numeric.of(x) orelse return arithmeticError(x, y);
-    const b = Numeric.of(y) orelse return arithmeticError(x, y);
+    const a = Numeric.of(x) orelse return error.type;
+    const b = Numeric.of(y) orelse return error.type;
     const kind: Numeric.Kind = @fromBackingInt(@max(@backingInt(a.kind()), @backingInt(b.kind())));
     switch (kind) {
         .int => {
@@ -66,9 +70,66 @@ fn arithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) !*Value {
     }
 }
 
-fn arithmeticError(x: *Value, y: *Value) error{ nyi, type } {
-    // Vector arithmetic is not implemented yet; anything else is a type error.
-    return if (x.isList() or y.isList()) error.nyi else error.type;
+/// Arithmetic over lists, item by item: an atom pairs with every item of a list, and two
+/// lists pair up and must be the same length. Each pair is computed as atoms and the results
+/// unified, so `1 2 3+1` is a long list and `(1 2;3)+(1;2 3)` a general list. This is the
+/// simple path; typed fast paths belong with the primitives of section 6. Byte lists are a
+/// type error, as in q, although a byte atom computes.
+fn listArithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) ArithmeticError!*Value {
+    if (x.as == .byte_list or y.as == .byte_list) return error.type;
+    const x_len: ?usize = if (x.isList()) x.count() else null;
+    const y_len: ?usize = if (y.isList()) y.count() else null;
+    if (x_len != null and y_len != null and x_len.? != y_len.?) return error.length;
+    const len = x_len orelse y_len.?;
+    // An empty list stays as it is; q would still promote its type (`(`long$())+1.5` is
+    // `` `float$() ``), which the typed paths will do.
+    if (len == 0) return (if (x_len != null) x else y).ref();
+
+    const results = try vm.gpa.alloc(*Value, len);
+    defer vm.gpa.free(results);
+    var done: usize = 0;
+    defer for (results[0..done]) |r| r.deref(vm.gpa);
+    for (0..len) |i| {
+        const a = if (x_len != null) try itemAt(vm, x, i) else x.ref();
+        defer a.deref(vm.gpa);
+        const b = if (y_len != null) try itemAt(vm, y, i) else y.ref();
+        defer b.deref(vm.gpa);
+        results[done] = if (op == .divide) try divide(vm, a, b) else try arithmetic(vm, a, b, op);
+        done += 1;
+    }
+    return vm.enlist(results);
+}
+
+/// The list type holding atoms of `tag`, or the atom type of the list type `tag`.
+fn counterpart(comptime tag: Value.Type) Value.Type {
+    return @fromBackingInt(-@backingInt(tag));
+}
+
+/// Item `i` of a list as a value of its own: the referenced item of a general list, or a
+/// fresh atom from a typed list.
+fn itemAt(vm: *Vm, list: *Value, i: usize) Allocator.Error!*Value {
+    switch (list.as) {
+        .list => |items| return items[i].ref(),
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| return vm.createValue(comptime counterpart(tag), items[i]),
+        else => unreachable,
+    }
 }
 
 /// Integer arithmetic wraps, so `0Wi+1i` becomes `0Ni` as in q.
@@ -223,7 +284,7 @@ fn temporalArithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) !*
 
     // One side is a number. Commutative operations put the temporal value first.
     const t, const number, const flipped = if (tx) |a| .{ a, y, false } else .{ ty.?, x, true };
-    const n = Numeric.of(number) orelse return arithmeticError(x, y);
+    const n = Numeric.of(number) orelse return error.type;
     switch (op) {
         .divide => {
             const raw = t.toFloat();
@@ -480,14 +541,25 @@ pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
 /// atom (`2#1` is `1 1`), from the end for negative `n` (`-2#1 2 3` is `2 3`), and filling an
 /// empty list with nulls (`2#""` is `"  "`). `0#y` is the empty list of `y`'s type, which is
 /// how q spells typed empties: `0#0` is `` `long$() ``.
-pub fn take(vm: *Vm, x: *Value, y: *Value) !*Value {
+const TakeError = Allocator.Error || error{ type, length, domain, nyi };
+
+/// `x#y`: `n#y` takes `n` items of `y`, a list of counts reshapes, and a count or a list of
+/// keys applied to a dictionary takes its entries.
+pub fn take(vm: *Vm, x: *Value, y: *Value) TakeError!*Value {
+    if (y.as == .dict) return takeDict(vm, x, y);
     const n: i64 = switch (x.as) {
         .short => |v| if (v == @backingInt(Value.Short.null)) return error.type else v,
         .int => |v| if (v == @backingInt(Value.Int.null)) return error.type else v,
         .long => |v| if (v == @backingInt(Value.Long.null)) return error.type else v,
-        .short_list, .int_list, .long_list => return error.nyi, // reshape
+        .long_list => |dims| return reshape(vm, dims, y),
         else => return error.type,
     };
+    return takeItems(vm, y, n, 0);
+}
+
+/// `n` items of `y` from `start` items in: a list is cycled through and an atom repeated,
+/// a negative `n` takes from the end, and an empty list gives nulls (`2#""` is `"  "`).
+fn takeItems(vm: *Vm, y: *Value, n: i64, start: usize) TakeError!*Value {
     const len: usize = @intCast(@abs(n));
     switch (y.as) {
         inline .list,
@@ -516,9 +588,9 @@ pub fn take(vm: *Vm, x: *Value, y: *Value) !*Value {
                 for (out) |*item| item.* = try nullOf(vm, tag);
                 return result;
             }
-            const start: usize = if (n >= 0) 0 else (items.len - len % items.len) % items.len;
+            const first: usize = if (n >= 0) start else (items.len - len % items.len) % items.len;
             for (out, 0..) |*item, i| {
-                const source = items[(start + i) % items.len];
+                const source = items[(first + i) % items.len];
                 item.* = if (tag == .list) source.ref() else source;
             }
             return result;
@@ -547,7 +619,7 @@ pub fn take(vm: *Vm, x: *Value, y: *Value) !*Value {
             for (@field(result.as, @tagName(list_tag))) |*item| item.* = atom;
             return result;
         },
-        .dict => return error.nyi,
+        .dict => unreachable,
         .lambda,
         .unary_primitive,
         .operator,
@@ -565,6 +637,225 @@ pub fn take(vm: *Vm, x: *Value, y: *Value) !*Value {
             for (result.as.list) |*item| item.* = y.ref();
             return result;
         },
+    }
+}
+
+/// `2 3#y` reshapes `y` into rows, `(0 1 2;3 4 5)`, cycling through `y` as take does and
+/// nesting for further dimensions. One of two dimensions may be `0N`: `0N 3#til 7` cuts rows
+/// of 3 with a short last row and `3 0N#til 7` spreads the items over 3 rows.
+fn reshape(vm: *Vm, dims: []const i64, y: *Value) TakeError!*Value {
+    if (dims.len == 0) return error.length;
+    var nulls: usize = 0;
+    for (dims) |d| {
+        if (d == @backingInt(Value.Long.null)) nulls += 1 else if (d <= 0) return error.length;
+    }
+    if (nulls == 0) {
+        var offset: usize = 0;
+        return reshapeFrom(vm, dims, y, &offset);
+    }
+    if (dims.len != 2 or nulls == 2) return error.domain;
+
+    const len = if (y.isList()) y.count() else 1;
+    var rows: std.ArrayList(*Value) = .empty;
+    defer {
+        for (rows.items) |row| row.deref(vm.gpa);
+        rows.deinit(vm.gpa);
+    }
+    if (dims[0] == @backingInt(Value.Long.null)) {
+        const width: usize = @intCast(dims[1]);
+        var offset: usize = 0;
+        while (offset < len) : (offset += width) {
+            const row = try takeItems(vm, y, @intCast(@min(width, len - offset)), offset);
+            errdefer row.deref(vm.gpa);
+            try rows.append(vm.gpa, row);
+        }
+    } else {
+        const count: usize = @intCast(dims[0]);
+        for (0..count) |i| {
+            const from = i * len / count;
+            const to = (i + 1) * len / count;
+            const row = try takeItems(vm, y, @intCast(to - from), from);
+            errdefer row.deref(vm.gpa);
+            try rows.append(vm.gpa, row);
+        }
+    }
+    if (rows.items.len == 0) return vm.allocValue(.list, 0);
+    return vm.enlist(rows.items);
+}
+
+fn reshapeFrom(vm: *Vm, dims: []const i64, y: *Value, offset: *usize) TakeError!*Value {
+    const count: usize = @intCast(dims[0]);
+    if (dims.len == 1) {
+        const result = try takeItems(vm, y, dims[0], offset.*);
+        offset.* += count;
+        return result;
+    }
+    const rows = try vm.gpa.alloc(*Value, count);
+    defer vm.gpa.free(rows);
+    var done: usize = 0;
+    defer for (rows[0..done]) |row| row.deref(vm.gpa);
+    for (rows) |*row| {
+        row.* = try reshapeFrom(vm, dims[1..], y, offset);
+        done += 1;
+    }
+    return vm.enlist(rows);
+}
+
+/// `n#d` takes the first (or last) `n` entries of a dictionary, and `keys#d` the entries for
+/// `keys`, with a null like the dictionary's first value in place of a missing key:
+/// `` `a`x#`a`b`c!1 2 3 `` is `` `a`x!1 0N ``.
+fn takeDict(vm: *Vm, x: *Value, y: *Value) TakeError!*Value {
+    const entries = y.as.dict;
+    switch (x.as) {
+        .short, .int, .long => {
+            const keys = try take(vm, x, entries.keys);
+            errdefer keys.deref(vm.gpa);
+            const values = try take(vm, x, entries.values);
+            errdefer values.deref(vm.gpa);
+            return vm.createValue(.dict, .{ .keys = keys, .values = values });
+        },
+        .list,
+        .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => {
+            // Keys of another type than the dictionary's are a type error, as `2 3#`a`b!1 2`.
+            if (std.meta.activeTag(x.as) != std.meta.activeTag(entries.keys.as)) return error.type;
+            const len = x.count();
+            const found = try vm.gpa.alloc(*Value, len);
+            defer vm.gpa.free(found);
+            var done: usize = 0;
+            defer for (found[0..done]) |v| v.deref(vm.gpa);
+            for (0..len) |i| {
+                const key = try itemAt(vm, x, i);
+                defer key.deref(vm.gpa);
+                found[done] = if (findKey(entries.keys, key)) |index| try itemAt(vm, entries.values, index) else try nullLike(vm, entries.values);
+                done += 1;
+            }
+            const values = if (len == 0) try takeItems(vm, entries.values, 0, 0) else try vm.enlist(found);
+            errdefer values.deref(vm.gpa);
+            const keys = x.ref();
+            errdefer keys.deref(vm.gpa);
+            return vm.createValue(.dict, .{ .keys = keys, .values = values });
+        },
+        else => return error.type,
+    }
+}
+
+/// The position of an atom `key` in a typed list of keys, or null when it is not there or
+/// the types differ. General keys are not searched yet.
+fn findKey(keys: *Value, key: *Value) ?usize {
+    switch (keys.as) {
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| {
+            const atom_tag = comptime counterpart(tag);
+            if (key.as != atom_tag) return null;
+            const needle = @field(key.as, @tagName(atom_tag));
+            for (items, 0..) |item, i| if (item == needle) return i;
+            return null;
+        },
+        else => return null,
+    }
+}
+
+/// The value a missing dictionary key reads as: a null shaped like the first value.
+fn nullLike(vm: *Vm, values: *Value) Allocator.Error!*Value {
+    switch (values.as) {
+        .list => |items| return if (items.len == 0) vm.allocValue(.list, 0) else nullOfValue(vm, items[0]),
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |_, tag| return vm.createValue(comptime counterpart(tag), try nullOf(vm, tag)),
+        else => unreachable,
+    }
+}
+
+/// The null of a value's own type: `0N` for a long, `""` for a string, `()` for a general
+/// list and `::` for anything else.
+fn nullOfValue(vm: *Vm, value: *Value) Allocator.Error!*Value {
+    switch (value.as) {
+        inline .boolean,
+        .byte,
+        .short,
+        .int,
+        .long,
+        .real,
+        .float,
+        .char,
+        .symbol,
+        .timestamp,
+        .month,
+        .date,
+        .datetime,
+        .timespan,
+        .minute,
+        .second,
+        .time,
+        => |_, tag| return vm.createValue(tag, try nullOf(vm, comptime counterpart(tag))),
+        inline .list,
+        .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |_, tag| return vm.allocValue(tag, 0),
+        else => return vm.getUnaryPrimitive(.identity),
     }
 }
 
@@ -595,7 +886,10 @@ pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
         .symbol => |name| Target.fromName(vm.internedString(name)) orelse return error.domain,
         // A capital letter parses text, as `"J"$"12"`.
         .char => |letter| if (std.ascii.isUpper(letter)) return parseCast(vm, letter, y) else Target.fromLetter(letter) orelse return error.domain,
-        else => return error.nyi,
+        // A long pads a string, as `5$"ab"`, and a short casts by type number, as `5h$1.5`.
+        .long => |n| return pad(vm, n, y),
+        .short => |n| return castByTypeNumber(vm, n, y),
+        else => return error.type,
     };
     return castTo(vm, target, y);
 }
@@ -636,7 +930,54 @@ const Target = union(enum) {
     }
 };
 
-const CastError = Allocator.Error || error{ type, nyi, domain };
+const CastError = Allocator.Error || error{ type, nyi, domain, length };
+
+/// `n$s` pads the string `s` with spaces to `n` chars or cuts it to fit: `5$"ab"` is
+/// `"ab   "`, `-5$"ab"` is `"   ab"` and `-3$"abcdef"` is `"def"`. A list of strings is
+/// padded string by string, and `()` counts as an empty string.
+fn pad(vm: *Vm, n: i64, y: *Value) CastError!*Value {
+    if (n == @backingInt(Value.Long.null)) return error.length;
+    switch (y.as) {
+        .char_list => |text| return padText(vm, n, text),
+        .list => |items| {
+            if (items.len == 0) return padText(vm, n, "");
+            const results = try vm.gpa.alloc(*Value, items.len);
+            defer vm.gpa.free(results);
+            var done: usize = 0;
+            defer for (results[0..done]) |r| r.deref(vm.gpa);
+            for (items) |item| {
+                if (item.as != .char_list) return error.type;
+                results[done] = try padText(vm, n, item.as.char_list);
+                done += 1;
+            }
+            return vm.enlist(results);
+        },
+        else => return error.type,
+    }
+}
+
+fn padText(vm: *Vm, n: i64, text: []const u8) Allocator.Error!*Value {
+    const len: usize = @intCast(@abs(n));
+    const result = try vm.allocValue(.char_list, len);
+    const out = result.as.char_list;
+    @memset(out, ' ');
+    const copied = @min(len, text.len);
+    if (n >= 0) @memcpy(out[0..copied], text[0..copied]) else @memcpy(out[len - copied ..], text[text.len - copied ..]);
+    return result;
+}
+
+/// `5h$y` casts by q's type number, read off `.Q.t`: `5h$1.5` is `2h` and `10h$1 2` a
+/// string. 0 leaves `y` as it is, and a negative number parses text, so `-7h$"12"` is 12.
+fn castByTypeNumber(vm: *Vm, n: i16, y: *Value) CastError!*Value {
+    const letters = " bg xhijefcspmdznuvts";
+    if (n == 0) return y.ref();
+    const index = @abs(n);
+    if (index >= letters.len) return error.type;
+    const letter = letters[index];
+    if (letter == ' ' or letter == 'g') return error.type;
+    if (n < 0) return parseCast(vm, std.ascii.toUpper(letter), y);
+    return castTo(vm, Target.fromLetter(letter).?, y);
+}
 
 /// `"J"$"12"` and the other capital letters parse a string, a char, or each string of a
 /// list of strings; `()` gives the typed empty.

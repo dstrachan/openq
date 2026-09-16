@@ -751,7 +751,15 @@ pub const Dictionary = struct {
     }
 
     fn format(data: Dictionary.Data, w: *Io.Writer) !void {
-        try w.print("{f}!{f}", .{ data.dict.keys.fmt(data.vm), data.dict.values.fmt(data.vm) });
+        // q parenthesises keys whose display would not read as one operand: a typed empty
+        // (`` (`symbol$())!`long$() ``) or a typed singleton (`` (,`a)!,1 ``). A general
+        // list brings its own parentheses and a singleton general list stays bare.
+        const keys = data.dict.keys;
+        const wrap = keys.isList() and keys.as != .list and keys.count() < 2;
+        if (wrap) try w.writeByte('(');
+        try w.print("{f}", .{keys.fmt(data.vm)});
+        if (wrap) try w.writeByte(')');
+        try w.print("!{f}", .{data.dict.values.fmt(data.vm)});
     }
 };
 

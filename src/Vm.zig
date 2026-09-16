@@ -890,6 +890,13 @@ fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
                             'n' => try w.writeByte('\n'),
                             'r' => try w.writeByte('\r'),
                             '\\' => try w.writeByte('\\'),
+                            '"' => try w.writeByte('"'),
+                            '/' => try w.writeByte('/'),
+                            // Three octal digits, as `"\001"`; the tokenizer checked them.
+                            '0'...'3' => {
+                                try w.writeByte(std.fmt.parseInt(u8, slice[index + 1 .. index + 4], 8) catch unreachable);
+                                index += 2;
+                            },
                             else => unreachable,
                         }
                         index += 2;
@@ -1783,7 +1790,7 @@ test "atom arithmetic promotes as q does" {
     try expectEval(vm, "1h%0", "0w");
 
     try testing.expectError(error.type, vm.evalSource("`a+1", .q, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("1 2+3", .q, "<test>"));
+    try expectEval(vm, "1 2+3", "4 5");
 }
 
 test "neg, first, enlist and match on the numeric types" {
@@ -2447,4 +2454,164 @@ test ".z clock variables read the clock in local time and UTC" {
     try expectEval(vm, ".z.foo", "1");
     try expectEval(vm, ".z.D:1", "1");
     try expectEval(vm, "type .z.D", "-14h");
+}
+
+test "pad and cast by type number" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "5$\"ab\"", "\"ab   \"");
+    try expectEval(vm, "-5$\"ab\"", "\"   ab\"");
+    try expectEval(vm, "1$\"abc\"", ",\"a\"");
+    try expectEval(vm, "0$\"abc\"", "\"\"");
+    try expectEval(vm, "5$(\"ab\";\"cde\")", "(\"ab   \";\"cde  \")");
+    try expectEval(vm, "5$\"\"", "\"     \"");
+    try expectEval(vm, "5$()", "\"     \"");
+    try expectEval(vm, "5$enlist \"a\"", "\"a    \"");
+    try expectEval(vm, "-3$\"abcdef\"", "\"def\"");
+    try expectEval(vm, "3$\"abcdef\"", "\"abc\"");
+    try testing.expectError(error.type, vm.evalSource("5$\"a\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("5$1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("5$`ab", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("5i$\"ab\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("5f$\"ab\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("2 3$\"ab\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("5$(\"ab\";\"c\")", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("0N$\"ab\"", .q, "<test>"));
+
+    try expectEval(vm, "5h$\"abc\"", "97 98 99h");
+    try expectEval(vm, "5h$1.5", "2h");
+    try expectEval(vm, "7h$1.5", "2");
+    try expectEval(vm, "-5h$\"12\"", "12h");
+    try expectEval(vm, "-7h$\"1\"", "1");
+    try expectEval(vm, "0h$\"abc\"", "\"abc\"");
+    try expectEval(vm, "0h$1 2", "1 2");
+    try expectEval(vm, "10h$1 2", "\"\\001\\002\"");
+    try testing.expectError(error.type, vm.evalSource("20h$1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("11h$\"abc\"", .q, "<test>"));
+}
+
+test "reshape cuts a list into rows as q does" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "2 3#til 6", "(0 1 2;3 4 5)");
+    try expectEval(vm, "2 3#1", "(1 1 1;1 1 1)");
+    try expectEval(vm, "2 3#5", "(5 5 5;5 5 5)");
+    try expectEval(vm, "2 3#til 4", "(0 1 2;3 0 1)");
+    try expectEval(vm, "2 3#1 2 3 4 5 6 7 8", "(1 2 3;4 5 6)");
+    try expectEval(vm, "2 0N#til 6", "(0 1 2;3 4 5)");
+    try expectEval(vm, "0N 2#til 6", "(0 1;2 3;4 5)");
+    try expectEval(vm, "0N 4#til 6", "(0 1 2 3;4 5)");
+    try expectEval(vm, "0N 3#til 7", "(0 1 2;3 4 5;,6)");
+    try expectEval(vm, "3 0N#til 7", "(0 1;2 3;4 5 6)");
+    try expectEval(vm, "2 0N#til 7", "(0 1 2;3 4 5 6)");
+    try expectEval(vm, "0N 2#()", "()");
+    try expectEval(vm, "2 3 4#til 24", "((0 1 2 3;4 5 6 7;8 9 10 11);(12 13 14 15;16 17 18 19;20 21 22 23))");
+    try expectEval(vm, "2 3#\"abcdef\"", "(\"abc\";\"def\")");
+    try expectEval(vm, "2 3#`a`b", "(`a`b`a;`b`a`b)");
+    try expectEval(vm, "3 3#`a", "(`a`a`a;`a`a`a;`a`a`a)");
+    try expectEval(vm, "2 3#()", "((();();());(();();()))");
+    try expectEval(vm, "2 3#til 0", "(0N 0N 0N;0N 0N 0N)");
+    try expectEval(vm, "2 2#(1;2)", "(1 2;1 2)");
+    try expectEval(vm, "2 3#enlist 1 2 3", "((1 2 3;1 2 3;1 2 3);(1 2 3;1 2 3;1 2 3))");
+    try expectEval(vm, "2 3#(1;2;`a)", "((1;2;`a);(1;2;`a))");
+    try expectEval(vm, "2 3#(1 2;3)", "((1 2;3;1 2);(3;1 2;3))");
+    try expectEval(vm, "3 2#(1;2;3;4;5;6)", "(1 2;3 4;5 6)");
+    try expectEval(vm, "1 2#1", ",1 1");
+    try expectEval(vm, "2 3#0 1 2 3 4 5 6 7 8f", "(0 1 2f;3 4 5f)");
+    try expectEval(vm, "2 2#2 3#til 6", "((0 1 2;3 4 5);(0 1 2;3 4 5))");
+    try testing.expectError(error.length, vm.evalSource("0 3#til 6", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("-2 3#til 6", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("2 3h#til 6", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("0N 2 3#til 12", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("0N 0N#til 6", .q, "<test>"));
+}
+
+test "take on a dictionary selects entries by count or by key" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "`a`c#`a`b`c!1 2 3", "`a`c!1 3");
+    try expectEval(vm, "`a`x#`a`b`c!1 2 3", "`a`x!1 0N");
+    try expectEval(vm, "`x`a#`a`b`c!(1;\"x\";`s)", "`x`a!0N 1");
+    try expectEval(vm, "`a`c#`a`b`c!(1;\"x\";`s)", "`a`c!(1;`s)");
+    try expectEval(vm, "`a`x#`a`b!(\"ab\";\"cd\")", "`a`x!(\"ab\";\"\")");
+    try expectEval(vm, "`a`x#`a`b`c!1 2 3f", "`a`x!1 0n");
+    try expectEval(vm, "`a`b#(`a`b`c)!(1 2;3;`x)", "`a`b!(1 2;3)");
+    try expectEval(vm, "1 2#1 2 3!4 5 6", "1 2!4 5");
+    try expectEval(vm, "1 9#1 2 3!4 5 6", "1 9!4 0N");
+    try expectEval(vm, "2#`a`b`c!1 2 3", "`a`b!1 2");
+    try expectEval(vm, "-2#`a`b`c!1 2 3", "`b`c!2 3");
+    try expectEval(vm, "0#`a`b`c!1 2 3", "(`symbol$())!`long$()");
+    try expectEval(vm, "(`symbol$())#`a`b!1 2", "(`symbol$())!`long$()");
+    try expectEval(vm, "5#`a`b`c!1 2 3", "`a`b`c`a`b!1 2 3 1 2");
+    try expectEval(vm, "2#`a`b!(1;\"x\")", "`a`b!(1;\"x\")");
+    try expectEval(vm, "type `a`c#`a`b`c!1 2 3", "99h");
+    try expectEval(vm, "(enlist `a)!enlist 1", "(,`a)!,1");
+    try expectEval(vm, "(enlist \"a\")!enlist 1", "(,\"a\")!,1");
+    try expectEval(vm, "(enlist \"ab\")!enlist 1", ",\"ab\"!,1");
+    try expectEval(vm, "(`long$())!()", "(`long$())!()");
+    try expectEval(vm, "\"ab\"!1 2", "\"ab\"!1 2");
+    try expectEval(vm, "(1 2;3)!4 5", "(1 2;3)!4 5");
+    try testing.expectError(error.type, vm.evalSource("`a#`a`b`c!1 2 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("2 3#`a`b!1 2", .q, "<test>"));
+}
+
+test "arithmetic over lists pairs items and unifies the results" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "1 2 3+1", "2 3 4");
+    try expectEval(vm, "1+1 2 3", "2 3 4");
+    try expectEval(vm, "1 2 3+1 2 3", "2 4 6");
+    try expectEval(vm, "1 2 3+(1;2;3)", "2 4 6");
+    try expectEval(vm, "1 2 3+1 2 3i", "2 4 6");
+    try expectEval(vm, "1 2 3h+1 2 3h", "2 4 6i");
+    try expectEval(vm, "1 2 3-1 2 3h", "0 0 0");
+    try expectEval(vm, "1 2 3*2.5", "2.5 5 7.5");
+    try expectEval(vm, "1 2 3%2", "0.5 1 1.5");
+    try expectEval(vm, "1 2 3+0N 1 2", "0N 3 5");
+    try expectEval(vm, "01b+1", "1 2");
+    try expectEval(vm, "0x01+1 2", "2 3");
+    try expectEval(vm, "2023.04.17 2023.04.18+1", "2023.04.18 2023.04.19");
+    try expectEval(vm, "(1 2;3 4)+1", "(2 3;4 5)");
+    try expectEval(vm, "(1 2;3 4)+1 2", "(2 3;5 6)");
+    try expectEval(vm, "1+(1 2;3 4)", "(2 3;4 5)");
+    try expectEval(vm, "(1 2;3)+(1;2 3)", "(2 3;5 6)");
+    try expectEval(vm, "()+1", "()");
+    try expectEval(vm, "1+`long$()", "`long$()");
+    try expectEval(vm, "()+()", "()");
+    try testing.expectError(error.length, vm.evalSource("1 2 3+1 2", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("1 2 3+()", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(1;2;`a)+1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\"ab\"+1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0x0102+1", .q, "<test>"));
+}
+
+test "string literal escapes decode as in q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "\"\\001\"", "\"\\001\"");
+    try expectEval(vm, "count \"\\001\"", "1");
+    try expectEval(vm, "`long$\"\\123\"", "83");
+    try expectEval(vm, "`long$\"\\1234\"", "83 52");
+    try expectEval(vm, "`long$\"\\377\"", "255");
+    try expectEval(vm, "`long$\"\\/\"", "47");
+    try expectEval(vm, "`long$\"\\\"\"", "34");
+    try expectEval(vm, "`long$\"\\\\\"", "92");
+    try expectEval(vm, "`long$\"\\n\\t\\r\"", "10 9 13");
+    try expectEval(vm, "\"a\\\"b\"", "\"a\\\"b\"");
+    try testing.expectError(error.parse, vm.evalSource("\"\\q\"", .q, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("\"\\1\"", .q, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("\"\\12\"", .q, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("\"\\400\"", .q, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("\"\\8\"", .q, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("\"\\x41\"", .q, "<test>"));
 }

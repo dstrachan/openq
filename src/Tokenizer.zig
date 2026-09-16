@@ -401,8 +401,10 @@ pub fn next(self: *Tokenizer) Token {
                     0 => if (self.index == self.buffer.len) {
                         result.tag = .invalid;
                     } else continue :state .invalid,
-                    '"', '\\', 'n', 'r', 't' => continue :state .string_literal,
-                    '0'...'9' => continue :state .octal_char_two,
+                    // q's escapes: `\"`, `\\`, `\n`, `\r`, `\t`, `\/` and exactly three
+                    // octal digits up to `\377`.
+                    '"', '\\', 'n', 'r', 't', '/' => continue :state .string_literal,
+                    '0'...'3' => continue :state .octal_char_two,
                     else => continue :state .invalid,
                 }
             },
@@ -412,7 +414,7 @@ pub fn next(self: *Tokenizer) Token {
                     0 => if (self.index == self.buffer.len) {
                         result.tag = .invalid;
                     } else continue :state .invalid,
-                    '0'...'9' => continue :state .octal_char_three,
+                    '0'...'7' => continue :state .octal_char_three,
                     else => continue :state .invalid,
                 }
             },
@@ -422,7 +424,7 @@ pub fn next(self: *Tokenizer) Token {
                     0 => if (self.index == self.buffer.len) {
                         result.tag = .invalid;
                     } else continue :state .invalid,
-                    '0'...'9' => continue :state .string_literal,
+                    '0'...'7' => continue :state .string_literal,
                     else => continue :state .invalid,
                 }
             },
