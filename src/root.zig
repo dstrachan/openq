@@ -19,6 +19,7 @@ pub const operators = @import("functions/operators.zig");
 pub const unary_primitives = @import("functions/unary_primitives.zig");
 pub const literal = @import("literal.zig");
 pub const decimal = @import("decimal.zig");
+pub const clock = @import("clock.zig");
 
 pub fn printAstErrorsToStderr(gpa: Allocator, io: Io, tree: Ast, path: []const u8, color: Color) !void {
     var wip_errors: ErrorBundle.Wip = undefined;

@@ -327,6 +327,7 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
         },
         .symbol => |identifier| {
             if (identifier == .empty) return vm.state.ref();
+            if (try vm.clockVariable(identifier)) |clock| return clock;
             const home = (try vm.identifierHome(identifier, false)) orelse return error.identifier;
             const dict = home.namespace.as.dict;
             const keys = dict.keys.as.symbol_list;

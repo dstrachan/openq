@@ -49,6 +49,8 @@ state: *Value = undefined,
 namespace: Symbol = .empty,
 /// Significant digits shown for floats, set by `\P`; 0 means the full 17.
 precision: u8 = 7,
+/// The time zone of `.z.P` and the other local clock variables, read once at init.
+local_zone: q.clock.LocalZone = .utc,
 
 const Constant = enum(u8) {
     empty_list,
@@ -136,8 +138,12 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
     errdefer vm.state.deref(gpa);
 
     try vm.seedKeywords();
+    // `.z` exists from the start so that `.z.ph:...` and friends have somewhere to go; the
+    // clock variables are computed on every read rather than stored in it.
+    _ = try vm.namespaceAt(".z", true);
     errdefer comptime unreachable;
 
+    vm.local_zone = .load(io, gpa);
     return vm;
 }
 
@@ -237,6 +243,7 @@ pub fn qEntry(vm: *Vm, name: []const u8) ?*Value {
 }
 
 pub fn deinit(vm: *Vm) void {
+    vm.local_zone.deinit();
     vm.string_table.deinit(vm.gpa);
     vm.string_bytes.deinit(vm.gpa);
     vm.state.deref(vm.gpa);
@@ -1207,6 +1214,34 @@ pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
     if (last_dot == 0) return .{ .namespace = vm.state, .name = try vm.intern(string[1..]) };
     const namespace = (try vm.namespaceAt(string[0..last_dot], create)) orelse return null;
     return .{ .namespace = namespace, .name = try vm.intern(string[last_dot + 1 ..]) };
+}
+
+/// `.z.P` and the other clock variables, which q reads from the clock at every reference
+/// rather than storing: `D` date, `P` timestamp, `T` time, `N` timespan since midnight and
+/// `Z` datetime, in local time for the capital letter and UTC for the lowercase one. Null
+/// for any other identifier.
+pub fn clockVariable(vm: *Vm, identifier: Symbol) !?*Value {
+    const string = vm.internedString(identifier);
+    if (string.len != 4 or !std.mem.startsWith(u8, string, ".z.")) return null;
+    const letter = string[3];
+    if (std.mem.findScalar(u8, "DdPpTtNnZz", letter) == null) return null;
+
+    const utc = q.clock.now(vm.io);
+    const nanos = if (std.ascii.isUpper(letter)) local: {
+        const unix_seconds = @divFloor(utc, q.literal.ns_per_second) + q.literal.epoch_days * 86_400;
+        break :local utc + vm.local_zone.offset(unix_seconds) * q.literal.ns_per_second;
+    } else utc;
+    const day = @divFloor(nanos, q.literal.ns_per_day);
+    const since_midnight = @mod(nanos, q.literal.ns_per_day);
+
+    return switch (std.ascii.toLower(letter)) {
+        'd' => try vm.createValue(.date, @intCast(day)),
+        'p' => try vm.createValue(.timestamp, nanos),
+        't' => try vm.createValue(.time, @intCast(@divFloor(since_midnight, 1_000_000))),
+        'n' => try vm.createValue(.timespan, since_midnight),
+        'z' => try vm.createValue(.datetime, @as(f64, @floatFromInt(nanos)) / @as(f64, @floatFromInt(q.literal.ns_per_day))),
+        else => unreachable,
+    };
 }
 
 /// The namespace dictionary at a dotted path, or null when it does not exist. `.` is the
@@ -2360,4 +2395,56 @@ test "capital cast letters parse text as q does" {
     try expectEval(vm, "\"T\"$\"123456123\"", "12:34:56.123");
     try expectEval(vm, "\"T\"$\"abc\"", "0Nt");
     try testing.expectError(error.domain, vm.evalSource("\"Q\"$\"1\"", .q, "<test>"));
+}
+
+test ".z clock variables read the clock in local time and UTC" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "type .z.D", "-14h");
+    try expectEval(vm, "type .z.d", "-14h");
+    try expectEval(vm, "type .z.P", "-12h");
+    try expectEval(vm, "type .z.p", "-12h");
+    try expectEval(vm, "type .z.T", "-19h");
+    try expectEval(vm, "type .z.t", "-19h");
+    try expectEval(vm, "type .z.N", "-16h");
+    try expectEval(vm, "type .z.n", "-16h");
+    try expectEval(vm, "type .z.Z", "-15h");
+    try expectEval(vm, "type .z.z", "-15h");
+    try expectEvalMode(vm, .k, "@.z.p", "-12h");
+
+    // UTC now agrees with the clock module to within a second.
+    const utc = try vm.evalSource(".z.p", .q, "<test>");
+    defer utc.deref(vm.gpa);
+    const now = q.clock.now(vm.io);
+    try testing.expect(now - utc.as.timestamp >= 0 and now - utc.as.timestamp < q.literal.ns_per_second);
+
+    // The date, time, timespan and datetime are the timestamp's parts. A list is evaluated
+    // right to left, so each item is read no later than the one before it.
+    try expectEval(vm, "(`date$.z.p)-.z.d", "0i");
+    try expectEval(vm, "(`date$.z.P)-.z.D", "0i");
+    const parts = try vm.evalSource("(.z.p;.z.n;.z.t;.z.z)", .q, "<test>");
+    defer parts.deref(vm.gpa);
+    const stamp = parts.as.list[0].as.timestamp;
+    const since_midnight = parts.as.list[1].as.timespan;
+    try testing.expect(since_midnight <= @mod(stamp, q.literal.ns_per_day));
+    try testing.expect(@mod(stamp, q.literal.ns_per_day) - since_midnight < q.literal.ns_per_second);
+    try testing.expect(parts.as.list[2].as.time <= @divFloor(since_midnight, 1_000_000));
+    const days = @as(f64, @floatFromInt(stamp)) / @as(f64, @floatFromInt(q.literal.ns_per_day));
+    try testing.expect(parts.as.list[3].as.datetime <= days and days - parts.as.list[3].as.datetime < 1.0 / 86_400.0);
+
+    // Local time is UTC shifted by the zone's offset, a whole number of minutes; `.z.p` is
+    // read first, so the difference is the offset plus a few microseconds.
+    const shift = try vm.evalSource(".z.P-.z.p", .q, "<test>");
+    defer shift.deref(vm.gpa);
+    const unix_seconds = @divFloor(now, q.literal.ns_per_second) + q.literal.epoch_days * 86_400;
+    const expected_shift = vm.local_zone.offset(unix_seconds) * q.literal.ns_per_second;
+    try testing.expect(shift.as.timespan >= expected_shift and shift.as.timespan - expected_shift < q.literal.ns_per_second);
+
+    // `.z` is a namespace that accepts other entries; the clock names cannot be replaced.
+    try expectEval(vm, ".z.foo:1", "1");
+    try expectEval(vm, ".z.foo", "1");
+    try expectEval(vm, ".z.D:1", "1");
+    try expectEval(vm, "type .z.D", "-14h");
 }
