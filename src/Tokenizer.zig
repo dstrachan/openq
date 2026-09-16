@@ -498,6 +498,8 @@ pub fn next(self: *Tokenizer) Token {
                 self.index += 1;
                 switch (self.buffer[self.index]) {
                     'a'...'z', 'A'...'Z', '0'...'9', '.', ':' => continue :state .number_literal,
+                    // A signed exponent, as in `1.5e-7`, continues the number.
+                    '+', '-' => if (self.isExponentSign()) continue :state .number_literal,
                     else => {},
                 }
             },
@@ -1112,6 +1114,10 @@ test "tokenize numbers" {
     try testTokenize("1", &.{.{ .number_literal, "1" }});
     try testTokenize("1i", &.{.{ .number_literal, "1i" }});
     try testTokenize("1abc", &.{.{ .number_literal, "1abc" }});
+    try testTokenize("1.5e-7", &.{.{ .number_literal, "1.5e-7" }});
+    try testTokenize("1e+7", &.{.{ .number_literal, "1e+7" }});
+    try testTokenize("1e-5", &.{.{ .number_literal, "1e-5" }});
+    try testTokenize("1e-5e", &.{.{ .number_literal, "1e-5e" }});
     try testTokenize("123", &.{.{ .number_literal, "123" }});
     try testTokenize("123i", &.{.{ .number_literal, "123i" }});
     try testTokenize("123abc", &.{.{ .number_literal, "123abc" }});
@@ -1462,6 +1468,25 @@ fn testTokenize(source: [:0]const u8, expected_values: []const struct { Token.Ta
     inline for (@typeInfo(Mode).@"enum".field_values) |field_value| {
         try testTokenizeMode(@fromBackingInt(@intCast(field_value)), source, expected_values);
     }
+}
+
+/// Whether the sign at the current index follows an `e` that itself follows a digit or a
+/// point, so that it belongs to the number's exponent: `1e-5` but not `1e-5e-5`.
+fn isExponentSign(self: *const Tokenizer) bool {
+    const i = self.index;
+    if (i < 2) return false;
+    const e = self.buffer[i - 1];
+    if (e != 'e' and e != 'E') return false;
+    const before = self.buffer[i - 2];
+    if (!std.ascii.isDigit(before) and before != '.') return false;
+    // Only the first exponent counts, so scan back through the number for an earlier one.
+    var j = i - 2;
+    while (j > 0) : (j -= 1) {
+        const c = self.buffer[j - 1];
+        if (c == 'e' or c == 'E') return false;
+        if (!std.ascii.isDigit(c) and c != '.' and c != '+' and c != '-') break;
+    }
+    return std.ascii.isDigit(self.buffer[i + 1]);
 }
 
 fn testTokenizeMode(mode: Mode, source: [:0]const u8, expected_values: []const struct { Token.Tag, []const u8 }) !void {

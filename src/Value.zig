@@ -240,7 +240,7 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             },
         },
         .real => |value| {
-            try formatReal(w, value);
+            try formatReal(w, value, data.vm.precision);
             try w.writeByte('e');
         },
         .real_list => |value| {
@@ -248,71 +248,22 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
             if (value.len == 1) try w.writeByte(',');
             for (value, 0..) |v, i| {
                 if (i > 0) try w.writeByte(' ');
-                try formatReal(w, v);
+                try formatReal(w, v, data.vm.precision);
             }
             try w.writeByte('e');
         },
-        .float => |value| {
-            if (std.math.isNan(value)) {
-                try w.writeAll("0n");
-            } else if (std.math.isNegativeInf(value)) {
-                try w.writeAll("-0w");
-            } else if (std.math.isPositiveInf(value)) {
-                try w.writeAll("0w");
-            } else if (std.math.floor(value) == value) {
-                try w.print("{d}f", .{value});
-            } else {
-                try w.print("{d}", .{value});
+        .float => |value| _ = try formatFloat(w, value, data.vm.precision, true),
+        .float_list => |value| {
+            if (value.len == 0) return w.writeAll("`float$()");
+            if (value.len == 1) try w.writeByte(',');
+            // The list takes an f suffix only when every item looks integral.
+            var integral = true;
+            for (value, 0..) |v, i| {
+                if (i > 0) try w.writeByte(' ');
+                const is_integral = try formatFloat(w, v, data.vm.precision, false);
+                integral = integral and is_integral;
             }
-        },
-        .float_list => |value| switch (value.len) {
-            0 => try w.writeAll("`float$()"),
-            1 => {
-                try w.writeByte(',');
-                if (std.math.isNan(value[0])) {
-                    try w.writeAll("0n");
-                } else if (std.math.isNegativeInf(value[0])) {
-                    try w.writeAll("-0w");
-                } else if (std.math.isPositiveInf(value[0])) {
-                    try w.writeAll("0w");
-                } else if (std.math.floor(value[0]) == value[0]) {
-                    try w.print("{d}f", .{value[0]});
-                } else {
-                    try w.print("{d}", .{value[0]});
-                }
-            },
-            else => {
-                var needs_suffix = true;
-                if (std.math.isNan(value[0])) {
-                    try w.writeAll("0n");
-                    needs_suffix = false;
-                } else if (std.math.isNegativeInf(value[0])) {
-                    try w.writeAll("-0w");
-                    needs_suffix = false;
-                } else if (std.math.isPositiveInf(value[0])) {
-                    try w.writeAll("0w");
-                    needs_suffix = false;
-                } else {
-                    try w.print("{d}", .{value[0]});
-                    needs_suffix &= std.math.floor(value[0]) == value[0];
-                }
-                for (value[1..]) |v| {
-                    if (std.math.isNan(v)) {
-                        try w.writeAll(" 0n");
-                        needs_suffix = false;
-                    } else if (std.math.isNegativeInf(v)) {
-                        try w.writeAll(" -0w");
-                        needs_suffix = false;
-                    } else if (std.math.isPositiveInf(v)) {
-                        try w.writeAll(" 0w");
-                        needs_suffix = false;
-                    } else {
-                        try w.print(" {d}", .{v});
-                        needs_suffix &= std.math.floor(v) == v;
-                    }
-                }
-                if (needs_suffix) try w.writeByte('f');
-            },
+            if (integral) try w.writeByte('f');
         },
         .char => |value| try w.print("\"{c}\"", .{value}),
         .char_list => |value| {
@@ -368,16 +319,37 @@ fn formatIntegers(comptime I: type, w: *Io.Writer, list: anytype, empty: []const
     try w.writeByte(suffix);
 }
 
-/// Writes one real without its `e` suffix. Unlike floats, a null real prints as `0N`.
-fn formatReal(w: *Io.Writer, value: f32) Io.Writer.Error!void {
+/// Writes a float with `precision` significant digits, as q's `\P` shows it, or `0n`, `0w`
+/// and `-0w`. Returns whether the text looks integral, in which case q marks an atom with an
+/// `f` suffix; the suffix is written here only when `suffix` is set.
+fn formatFloat(w: *Io.Writer, value: f64, precision: u8, suffix: bool) Io.Writer.Error!bool {
+    if (std.math.isNan(value)) {
+        try w.writeAll("0n");
+        return false;
+    }
+    if (std.math.isInf(value)) {
+        try w.writeAll(if (value < 0) "-0w" else "0w");
+        return false;
+    }
+    const integral = try q.decimal.formatG(w, value, precision);
+    if (integral and suffix) try w.writeByte('f');
+    return integral;
+}
+
+/// Writes one real without its `e` suffix. Reals follow `\P` through their double value,
+/// except that `\P 0` shows the shortest text that reads back as the same real, and a null
+/// real prints as `0N`.
+fn formatReal(w: *Io.Writer, value: f32, precision: u8) Io.Writer.Error!void {
     if (std.math.isNan(value)) {
         try w.writeAll("0N");
     } else if (std.math.isNegativeInf(value)) {
         try w.writeAll("-0w");
     } else if (std.math.isPositiveInf(value)) {
         try w.writeAll("0w");
+    } else if (precision == 0) {
+        try q.decimal.formatShortestReal(w, value);
     } else {
-        try w.print("{d}", .{value});
+        _ = try q.decimal.formatG(w, value, precision);
     }
 }
 

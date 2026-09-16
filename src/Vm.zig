@@ -47,6 +47,8 @@ iterators: [@typeInfo(Iterator).@"enum".field_names.len]*Value = undefined,
 state: *Value = undefined,
 /// The current namespace set by `\d`, as an interned path such as `.` or `.Q`.
 namespace: Symbol = .empty,
+/// Significant digits shown for floats, set by `\P`; 0 means the full 17.
+precision: u8 = 7,
 
 const Constant = enum(u8) {
     empty_list,
@@ -1119,6 +1121,12 @@ pub fn system(vm: *Vm, command: []const u8) !*Value {
         vm.namespace = try vm.intern(args);
         return vm.getUnaryPrimitive(.identity);
     }
+    if (std.mem.eql(u8, name, "P")) {
+        if (args.len == 0) return vm.createValue(.int, vm.precision);
+        const precision = std.fmt.parseInt(u8, args, 10) catch return error.domain;
+        vm.precision = @min(precision, q.decimal.max_precision);
+        return vm.getUnaryPrimitive(.identity);
+    }
     return vm.shell(command);
 }
 
@@ -1926,4 +1934,94 @@ test "temporal arithmetic follows q" {
     try expectEval(vm, "first 2023.04.17 2023.04.18", "2023.04.17");
     try expectEval(vm, "2023.04.17~2023.04.17", "1b");
     try expectEval(vm, "12:00 12:01!1 2", "12:00 12:01!1 2");
+}
+
+test "\\P sets the float display precision" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "\\P", "7i");
+    try expectEval(vm, "value \"\\\\P\"", "7i");
+    try expectEval(vm, "type value \"\\\\P\"", "-6h");
+
+    // Seven significant digits, C's %.7g: trailing zeros go, exponent form past the precision.
+    try expectEval(vm, "1%3", "0.3333333");
+    try expectEval(vm, "2%3", "0.6666667");
+    try expectEval(vm, "1.23456789", "1.234568");
+    try expectEval(vm, "123456789.0", "1.234568e+08");
+    try expectEval(vm, "1234567.5", "1234568f");
+    try expectEval(vm, "12345678.5", "1.234568e+07");
+    try expectEval(vm, "0.0001", "0.0001");
+    try expectEval(vm, "0.00001", "1e-05");
+    try expectEval(vm, "1e7", "1e+07");
+    try expectEval(vm, "1e6", "1000000f");
+    try expectEval(vm, "9e15", "9e+15");
+    try expectEval(vm, "0.1", "0.1");
+    try expectEval(vm, "100000.5", "100000.5");
+    try expectEval(vm, "1.5e-7", "1.5e-07");
+    try expectEval(vm, "0D00:00:02%2", "1e+09");
+    try expectEval(vm, "1e300", "1e+300");
+    try expectEval(vm, "-0f", "-0f");
+    try expectEval(vm, "3.14159265358979", "3.141593");
+    try expectEval(vm, "1 2.5 1e10", "1 2.5 1e+10");
+    try expectEval(vm, "0.5 0.25", "0.5 0.25");
+    try expectEval(vm, "-3!1.23456789", "\"1.234568\"");
+
+    // Reals display through the same rule from their double value.
+    try expectEval(vm, "1.23456789e", "1.234568e");
+    try expectEval(vm, "123456789e", "1.234568e+08e");
+    try expectEval(vm, "0.1e", "0.1e");
+    try expectEval(vm, "1e10e", "1e+10e");
+
+    try expectEval(vm, "\\P 3", "::");
+    try expectEval(vm, "\\P", "3i");
+    try expectEval(vm, "1%3", "0.333");
+    try expectEval(vm, "1.23456789", "1.23");
+    try expectEval(vm, "1234.5", "1.23e+03");
+    try expectEval(vm, "12345.0", "1.23e+04");
+    try expectEval(vm, "1000f", "1e+03");
+    try expectEval(vm, "0.001234", "0.00123");
+    try expectEval(vm, "1.23456789e", "1.23e");
+    try expectEval(vm, "1234e", "1.23e+03e");
+    try expectEval(vm, "1 2.5 1234.5", "1 2.5 1.23e+03");
+
+    try expectEval(vm, "\\P 10", "::");
+    try expectEval(vm, "1%3", "0.3333333333");
+    try expectEval(vm, "1.23456789", "1.23456789");
+    try expectEval(vm, "1.23456789e", "1.234567881e");
+    try expectEval(vm, "1234567890123.0", "1.23456789e+12");
+    try expectEval(vm, "0.1e", "0.1000000015e");
+    try expectEval(vm, "1.5e", "1.5e");
+    try expectEval(vm, "123456789e", "123456792e");
+
+    // 17 digits expand the binary value exactly.
+    try expectEval(vm, "\\P 17", "::");
+    try expectEval(vm, "1%3", "0.33333333333333331");
+    try expectEval(vm, "0.1", "0.10000000000000001");
+    try expectEval(vm, "1.23456789", "1.2345678899999999");
+    try expectEval(vm, "1.23456789e", "1.2345678806304932e");
+    try expectEval(vm, "0.1e", "0.10000000149011612e");
+
+    // \P 0 is 17 digits for floats but the shortest round trip for reals; above 17 clamps.
+    try expectEval(vm, "\\P 0", "::");
+    try expectEval(vm, "\\P", "0i");
+    try expectEval(vm, "1%3", "0.33333333333333331");
+    try expectEval(vm, "0.1", "0.10000000000000001");
+    try expectEval(vm, "1e7", "10000000f");
+    try expectEval(vm, "1e16", "10000000000000000f");
+    try expectEval(vm, "1e17", "1e+17");
+    try expectEval(vm, "123456789.0", "123456789f");
+    try expectEval(vm, "1e-5", "1.0000000000000001e-05");
+    try expectEval(vm, "1.23456789e", "1.2345679e");
+    try expectEval(vm, "0.1e", "0.1e");
+    try expectEval(vm, "1e10e", "1e+10e");
+    try expectEval(vm, "\\P 1", "::");
+    try expectEval(vm, "1.5", "2f");
+    try expectEval(vm, "12.5", "1e+01");
+    try expectEval(vm, "0.15", "0.1");
+    try expectEval(vm, "\\P 20", "::");
+    try expectEval(vm, "\\P", "17i");
+    try expectEval(vm, "0.1", "0.10000000000000001");
+    try testing.expectError(error.domain, vm.evalSource("\\P x", .q, "<test>"));
 }
