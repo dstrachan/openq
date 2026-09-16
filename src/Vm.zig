@@ -360,7 +360,13 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             }
         },
         .operator => |operator| {
-            if (args.len > 2) return error.rank;
+            if (args.len > 2) {
+                // Only `.` and `@` take more: their amend and trap forms.
+                if (operator != .apply and operator != .apply_at) return error.rank;
+                if (args.len > 4) return error.rank;
+                for (args) |a| if (a.isEmpty()) return vm.project(func, args);
+                return vm.applyForm(operator, args);
+            }
             if (args.len == 1) {
                 var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
                 defer values.deinit(vm.gpa);
@@ -490,6 +496,62 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             };
         },
     }
+}
+
+/// `@` and `.` with three or four arguments. With a function first they are the traps
+/// `@[f;x;h]` and `.[f;args;h]`: `f` is applied and, when it fails, the handler is applied
+/// to the error's text or, if it is not a function, returned as it is. Otherwise they amend:
+/// `@[x;i;f]`, `@[x;i;f;y]`, `.[x;i;f]` and `.[x;i;f;y]`, `@` indexing one level and `.`
+/// taking one index per dimension; a symbol `x` names a global, which is amended in place
+/// and whose name is returned.
+fn applyForm(vm: *Vm, operator: Operator, args: []*Value) RunError!*Value {
+    const deep = operator == .apply;
+    if (isFunction(args[0])) {
+        if (args.len != 3) return error.rank;
+        const f = args[0];
+        const handler = args[2];
+        return (if (deep) q.operators.apply(vm, f, args[1]) else q.operators.apply_at(vm, f, args[1])) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                if (!isFunction(handler)) return handler.ref();
+                const text = try vm.errorText(err);
+                defer text.deref(vm.gpa);
+                var one = [_]*Value{text};
+                return vm.applyImpl(handler, &one);
+            },
+        };
+    }
+
+    const x = args[0];
+    const function = args[2];
+    const value: ?*Value = if (args.len == 4) args[3] else null;
+    // `@` indexes one level, so its index is a one-item index list.
+    const index = if (deep) args[1].ref() else one: {
+        const list = try vm.allocValue(.list, 1);
+        list.as.list[0] = args[1].ref();
+        break :one list;
+    };
+    defer index.deref(vm.gpa);
+    if (x.as != .symbol) return vm.amendValue(x, index, function, value);
+
+    const plain = function.as == .operator and function.as.operator == .assign and index.count() == 0 and value != null;
+    const new_value = if (plain) value.?.ref() else amended: {
+        const old = try vm.readGlobal(x.as.symbol);
+        defer old.deref(vm.gpa);
+        break :amended try vm.amendValue(old, index, function, value);
+    };
+    defer new_value.deref(vm.gpa);
+    _ = try q.operators.assignGlobal(vm, x, new_value);
+    return x.ref();
+}
+
+/// The text a trap handler receives: the signalled message, or the error's name, which
+/// matches q's for `rank`, `type`, `length` and `domain`.
+fn errorText(vm: *Vm, err: RunError) Allocator.Error!*Value {
+    const text = if (err == error.signal) (vm.signal_message orelse "") else @errorName(err);
+    const value = try vm.allocValue(.char_list, text.len);
+    @memcpy(value.as.char_list, text);
+    return value;
 }
 
 /// The parse tree `(op;lhs)` of a verb projected on its left operand, as `+[1]`.
@@ -810,7 +872,7 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 const v = try vm.eval(value[2]);
                 errdefer v.deref(vm.gpa);
 
-                return q.operators.assign(vm, value[1], v);
+                return q.operators.assignGlobal(vm, value[1], v);
             }
 
             // The conditional and the control words evaluate their arguments as they go,
@@ -899,10 +961,12 @@ fn evalAmend(vm: *Vm, target: *Value, operator: Operator, rhs: *Value) RunError!
         defer old.deref(vm.gpa);
         const index = if (target.as == .symbol) try vm.allocValue(.list, 0) else try vm.evalIndex(target.as.list[1..]);
         defer index.deref(vm.gpa);
-        break :amended try vm.amendValue(old, index, operator, v);
+        const function = vm.getOperator(operator);
+        defer function.deref(vm.gpa);
+        break :amended try vm.amendValue(old, index, function, v);
     };
     defer new_value.deref(vm.gpa);
-    _ = try q.operators.assign(vm, name, new_value);
+    _ = try q.operators.assignGlobal(vm, name, new_value);
     return vm.getUnaryPrimitive(.identity);
 }
 
@@ -1725,13 +1789,15 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                     else
                         (slots[slotIndex(lambda, target)] orelse return error.identifier).ref();
                     defer old.deref(vm.gpa);
-                    break :amended try vm.amendValue(old, index, operator, value);
+                    const function = vm.getOperator(operator);
+                    defer function.deref(vm.gpa);
+                    break :amended try vm.amendValue(old, index, function, value);
                 };
                 defer new_value.deref(vm.gpa);
                 if (is_global) {
                     const symbol = try vm.createValue(.symbol, lambda.globals[target - @backingInt(Compiler.ByteCode.global)]);
                     defer symbol.deref(vm.gpa);
-                    _ = try q.operators.assign(vm, symbol, new_value);
+                    _ = try q.operators.assignGlobal(vm, symbol, new_value);
                 } else {
                     const slot = slotIndex(lambda, target);
                     if (slots[slot]) |old| old.deref(vm.gpa);
@@ -1830,24 +1896,28 @@ fn slotIndex(lambda: Value.Lambda, slot: u8) usize {
     return if (slot <= 8) slot - 1 else lambda.params.len + slot - 9;
 }
 
-/// `.[old;index;op;value]` as compound and indexed assignment produce it: an empty index
-/// applies `op` to the whole value (`x+:v`), and otherwise `index` holds one index per
-/// dimension, each an integer, a list of integers or a hole for every item.
-pub fn amendValue(vm: *Vm, old: *Value, index: *Value, operator: Operator, value: *Value) RunError!*Value {
+/// `.[old;index;f;value]` as compound and indexed assignment, `@` and `.` produce it: an
+/// empty index applies `f` to the whole value (`x+:v`, `.[x;();+;v]`), and otherwise
+/// `index` holds one index per dimension, each an integer, a list of integers or a hole
+/// (`::`) for every item. Without `value`, `f` is applied to each item alone (`@[x;i;-:]`).
+pub fn amendValue(vm: *Vm, old: *Value, index: *Value, function: *Value, value: ?*Value) RunError!*Value {
     if (!index.isList()) return error.type;
-    if (index.count() == 0) return vm.applyOperator(operator, old, value);
-    return vm.amendAt(old, index, 0, operator, value);
+    if (index.count() == 0) return vm.applyAmend(function, old, value);
+    return vm.amendAt(old, index, 0, function, value);
 }
 
-fn applyOperator(vm: *Vm, operator: Operator, x: *Value, y: *Value) RunError!*Value {
-    if (operator == .assign) return y.ref();
-    const function = vm.getOperator(operator);
-    defer function.deref(vm.gpa);
-    var operands = [_]*Value{ x, y };
-    return vm.applyImpl(function, &operands);
+/// `f[x;y]` or `f[x]` for an amend; `:` puts `y` in place.
+fn applyAmend(vm: *Vm, function: *Value, x: *Value, y: ?*Value) RunError!*Value {
+    if (function.as == .operator and function.as.operator == .assign) return (y orelse x).ref();
+    if (y) |v| {
+        var operands = [_]*Value{ x, v };
+        return vm.applyImpl(function, &operands);
+    }
+    var operand = [_]*Value{x};
+    return vm.applyImpl(function, &operand);
 }
 
-fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, operator: Operator, value: *Value) RunError!*Value {
+fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, value: ?*Value) RunError!*Value {
     if (!old.isList()) return error.type;
     const at = try q.operators.itemAt(vm, index, dim);
     defer at.deref(vm.gpa);
@@ -1859,7 +1929,7 @@ fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, operator: Operator, 
         const i = try position(at, old.count());
         const item = try q.operators.itemAt(vm, old, i);
         defer item.deref(vm.gpa);
-        const new_item = if (last) try vm.applyOperator(operator, item, value) else try vm.amendAt(item, index, dim + 1, operator, value);
+        const new_item = if (last) try vm.applyAmend(function, item, value) else try vm.amendAt(item, index, dim + 1, function, value);
         defer new_item.deref(vm.gpa);
         return vm.withItem(old, i, new_item);
     }
@@ -1867,7 +1937,7 @@ fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, operator: Operator, 
     // Every position, or each of a list of them; a value with one item per position is
     // spread over them, anything else goes to each (`a[0 1]:8 9` and `a[0 1]:9`).
     const count = if (all) old.count() else at.count();
-    const spread = value.isList() and value.count() == count;
+    const spread = value != null and value.?.isList() and value.?.count() == count;
     var result = old.ref();
     errdefer result.deref(vm.gpa);
     for (0..count) |k| {
@@ -1876,11 +1946,11 @@ fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, operator: Operator, 
             defer which.deref(vm.gpa);
             break :i try position(which, old.count());
         };
-        const v = if (spread) try q.operators.itemAt(vm, value, k) else value.ref();
-        defer v.deref(vm.gpa);
+        const v: ?*Value = if (value) |whole| (if (spread) try q.operators.itemAt(vm, whole, k) else whole.ref()) else null;
+        defer if (v) |each| each.deref(vm.gpa);
         const item = try q.operators.itemAt(vm, result, i);
         defer item.deref(vm.gpa);
-        const new_item = if (last) try vm.applyOperator(operator, item, v) else try vm.amendAt(item, index, dim + 1, operator, v);
+        const new_item = if (last) try vm.applyAmend(function, item, v) else try vm.amendAt(item, index, dim + 1, function, v);
         defer new_item.deref(vm.gpa);
         const next = try vm.withItem(result, i, new_item);
         result.deref(vm.gpa);
@@ -4017,4 +4087,69 @@ test "floor and lower share the underscore primitive" {
     try expectEvalMode(vm, .k, "_ 1.5", "1");
     try testing.expectError(error.type, vm.evalSource("floor 2023.04.17", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("floor 1b", .q, "<test>"));
+}
+
+test "projections of internals and glyphs, amend and trap forms of dot and at" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Internals and glyphs as values.
+    try expectEvalMode(vm, .k, "md5:-15!;-3!md5", "\"![-15]\"");
+    try expectEval(vm, "-3!(-15!)", "\"![-15]\"");
+    try expectEvalMode(vm, .k, "@(-15!)", "104h");
+    try expectEval(vm, "-3!$", "![-3]$");
+    try expectEvalMode(vm, .k, "-3!.[;();,;]", "\".[;();,;]\"");
+    try expectEvalMode(vm, .k, "@.[;();,;]", "104h");
+    try expectEvalMode(vm, .k, "f:.[;();+;];f[1 2;3]", "4 5");
+    try expectEvalMode(vm, .k, "g:.[;();:;];g[`gz;5];gz", "5");
+    try expectEvalMode(vm, .k, "-3!@[;;:;]", "\"@[;;:;]\"");
+    try expectEvalMode(vm, .k, "@[;;:;][1 2 3;0;9]", "9 2 3");
+    try expectEvalMode(vm, .k, "-3!(?).", "![-3].[?]");
+
+    // `:` applied as a function returns its right argument, so `prev` is `:':`.
+    try expectEvalMode(vm, .k, "prev:(:':);prev 1 2 3", "0N 1 2");
+    try expectEvalMode(vm, .k, "(:;^)[0][1;2]", "2");
+    try expectEvalMode(vm, .k, "(:;^)[1] 5", "^[5]");
+    try expectEvalMode(vm, .k, "a0:(#:;*:;last;sum);a0[0] 1 2 3", "3");
+    try expectEvalMode(vm, .k, "a0[1] 1 2 3", "1");
+    try expectEvalMode(vm, .k, "-3!a0", "\"(#:;*:;last;sum)\"");
+
+    // Traps.
+    try expectEval(vm, ".[+;1 2]", "3");
+    try expectEval(vm, ".[+;1 2;{x}]", "3");
+    try expectEval(vm, ".[{'\"boom\"};1 2;{x}]", "\"rank\"");
+    try expectEval(vm, ".[+;1 2 3;{x}]", "\"rank\"");
+    try expectEval(vm, "@[+;1;{x}]", "+[1]");
+    try expectEval(vm, "@[{'\"boom\"};1;{x}]", "\"boom\"");
+    try expectEval(vm, "@[{'`sym};1;{x}]", "\"sym\"");
+    try expectEval(vm, "@[{1+`a};1;{x}]", "\"type\"");
+    try expectEval(vm, "@[{x+y};1;{x}]", "{x+y}[1]");
+    try expectEval(vm, "@[{x};1;`fallback]", "1");
+    try expectEval(vm, ".[{x+y};1 2 3;`fallback]", "`fallback");
+    try expectEval(vm, "@[value;\"1+2\";{x}]", "3");
+    try expectEval(vm, "@[+;1][2]", "3");
+    try expectEval(vm, ".[+;;{x}][1 2]", "3");
+
+    // Amends.
+    try expectEval(vm, "@[1 2 3;0;:;9]", "9 2 3");
+    try expectEval(vm, "@[1 2 3;0;+;9]", "10 2 3");
+    try expectEval(vm, "@[1 2 3;0 1;+;9]", "10 11 3");
+    try expectEval(vm, "@[1 2 3;0;neg]", "-1 2 3");
+    try expectEval(vm, "@[1 2 3;0 1;neg]", "-1 -2 3");
+    try expectEval(vm, ".[(1 2;3 4);0 1;:;9]", "(1 9;3 4)");
+    try expectEval(vm, ".[(1 2;3 4);0 1;+;9]", "(1 11;3 4)");
+    try expectEval(vm, ".[1 2 3;enlist 0;neg]", "-1 2 3");
+    try expectEval(vm, ".[1 2 3;();+;1]", "2 3 4");
+    try expectEval(vm, ".[1 2 3;();:;9]", "9");
+    try expectEval(vm, ".[(1 2;3 4);(0;1);:;9]", "(1 9;3 4)");
+    try expectEval(vm, ".[(1 2;3 4);(::;1);:;9]", "(1 9;3 9)");
+    try expectEval(vm, ".[`b;();:;7]", "`b");
+    try expectEval(vm, "b", "7");
+    try expectEval(vm, ".[`b;();+;1]", "`b");
+    try expectEval(vm, "b", "8");
+    try testing.expectError(error.length, vm.evalSource("@[1 2 3;5;:;9]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[`b;1;:;9]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("@[+;1;{x};2]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("+[1;2;3]", .q, "<test>"));
 }

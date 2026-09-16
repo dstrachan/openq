@@ -547,7 +547,8 @@ pub fn rank(value: *Value) usize {
         .dict => 1,
         .lambda => |lambda| lambda.params.len,
         .unary_primitive => 1,
-        .operator => 2,
+        // `.` and `@` also have their amend and trap forms of three and four arguments.
+        .operator => |o| if (o == .apply or o == .apply_at) 4 else 2,
         .iterator => 1,
         // A projection still needs the arguments its holes and the callee's remaining
         // parameters stand for: `+[1]` takes one.

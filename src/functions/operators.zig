@@ -8,7 +8,18 @@ const Vm = q.Vm;
 const Value = q.Value;
 const Symbol = Value.Symbol;
 
+/// `:` applied as a function returns its right argument, which `prev::':` relies on; it
+/// never assigns. Assignment is done by parse trees and bytecode through `assignGlobal`.
+/// q 5.0 gives `'match` for `(:)[1;2]`, which is not copied.
 pub fn assign(vm: *Vm, x: *Value, y: *Value) !*Value {
+    _ = vm;
+    _ = x;
+    return y.ref();
+}
+
+/// Assigns `y` to the global named by the symbol `x`, creating namespaces as needed, and
+/// returns `y` without a new reference.
+pub fn assignGlobal(vm: *Vm, x: *Value, y: *Value) !*Value {
     std.log.debug("assign: {f}", .{x.fmt(vm)});
     switch (x.as) {
         .symbol => |identifier| {
