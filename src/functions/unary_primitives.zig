@@ -98,6 +98,7 @@ pub fn neg(vm: *Vm, x: *Value) !*Value {
         .each_prior => return error.type,
         .each_right => return error.type,
         .each_left => return error.type,
+        .composition => return error.type,
     }
 }
 
@@ -140,6 +141,7 @@ pub fn first(vm: *Vm, x: *Value) !*Value {
         .each_prior,
         .each_right,
         .each_left,
+        .composition,
         => return x.ref(),
         .boolean_list => |val| return vm.createValue(.boolean, val[0]),
         .byte_list => |val| return vm.createValue(.byte, val[0]),
@@ -218,10 +220,68 @@ pub fn count(vm: *Vm, x: *Value) !*Value {
     return vm.createValue(.long, @intCast(x.count()));
 }
 
-pub fn lower(vm: *Vm, x: *Value) !*Value {
-    _ = x; // autofix
-    _ = vm; // autofix
-    unreachable;
+/// `_:` is `floor` on numbers and `lower` on text, as in q: floats and reals floor to
+/// longs (`0n` to `0N`, `0w` to `0W`, `-0w` and anything below the long range to `0N`,
+/// anything above it to `0W`), integers stay as they are, chars and symbols go to lower
+/// case, and a general list is done item by item.
+pub fn lower(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .float => |v| return vm.createValue(.long, floorToLong(v)),
+        .real => |v| return vm.createValue(.long, floorToLong(v)),
+        .float_list => |items| {
+            const result = try vm.allocValue(.long_list, items.len);
+            for (result.as.long_list, items) |*r, v| r.* = floorToLong(v);
+            return result;
+        },
+        .real_list => |items| {
+            const result = try vm.allocValue(.long_list, items.len);
+            for (result.as.long_list, items) |*r, v| r.* = floorToLong(v);
+            return result;
+        },
+        .short, .int, .long, .short_list, .int_list, .long_list => return x.ref(),
+        .char => |c| return vm.createValue(.char, std.ascii.toLower(c)),
+        .char_list => |text| {
+            const result = try vm.allocValue(.char_list, text.len);
+            for (result.as.char_list, text) |*r, c| r.* = std.ascii.toLower(c);
+            return result;
+        },
+        .symbol => |s| return vm.createValue(.symbol, try lowerSymbol(vm, s)),
+        .symbol_list => |items| {
+            const result = try vm.allocValue(.symbol_list, items.len);
+            errdefer result.deref(vm.gpa);
+            for (result.as.symbol_list, items) |*r, s| r.* = try lowerSymbol(vm, s);
+            return result;
+        },
+        .list => |items| {
+            const results = try vm.gpa.alloc(*Value, items.len);
+            defer vm.gpa.free(results);
+            var done: usize = 0;
+            defer for (results[0..done]) |r| r.deref(vm.gpa);
+            for (items) |item| {
+                results[done] = try lower(vm, item);
+                done += 1;
+            }
+            return if (items.len == 0) vm.allocValue(.list, 0) else vm.enlist(results);
+        },
+        else => return error.type,
+    }
+}
+
+fn floorToLong(v: anytype) i64 {
+    const f: f64 = @floatCast(v);
+    if (std.math.isNan(f)) return @backingInt(Value.Long.null);
+    const floored = @floor(f);
+    if (floored >= 9223372036854775808.0) return @backingInt(Value.Long.inf);
+    if (floored < -9223372036854775808.0) return @backingInt(Value.Long.null);
+    return @intFromFloat(floored);
+}
+
+fn lowerSymbol(vm: *Vm, symbol: Symbol) !Symbol {
+    const text = vm.internedString(symbol);
+    const buffer = try vm.gpa.alloc(u8, text.len);
+    defer vm.gpa.free(buffer);
+    for (buffer, text) |*b, c| b.* = std.ascii.toLower(c);
+    return vm.intern(buffer);
 }
 
 pub fn not(vm: *Vm, x: *Value) !*Value {
@@ -285,6 +345,7 @@ pub fn key(vm: *Vm, x: *Value) !*Value {
         .each_prior => return error.nyi,
         .each_right => return error.nyi,
         .each_left => return error.nyi,
+        .composition => return error.nyi,
     }
 }
 
@@ -394,6 +455,7 @@ pub fn value(vm: *Vm, x: *Value) !*Value {
         .each_prior => return error.nyi,
         .each_right => return error.nyi,
         .each_left => return error.nyi,
+        .composition => return error.nyi,
     }
 }
 
@@ -440,6 +502,7 @@ pub fn enlist(vm: *Vm, x: *Value) !*Value {
         .each_prior,
         .each_right,
         .each_left,
+        .composition,
         => {
             const v = try vm.allocValue(.list, 1);
             errdefer comptime unreachable;

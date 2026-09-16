@@ -521,6 +521,7 @@ pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
             .each_prior => return error.nyi,
             .each_right => return error.nyi,
             .each_left => return error.nyi,
+            .composition => return error.nyi,
         },
         .dict => return error.nyi,
         .lambda => return error.nyi,
@@ -534,6 +535,7 @@ pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
         .each_prior => return error.nyi,
         .each_right => return error.nyi,
         .each_left => return error.nyi,
+        .composition => return error.nyi,
     }
 }
 
@@ -631,6 +633,7 @@ fn takeItems(vm: *Vm, y: *Value, n: i64, start: usize) TakeError!*Value {
         .each_prior,
         .each_right,
         .each_left,
+        .composition,
         => {
             const result = try vm.allocValue(.list, len);
             errdefer comptime unreachable;
@@ -1089,6 +1092,7 @@ fn castToAtomType(vm: *Vm, comptime tag: Value.Type, y: *Value) !*Value {
         .each_prior,
         .each_right,
         .each_left,
+        .composition,
         => return error.type,
         else => {},
     }
@@ -1381,6 +1385,7 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
             .each_prior => return error.nyi,
             .each_right => return error.nyi,
             .each_left => return error.nyi,
+            .composition => return error.nyi,
         },
         .boolean => return error.nyi,
         .byte => return error.nyi,
@@ -1423,6 +1428,7 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
         .each_prior => return error.nyi,
         .each_right => return error.nyi,
         .each_left => return error.nyi,
+        .composition => return error.nyi,
     }
 }
 

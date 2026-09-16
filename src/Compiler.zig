@@ -244,6 +244,9 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
         },
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
+            // q does not take the composition syntax inside a lambda (`{-_-:}` is a parse
+            // error there); `'[f;g]` builds one at run time instead.
+            if (Vm.isFunctionForm(tree, rhs)) return error.parse;
             try c.compileNode(rhs);
             // `'x` signals an error; `f'x` is the each of `f`.
             if (tree.nodeTag(lhs) == .apostrophe and tree.nodeData(lhs).opt_node == .none) return c.emitCode(.signal);
@@ -295,6 +298,16 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
                 }
             }
             if (maybe_rhs.unwrap()) |rhs| {
+                // A function form on the right composes with the projection on the left, as
+                // q compiles `{1+-:}` to `-:`, `+[1]`, then `'` called on both.
+                if (Vm.isFunctionForm(tree, rhs)) {
+                    try c.compileNode(rhs);
+                    try c.compileNode(lhs);
+                    try c.compileOperand(op);
+                    try c.emitCode(.apply_at);
+                    try c.emitConstant(vm.getIterator(.each));
+                    return c.emitCall(2);
+                }
                 try c.compileNode(rhs);
                 try c.compileNode(lhs);
                 // An operator is an instruction of its own, as q compiles `x+y` to `+`; a
@@ -536,7 +549,7 @@ fn emitAmend(c: *Compiler, name: []const u8, operator: Value.Operator) Error!voi
 }
 
 /// The operator an assignment glyph applies: `:` and `::` assign, `+:` adds and so on.
-fn assignOperator(tag: Node.Tag) ?Value.Operator {
+pub fn assignOperator(tag: Node.Tag) ?Value.Operator {
     return switch (tag) {
         .colon, .colon_colon => .assign,
         .plus_colon => .add,

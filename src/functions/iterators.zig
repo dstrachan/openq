@@ -185,7 +185,7 @@ fn repeat(vm: *Vm, f: *Value, control: *Value, x: *Value, comptime keep: bool) R
     var remaining: ?i64 = switch (control.as) {
         .long => |n| if (n == @backingInt(Value.Long.null)) 0 else n,
         .int => |n| if (n == @backingInt(Value.Int.null)) 0 else n,
-        .lambda, .unary_primitive, .operator, .projection, .each, .over, .scan, .each_prior, .each_right, .each_left => null,
+        .lambda, .unary_primitive, .operator, .projection, .each, .over, .scan, .each_prior, .each_right, .each_left, .composition => null,
         else => return error.type,
     };
     while (true) {

@@ -89,6 +89,10 @@ pub fn deref(value: *Value, gpa: Allocator) void {
             .each_right,
             .each_left,
             => |val| val.value.deref(gpa),
+            .composition => |val| {
+                val.f.deref(gpa);
+                val.g.deref(gpa);
+            },
         }
         gpa.destroy(value);
     }
@@ -185,6 +189,7 @@ pub fn eql(a: *Value, b: *Value) bool {
         .each_prior => |a_val| return a_val.value.eql(b.as.each_prior.value),
         .each_right => |a_val| return a_val.value.eql(b.as.each_right.value),
         .each_left => |a_val| return a_val.value.eql(b.as.each_left.value),
+        .composition => |a_val| return a_val.f.eql(b.as.composition.f) and a_val.g.eql(b.as.composition.g),
     }
 }
 
@@ -318,6 +323,19 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
         .each_prior => |d| try w.print("{f}':", .{d.value.fmt(data.vm)}),
         .each_right => |d| try w.print("{f}/:", .{d.value.fmt(data.vm)}),
         .each_left => |d| try w.print("{f}\\:", .{d.value.fmt(data.vm)}),
+        .composition => |c| {
+            // The left function drops its trailing colon, as q shows `-_-:`, `#-:`, `@+[1]`.
+            if (c.f.as == .unary_primitive) {
+                var buffer: [16]u8 = undefined;
+                var fixed: Io.Writer = .fixed(&buffer);
+                try c.f.as.unary_primitive.format(&fixed);
+                const text = fixed.buffered();
+                try w.writeAll(if (text.len > 0 and text[text.len - 1] == ':') text[0 .. text.len - 1] else text);
+            } else {
+                try w.print("{f}", .{c.f.fmt(data.vm)});
+            }
+            try w.print("{f}", .{c.g.fmt(data.vm)});
+        },
     }
 }
 
@@ -531,7 +549,13 @@ pub fn rank(value: *Value) usize {
         .unary_primitive => 1,
         .operator => 2,
         .iterator => 1,
-        .projection => |projection| projection.callee.rank(),
+        // A projection still needs the arguments its holes and the callee's remaining
+        // parameters stand for: `+[1]` takes one.
+        .projection => |projection| rank: {
+            var filled: usize = 0;
+            for (projection.args) |a| filled += @intFromBool(!a.isEmpty());
+            break :rank projection.callee.rank() -| filled;
+        },
         // Each takes what its function takes. A fold takes a seed and one list per remaining
         // parameter, so as many arguments as its function, and at least two for a monadic
         // function (`f/[n;x]`). The others take one or two arguments.
@@ -539,6 +563,8 @@ pub fn rank(value: *Value) usize {
         .over => |d| @max(2, d.value.rank()),
         .scan => |d| @max(2, d.value.rank()),
         .each_prior, .each_right, .each_left => 2,
+        // The right function takes the arguments.
+        .composition => |c| c.g.rank(),
     };
 }
 
@@ -591,6 +617,7 @@ pub fn count(value: *Value) usize {
         .each_prior => 1,
         .each_right => 1,
         .each_left => 1,
+        .composition => 1,
     };
 }
 
@@ -639,7 +666,7 @@ pub const Type = enum(i8) {
     operator = 102,
     iterator = 103,
     projection = 104,
-    // composition = 105,
+    composition = 105,
     each = 106,
     over = 107,
     scan = 108,
@@ -690,6 +717,7 @@ pub const Union = union(Type) {
     operator: Operator,
     iterator: Iterator,
     projection: Projection,
+    composition: Composition,
     each: Each,
     over: Over,
     scan: Scan,
@@ -1020,6 +1048,12 @@ pub const EachPrior = struct {
 
 pub const EachRight = struct {
     value: *Value,
+};
+
+/// `f g` composed: `g` takes the arguments and `f` its result, as `-_-:` rounds up.
+pub const Composition = struct {
+    f: *Value,
+    g: *Value,
 };
 
 pub const EachLeft = struct {

@@ -404,9 +404,29 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             }
         },
         .iterator => |iterator| {
-            // An iterator applied to a function makes the derived function.
+            // An iterator applied to a function makes the derived function; `'[f;g]` with
+            // two arguments is the composition, or just `f g` when `g` is not a function.
+            if (args.len == 2 and iterator == .each) {
+                if (!isFunction(args[1])) return vm.applyImpl(args[0], args[1..]);
+                const f = args[0].ref();
+                errdefer f.deref(vm.gpa);
+                const g = args[1].ref();
+                errdefer g.deref(vm.gpa);
+                return vm.createValue(.composition, .{ .f = f, .g = g });
+            }
             if (args.len != 1) return error.rank;
             return vm.derive(iterator, args[0]);
+        },
+        .composition => |c| {
+            // A hole projects the composition, and so do too few arguments for the right
+            // function, which shows as its result being a projection: `(-+)[1]` is `-+[1]`,
+            // while `(-+/) 1 2 3` folds and negates.
+            for (args) |a| if (a.isEmpty()) return vm.project(func, args);
+            const inner = try vm.applyImpl(c.g, args);
+            defer inner.deref(vm.gpa);
+            if (inner.as == .projection) return vm.project(func, args);
+            var one = [_]*Value{inner};
+            return vm.applyImpl(c.f, &one);
         },
         .projection => |projection| {
             const rank = projection.callee.rank();
@@ -472,6 +492,85 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     }
 }
 
+/// The parse tree `(op;lhs)` of a verb projected on its left operand, as `+[1]`.
+fn parseProjection(vm: *Vm, op: Node.Index, lhs: Node.Index) Error!*Value {
+    const list = try vm.allocValue(.list, 2);
+    errdefer vm.gpa.free(list.as.list);
+    list.as.list[0] = try vm.parseNode(op);
+    errdefer list.as.list[0].deref(vm.gpa);
+    list.as.list[1] = try vm.parseNode(lhs);
+    return list;
+}
+
+/// Whether a node is a function by its syntax alone: a verb glyph, a dangling projection
+/// (`1+`, `"s"$`), a derived function (`+/`) or a composition (`_-:`). These are what a
+/// verb composes with; an identifier, a lambda or a parenthesised expression is applied to.
+pub fn isFunctionForm(tree: *const Ast, node: Node.Index) bool {
+    return switch (tree.nodeTag(node)) {
+        .plus,
+        .minus,
+        .asterisk,
+        .percent,
+        .ampersand,
+        .pipe,
+        .caret,
+        .equal,
+        .l_angle_bracket,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
+        .r_angle_bracket,
+        .r_angle_bracket_equal,
+        .dollar,
+        .comma,
+        .hash,
+        .underscore,
+        .tilde,
+        .bang,
+        .question_mark,
+        .at,
+        .dot,
+        .zero_colon,
+        .one_colon,
+        .two_colon,
+        .colon_colon,
+        .plus_colon,
+        .minus_colon,
+        .asterisk_colon,
+        .percent_colon,
+        .ampersand_colon,
+        .pipe_colon,
+        .caret_colon,
+        .equal_colon,
+        .l_angle_bracket_colon,
+        .r_angle_bracket_colon,
+        .dollar_colon,
+        .comma_colon,
+        .hash_colon,
+        .underscore_colon,
+        .tilde_colon,
+        .bang_colon,
+        .question_mark_colon,
+        .at_colon,
+        .dot_colon,
+        .zero_colon_colon,
+        .one_colon_colon,
+        => true,
+        // `1+` dangles; `"s"$-1!'` is the projection `$["s"]` composed with its right side.
+        .apply_binary => if (tree.nodeData(node).node_and_opt_node[1].unwrap()) |rhs| isFunctionForm(tree, rhs) else true,
+        .apostrophe, .apostrophe_colon, .slash, .slash_colon, .backslash, .backslash_colon => tree.nodeData(node).opt_node != .none,
+        .apply_unary => isFunctionForm(tree, tree.nodeData(node).node_and_node[1]),
+        else => false,
+    };
+}
+
+/// Whether a value can be applied.
+pub fn isFunction(value: *const Value) bool {
+    return switch (value.as) {
+        .lambda, .unary_primitive, .operator, .iterator, .projection, .each, .over, .scan, .each_prior, .each_right, .each_left, .composition => true,
+        else => false,
+    };
+}
+
 /// The derived function of an iterator on `function`: `+/` from `/` and `+`.
 pub fn derive(vm: *Vm, iterator: Iterator, function: *Value) Allocator.Error!*Value {
     const f = function.ref();
@@ -531,6 +630,7 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_prior,
             .each_right,
             .each_left,
+            .composition,
             => break :is_vector false,
             .boolean,
             .byte,
@@ -587,6 +687,7 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_prior,
             .each_right,
             .each_left,
+            .composition,
             => unreachable,
             inline .boolean,
             .byte,
@@ -1110,11 +1211,16 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
         },
         .apply_unary => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
+            // Applied to a function form, anything composes: `-_-:` is `'[-:;'[_:;-:]]`,
+            // `type 1+` is `'[@:;+[1]]` and `f 1+` is `'[f;+[1]]`, while `-f` and `type(1+)`
+            // apply, as q parses them.
+            const composes = isFunctionForm(tree, rhs);
 
-            var values: std.ArrayList(*Value) = try .initCapacity(gpa, 2);
+            var values: std.ArrayList(*Value) = try .initCapacity(gpa, if (composes) 3 else 2);
             defer values.deinit(gpa);
             errdefer for (values.items) |v| v.deref(gpa);
 
+            if (composes) values.appendAssumeCapacity(vm.getIterator(.each));
             values.appendAssumeCapacity(try vm.parseUnaryNode(lhs));
             values.appendAssumeCapacity(try vm.parseNode(rhs));
 
@@ -1127,6 +1233,18 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             // alias (`.q.a:`alias` makes `a` read `alias` but `a:5` an error, as in q 5.0).
             const op_tag = tree.nodeTag(op);
             if ((op_tag == .colon or op_tag == .colon_colon) and tree.nodeTag(lhs) == .keyword) return error.assign;
+
+            // A right operand that is a function form composes with the projection on the
+            // left operand: `"s"$-1!'` is `'[$["s"];!'[-1]]`, as q parses it.
+            if (maybe_rhs.unwrap()) |rhs| if (Compiler.assignOperator(op_tag) == null and isFunctionForm(tree, rhs)) {
+                var values: std.ArrayList(*Value) = try .initCapacity(gpa, 3);
+                defer values.deinit(gpa);
+                errdefer for (values.items) |v| v.deref(gpa);
+                values.appendAssumeCapacity(vm.getIterator(.each));
+                values.appendAssumeCapacity(try vm.parseProjection(op, lhs));
+                values.appendAssumeCapacity(try vm.parseNode(rhs));
+                return vm.createValue(.list, values.toOwnedSliceAssert());
+            };
 
             var values: std.ArrayList(*Value) = try .initCapacity(gpa, if (maybe_rhs == .none) 2 else 3);
             defer values.deinit(gpa);
@@ -3801,10 +3919,102 @@ test "iterators follow q" {
     try testing.expectError(error.rank, vm.evalSource("{x}/:[1 2 3]", .q, "<test>"));
 
     // Derived functions are values.
-    try expectEval(vm, "-3!+/", "\"+/\"");
-    try expectEval(vm, "-3!{x}'", "\"{x}'\"");
+    try expectEval(vm, "-3!(+/)", "\"+/\"");
+    try expectEval(vm, "-3!+/", "![-3]+/");
+    try expectEval(vm, "-3!({x}')", "\"{x}'\"");
     try expectEval(vm, "'[+]", "+'");
     try expectEvalMode(vm, .k, "{x/y}[+;1 2 3]", "6");
     try testing.expectError(error.parse, vm.evalSource("{x/y}", .q, "<test>"));
     try expectEval(vm, "f:{x+y};g:{f/[x]};g 1 2 3", "6");
+}
+
+test "compositions follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // A verb applied to a function form composes, whatever the left side; an identifier
+    // or a parenthesised expression on the right is applied to.
+    try expectEval(vm, "parse \"k)-_-:\"", "(';-:;(';_:;-:))");
+    try expectEval(vm, "parse \"type 1+\"", "(';@:;(+;1))");
+    try expectEval(vm, "parse \"type(1+)\"", "(@:;(+;1))");
+    try expectEval(vm, "parse \"neg 1+\"", "(';-:;(+;1))");
+    try expectEval(vm, "parse \"f 1+\"", "(';`f;(+;1))");
+    try expectEval(vm, "parse \"k)\\\"s\\\"$-1!'\"", "(';($;\"s\");((';!);-1))");
+    try expectEval(vm, "parse \"k)64/:b6?\"", "(';(/:;64);(?;`b6))");
+    try expectEval(vm, "parse \"k)+/-:\"", "(';(/;+);-:)");
+    try expectEval(vm, "parse \"k)#:-:\"", "(';#:;-:)");
+    try expectEval(vm, "parse \"k)-f\"", "(-:;`f)");
+    try expectEval(vm, "parse \"k)-(_:)\"", "(-:;_:)");
+    try expectEval(vm, "parse \"k)-_-:x\"", "(-:;(_:;(-:;`x)))");
+    try expectEval(vm, "parse \"k)(-_-:)x\"", "((';-:;(';_:;-:));`x)");
+    try expectEval(vm, "parse \"k)-'\"", "(';-)");
+
+    try expectEvalMode(vm, .k, "(-_-:) -1.5", "-1");
+    try expectEvalMode(vm, .k, "f:-_-:;f -1.5", "-1");
+    try expectEvalMode(vm, .k, "-3!f", "\"-_-:\"");
+    try expectEvalMode(vm, .k, "@f", "105h");
+    try expectEvalMode(vm, .k, "@1+", "@+[1]");
+    try expectEvalMode(vm, .k, "@(1+)", "104h");
+    try expectEval(vm, "type 1+", "@+[1]");
+    try expectEval(vm, "type(1+)", "104h");
+    try expectEval(vm, "neg 1+", "-+[1]");
+    try expectEval(vm, "(neg 1+) 5", "-6");
+    try expectEval(vm, "'[neg;+][1;2]", "-3");
+    try expectEval(vm, "'[neg;neg] 2", "2");
+    try expectEval(vm, "'[neg;1]", "-1");
+    try expectEvalMode(vm, .k, "'[-:;_:] -1.5", "2");
+    try expectEvalMode(vm, .k, "(')[-:;_:]", "-_:");
+    try expectEvalMode(vm, .k, "('['[-:;_:];-:]) -1.5", "-1");
+    try expectEvalMode(vm, .k, "'[-:;{x*2}] 3", "-6");
+    try expectEvalMode(vm, .k, "(-+)[1;2]", "-3");
+    try expectEvalMode(vm, .k, "(-+)[1]", "-+[1]");
+    try expectEvalMode(vm, .k, "(-+/) 1 2 3", "-6");
+    try expectEvalMode(vm, .k, "-3!(-+/)", "\"-+/\"");
+    try expectEvalMode(vm, .k, "-3!-+/", "![-3]-+/");
+    try expectEvalMode(vm, .k, "(+/-:) 1 2 3", "-6");
+    try expectEvalMode(vm, .k, "-3!(+/-:)", "\"+/-:\"");
+    try expectEvalMode(vm, .k, "(-#:') 1 2 3", "-1 -1 -1");
+    try expectEvalMode(vm, .k, "(-#:) 1 2 3", "-3");
+    try expectEvalMode(vm, .k, "-3!(#:-:)", "\"#-:\"");
+    try expectEvalMode(vm, .k, "(#:-:) 1 2 3", "3");
+    try expectEval(vm, "(value {'[neg;neg]})[0]", "160 160 161 10 2 0");
+    try expectEval(vm, "(value {1+-:})[0]", "160 13 161 82 162 10 2 0");
+    try expectEvalMode(vm, .k, "{1+-:}[] 5", "-4");
+    try expectEval(vm, "parse \"k)1+2+\"", "(';(+;1);(+;2))");
+    try expectEval(vm, "parse \"k)(1+)-:\"", "(-:;(+;1))");
+    try testing.expectError(error.type, vm.evalSource("g:-{x*2};g 3", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("f:{x*2};g:-f;g 3", .k, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("'[-:;_:;+]", .k, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("(-_-:)[1;2]", .k, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("{-_-:}", .k, "<test>"));
+    try testing.expectError(error.parse, vm.evalSource("{@1+}", .k, "<test>"));
+}
+
+test "floor and lower share the underscore primitive" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "floor 1.5", "1");
+    try expectEval(vm, "floor -1.5", "-2");
+    try expectEval(vm, "floor 1.5 2.7", "1 2");
+    try expectEval(vm, "floor 1.5e", "1");
+    try expectEval(vm, "floor -1.5e", "-2");
+    try expectEval(vm, "type floor 1.5e", "-7h");
+    try expectEval(vm, "floor 0n", "0N");
+    try expectEval(vm, "floor 0w", "0W");
+    try expectEval(vm, "floor -0w", "0N");
+    try expectEval(vm, "floor 2.5 0n", "2 0N");
+    try expectEval(vm, "floor 9.9e18", "0W");
+    try expectEval(vm, "floor 1e18", "1000000000000000000");
+    try expectEval(vm, "floor 1", "1");
+    try expectEval(vm, "floor 1h", "1h");
+    try expectEval(vm, "lower \"ABC\"", "\"abc\"");
+    try expectEval(vm, "lower \"A\"", "\"a\"");
+    try expectEval(vm, "lower `ABC`Def", "`abc`def");
+    try expectEval(vm, "floor (1.5;\"A\")", "(1;\"a\")");
+    try expectEvalMode(vm, .k, "_ 1.5", "1");
+    try testing.expectError(error.type, vm.evalSource("floor 2023.04.17", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("floor 1b", .q, "<test>"));
 }
