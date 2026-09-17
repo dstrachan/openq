@@ -398,11 +398,139 @@ const Numeric = union(enum) {
 
 // @"or" is defined with the comparisons below.
 
-pub fn fill(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x^y` fill: `y` with its nulls replaced by `x`, both first cast to the type the pair
+/// promotes to, as q does: numbers widen (`0.0^1 0N 3` is `1 0 3f`, `0^0Nh` is `0`), a
+/// temporal type wins over a number (`0.5^0Nd` is `2000.01.02`, `2000.01.01^1 0N` is
+/// `2000.01.02 2000.01.01`), two times of day take the finer, a char wins over a number
+/// so `"a"^0N` is `"\000"` (the cast null is no longer null), symbols only fill symbols,
+/// and other mixes are a type error. An atom fills every item of a list and an empty
+/// typed list is retyped (`` 0n^`long$() `` is `` `float$() ``); two lists pair up; a list
+/// filling an atom is `nyi` as in q. A dictionary is filled by value, and one dictionary
+/// fills another by key, the result holding both sets of keys.
+pub fn fill(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (y.as == .dict) {
+        if (x.as != .dict) return mapDictValues(vm, y, x, fill);
+        return fillDict(vm, x, y);
+    }
+    if (Vm.isFunction(x) or x.as == .dict) return error.nyi;
+    if (Vm.isFunction(y)) return error.type;
+    if (x.isList() and !y.isList()) return error.nyi;
+    if (y.isList() and y.count() == 0 and y.as != .list) {
+        // An empty typed list keeps no items but takes the promoted type.
+        if (x.isList()) return y.ref();
+        const atom_tag: Value.Type = @fromBackingInt(-@backingInt(std.meta.activeTag(y.as)));
+        const target = try fillType(std.meta.activeTag(x.as), atom_tag);
+        return switch (target) {
+            inline .boolean, .byte, .short, .int, .long, .real, .float, .char, .symbol, .timestamp, .month, .date, .datetime, .timespan, .minute, .second, .time => |t| vm.allocValue(comptime counterpart(t), 0),
+            else => unreachable,
+        };
+    }
+    return pairwise(vm, x, y, fillAtoms);
+}
+
+/// `f[x;]` over a dictionary's values, keeping its keys.
+fn mapDictValues(vm: *Vm, d: *Value, x: *Value, comptime f: fn (*Vm, *Value, *Value) Vm.RunError!*Value) Vm.RunError!*Value {
+    const values = try f(vm, x, d.as.dict.values);
+    errdefer values.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = d.as.dict.keys.ref(), .values = values });
+}
+
+/// One dictionary filling another: `y`'s null values are replaced by `x`'s value under the
+/// same key, and keys of `x` missing from `y` are kept, so `` (`a`b!1 2)^`a`c!0N 3 `` is
+/// `` `a`b`c!1 2 3 ``.
+fn fillDict(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    const yd = y.as.dict;
+    const n = yd.keys.count();
+    const filled = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(filled);
+    var done: usize = 0;
+    defer for (filled[0..done]) |v| v.deref(vm.gpa);
+    for (0..n) |i| {
+        const key = try itemAt(vm, yd.keys, i);
+        defer key.deref(vm.gpa);
+        const value = try itemAt(vm, yd.values, i);
+        defer value.deref(vm.gpa);
+        var args = [_]*Value{key};
+        const from_x = try vm.applyImpl(x, &args);
+        defer from_x.deref(vm.gpa);
+        filled[done] = try fill(vm, from_x, value);
+        done += 1;
+    }
+    const values = if (n == 0) try vm.allocValue(.list, 0) else try vm.enlist(filled);
+    defer values.deref(vm.gpa);
+    const replaced = try vm.createValue(.dict, .{ .keys = yd.keys.ref(), .values = values.ref() });
+    defer replaced.deref(vm.gpa);
+    return join(vm, x, replaced);
+}
+
+/// The type a fill of two atom types works in: symbols with symbols only, a char over a
+/// number, a temporal type over a number, two times of day the finer, and otherwise the
+/// wider number (booleans below bytes below shorts, ints, longs, reals and floats).
+fn fillType(x: Value.Type, y: Value.Type) error{type}!Value.Type {
+    if (x == .symbol or y == .symbol) return if (x == y) .symbol else error.type;
+    const x_temporal = isTemporalTag(x);
+    const y_temporal = isTemporalTag(y);
+    if (x == .char or y == .char) {
+        if (x_temporal or y_temporal) return error.type;
+        return .char;
+    }
+    if (x_temporal and y_temporal) {
+        if (x == y) return x;
+        if (Temporal.isTimeOfDay(x) and Temporal.isTimeOfDay(y)) return Temporal.finer(x, y);
+        return error.type;
+    }
+    if (x_temporal) return x;
+    if (y_temporal) return y;
+    return if (numericRank(x) >= numericRank(y)) x else y;
+}
+
+fn isTemporalTag(tag: Value.Type) bool {
+    return switch (tag) {
+        .timestamp, .month, .date, .datetime, .timespan, .minute, .second, .time => true,
+        else => false,
+    };
+}
+
+fn numericRank(tag: Value.Type) u8 {
+    return switch (tag) {
+        .boolean => 0,
+        .byte => 1,
+        .short => 2,
+        .int => 3,
+        .long => 4,
+        .real => 5,
+        .float => 6,
+        else => unreachable,
+    };
+}
+
+/// Whether an atom is the null of its type.
+fn atomIsNull(v: *Value) bool {
+    return switch (v.as) {
+        .char => |c| c == ' ',
+        .symbol => |s| s == .empty,
+        else => if (Comparable.of(v)) |c| c == .null else false,
+    };
+}
+
+fn castAtom(vm: *Vm, target: Value.Type, v: *Value) Vm.RunError!*Value {
+    if (std.meta.activeTag(v.as) == target) return v.ref();
+    return switch (target) {
+        inline .boolean, .byte, .short, .int, .long, .real, .float, .char, .symbol, .timestamp, .month, .date, .datetime, .timespan, .minute, .second, .time => |t| castToAtomType(vm, t, v),
+        else => unreachable,
+    };
+}
+
+fn fillAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    // Items of a general list may be lists or dictionaries themselves.
+    if (x.isList() or y.isList() or y.as == .dict) return fill(vm, x, y);
+    if (Vm.isFunction(x) or x.as == .dict) return error.nyi;
+    if (Vm.isFunction(y) or y.as == .dict) return error.type;
+    const target = try fillType(std.meta.activeTag(x.as), std.meta.activeTag(y.as));
+    const cast_y = try castAtom(vm, target, y);
+    if (!atomIsNull(cast_y)) return cast_y;
+    cast_y.deref(vm.gpa);
+    return castAtom(vm, target, x);
 }
 
 // equal is defined with the comparisons below.
@@ -1275,11 +1403,145 @@ fn daysToMonth(days: i64) i64 {
     return (civil.year - 2000) * 12 + civil.month - 1;
 }
 
-pub fn drop(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x_y` drop and cut, as q does them. An integer atom `x` (a boolean, byte, short, int
+/// or long; a null or a float is `type`) drops that many items from the front of a list,
+/// or from the back when negative, past the end giving the typed empty; on a dictionary
+/// it drops entries. An atom `x` of another type is a key to delete from a dictionary
+/// `y` (a missing key changes nothing), and a symbol list deletes several. A list of
+/// integer indices `x` cuts a list `y` into the pieces starting at each index
+/// (`0 2_"abcd"` is `("ab";"cd")`, `2 2_!4` is `` (`long$();2 3) ``), which must be
+/// non-decreasing and within the count (else `domain`); a short list or a general list
+/// is `type`. A list `x` with an integer atom `y` deletes the item at that position
+/// (`1 2 3_1` is `1 3`, out of range changes nothing), and a dictionary `x` with an atom
+/// `y` deletes that key.
+pub fn drop(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .boolean, .byte, .short, .int, .long => {
+            const n: i64 = switch (x.as) {
+                .boolean => |b| @intFromBool(b),
+                .byte => |b| b,
+                .short => |v| if (v == @backingInt(Value.Short.null)) return error.type else v,
+                .int => |v| if (v == @backingInt(Value.Int.null)) return error.type else v,
+                .long => |v| if (v == @backingInt(Value.Long.null)) return error.type else v,
+                else => unreachable,
+            };
+            if (y.as == .dict) {
+                if (n == 0) return error.type;
+                const keys = try dropCount(vm, n, y.as.dict.keys);
+                errdefer keys.deref(vm.gpa);
+                const values = try dropCount(vm, n, y.as.dict.values);
+                errdefer values.deref(vm.gpa);
+                return vm.createValue(.dict, .{ .keys = keys, .values = values });
+            }
+            if (!y.isList()) return error.type;
+            return dropCount(vm, n, y);
+        },
+        .list => {
+            if (y.isList()) return error.type;
+            return deleteAt(vm, x, y);
+        },
+        .boolean_list, .byte_list, .int_list, .long_list => {
+            if (y.isList()) return cut(vm, x, y);
+            return deleteAt(vm, x, y);
+        },
+        .short_list, .real_list, .float_list, .char_list, .timestamp_list, .month_list, .date_list, .datetime_list, .timespan_list, .minute_list, .second_list, .time_list => {
+            if (y.isList()) return error.type;
+            return deleteAt(vm, x, y);
+        },
+        .symbol_list => |names| {
+            if (y.as != .dict) return error.type;
+            var result = y.ref();
+            for (names) |name| {
+                const key = try vm.createValue(.symbol, name);
+                defer key.deref(vm.gpa);
+                const next = try deleteKey(vm, result, key);
+                result.deref(vm.gpa);
+                result = next;
+            }
+            return result;
+        },
+        .dict => {
+            if (y.isList() or y.as == .dict or Vm.isFunction(y)) return error.type;
+            return deleteKey(vm, x, y);
+        },
+        .real, .float, .char, .symbol, .timestamp, .month, .date, .datetime, .timespan, .minute, .second, .time => {
+            if (y.as != .dict) return error.type;
+            return deleteKey(vm, y, x);
+        },
+        else => return error.type,
+    }
+}
+
+/// `n` items dropped from the front of a list, or from the back for a negative `n`.
+fn dropCount(vm: *Vm, n: i64, y: *Value) Vm.RunError!*Value {
+    const count: i64 = @intCast(y.count());
+    const kept = @max(count - @as(i64, @intCast(@abs(n))), 0);
+    return takeItems(vm, y, kept, if (n >= 0) @intCast(@min(n, count)) else 0);
+}
+
+/// The dictionary `d` without the entry for `key`, itself when the key is missing.
+fn deleteKey(vm: *Vm, d: *Value, key: *Value) Vm.RunError!*Value {
+    const entries = d.as.dict;
+    const at = (try vm.keyPosition(entries.keys, key)) orelse return d.ref();
+    const keys = try withoutItem(vm, entries.keys, at);
+    errdefer keys.deref(vm.gpa);
+    const values = try withoutItem(vm, entries.values, at);
+    errdefer values.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = keys, .values = values });
+}
+
+/// `x_i`: the list `x` without the item at position `i`, unchanged when `i` is out of range.
+fn deleteAt(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    const i: i64 = switch (y.as) {
+        .boolean => |b| @intFromBool(b),
+        .byte => |b| b,
+        .short => |v| v,
+        .int => |v| v,
+        .long => |v| v,
+        else => return error.type,
+    };
+    if (i < 0 or i >= x.count()) return x.ref();
+    return withoutItem(vm, x, @intCast(i));
+}
+
+fn withoutItem(vm: *Vm, list: *Value, at: usize) Vm.RunError!*Value {
+    const n = list.count();
+    const head = try takeItems(vm, list, @intCast(at), 0);
+    defer head.deref(vm.gpa);
+    const tail = try takeItems(vm, list, @intCast(n - at - 1), at + 1);
+    defer tail.deref(vm.gpa);
+    return join(vm, head, tail);
+}
+
+/// `x_y` with a list of indices: `y` cut into a piece from each index to the next.
+fn cut(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    const n = x.count();
+    const count: i64 = @intCast(y.count());
+    const starts = try vm.gpa.alloc(i64, n);
+    defer vm.gpa.free(starts);
+    for (starts, 0..) |*start, i| {
+        start.* = switch (x.as) {
+            .boolean_list => |v| @intFromBool(v[i]),
+            .byte_list => |v| v[i],
+            .int_list => |v| if (v[i] == @backingInt(Value.Int.null)) return error.domain else v[i],
+            .long_list => |v| if (v[i] == @backingInt(Value.Long.null)) return error.domain else v[i],
+            else => unreachable,
+        };
+        if (start.* < 0 or start.* > count or (i > 0 and start.* < starts[i - 1])) return error.domain;
+    }
+    const pieces = try vm.allocValue(.list, n);
+    var filled: usize = 0;
+    errdefer {
+        for (pieces.as.list[0..filled]) |piece| piece.deref(vm.gpa);
+        vm.gpa.free(pieces.as.list);
+        vm.gpa.destroy(pieces);
+    }
+    for (starts, 0..) |start, i| {
+        const end = if (i + 1 < n) starts[i + 1] else count;
+        pieces.as.list[filled] = try takeItems(vm, y, end - start, @intCast(start));
+        filled += 1;
+    }
+    return pieces;
 }
 
 // match is defined with the comparisons below.
