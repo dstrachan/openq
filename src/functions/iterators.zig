@@ -265,14 +265,23 @@ fn typedLike(vm: *Vm, like: *Value, n: i64) RunError!*Value {
     };
 }
 
-/// `x f/:y`: `f[x;]` applied to each item of `y`.
+/// `x f/:y`: `f[x;]` applied to each item of `y`. With data instead of a function on the
+/// left, `x/:y` is `sv`.
 pub fn right(vm: *Vm, f: *Value, args: []*Value) RunError!*Value {
+    if (!Vm.isFunction(f)) {
+        if (args.len != 1) return error.rank;
+        return q.operators.sv(vm, f, args[0]);
+    }
     if (args.len != 2) return error.rank;
     return side(vm, f, args[0], args[1], false);
 }
 
-/// `x f\\:y`: `f[;y]` applied to each item of `x`.
+/// `x f\\:y`: `f[;y]` applied to each item of `x`. With data on the left, `x\\:y` is `vs`.
 pub fn left(vm: *Vm, f: *Value, args: []*Value) RunError!*Value {
+    if (!Vm.isFunction(f)) {
+        if (args.len != 1) return error.rank;
+        return q.operators.vs(vm, f, args[0]);
+    }
     if (args.len != 2) return error.rank;
     return side(vm, f, args[0], args[1], true);
 }

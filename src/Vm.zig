@@ -25,6 +25,7 @@ pub const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     domain,
     identifier,
     length,
+    limit,
     nyi,
     os,
     parse,
@@ -58,6 +59,9 @@ precision: u8 = 7,
 local_zone: q.clock.LocalZone = .utc,
 /// The text of the last `'x` signal, which `error.signal` reports.
 signal_message: ?[]u8 = null,
+/// The environment `getenv` reads and `setenv` writes: the process's own, copied in by
+/// `main`, and empty in tests.
+environ: std.process.Environ.Map,
 
 const Constant = enum(u8) {
     empty_list,
@@ -74,7 +78,9 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
         .io = io,
         .gpa = gpa,
         .stdout = stdout,
+        .environ = .init(gpa),
     };
+    errdefer vm.environ.deinit();
     errdefer vm.string_table.deinit(gpa);
     errdefer vm.string_bytes.deinit(gpa);
 
@@ -271,6 +277,7 @@ pub fn qEntry(vm: *Vm, name: []const u8) ?*Value {
 
 pub fn deinit(vm: *Vm) void {
     if (vm.signal_message) |message| vm.gpa.free(message);
+    vm.environ.deinit();
     vm.local_zone.deinit();
     vm.string_table.deinit(vm.gpa);
     vm.string_bytes.deinit(vm.gpa);
@@ -326,7 +333,6 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .real,
         .float,
         .char,
-        .symbol,
         .timestamp,
         .month,
         .date,
@@ -336,6 +342,12 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .second,
         .time,
         => return error.type,
+        // A symbol names a global: `` `a 1 `` indexes `a` and `` `f 2 `` calls `f`.
+        .symbol => |name| {
+            const target = try vm.readGlobal(name);
+            defer target.deref(vm.gpa);
+            return vm.applyImpl(target, args);
+        },
         .list,
         .boolean_list,
         .byte_list,
@@ -355,7 +367,7 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .second_list,
         .time_list,
         => return vm.indexList(func, args),
-        .dict => return error.nyi,
+        .dict => return vm.indexDict(func, args),
         .lambda => return vm.callLambda(func, args),
         .unary_primitive => |unary_primitive| {
             if (unary_primitive == .enlist and args.len > 1) return vm.enlist(args);
@@ -411,7 +423,6 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 });
             } else {
                 switch (operator) {
-                    ._unused => unreachable,
                     inline else => |t| return @field(q.operators, @tagName(t))(vm, args[0], args[1]),
                 }
             }
@@ -700,6 +711,7 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_right,
             .each_left,
             .composition,
+            .dict,
             => break :is_vector false,
             .boolean,
             .byte,
@@ -718,7 +730,6 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .minute,
             .second,
             .time,
-            .dict,
             => @backingInt(args[0].as),
         };
         break :is_vector for (args[1..]) |a| {
@@ -782,7 +793,7 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
                 for (@field(value.as, @tagName(list_tag)), args) |*v, a| v.* = @field(a.as, @tagName(tag));
                 return value;
             },
-            .dict => return error.nyi,
+            .dict => unreachable,
         }
     } else {
         const list = try vm.gpa.alloc(*Value, args.len);
@@ -1587,7 +1598,10 @@ fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
 pub fn system(vm: *Vm, command: []const u8) !*Value {
     const name_end = std.mem.findAny(u8, command, " \t") orelse command.len;
     const name = command[0..name_end];
-    const args = std.mem.trim(u8, command[name_end..], " \t");
+    // A built-in command reads one word, so `\d .h / comment` and `\P 5 / c` ignore
+    // the rest of the line as q does; the shell gets the whole line.
+    const rest = std.mem.trim(u8, command[name_end..], " \t");
+    const args = rest[0 .. std.mem.findAny(u8, rest, " \t") orelse rest.len];
 
     if (std.mem.eql(u8, name, "d")) {
         if (args.len == 0) return vm.createValue(.symbol, vm.namespace);
@@ -1965,6 +1979,8 @@ fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, va
 fn position(at: *Value, count: usize) error{ type, length }!usize {
     const i: i64 = switch (at.as) {
         .boolean => |b| @intFromBool(b),
+        .byte => |b| b,
+        .char => |c| c,
         .short => |v| v,
         .int => |v| v,
         .long => |v| v,
@@ -2014,6 +2030,94 @@ fn withItem(vm: *Vm, list: *Value, i: usize, item: *Value) RunError!*Value {
     }
 }
 
+/// Indexing a dictionary, as `d[k]` or `d k`: a key reads its value and a missing key the
+/// null shaped like the values (`` (`a`b!1 2)`c `` is `0N`, `` (`a`b!(1 2;3))`c `` is
+/// `` `long$() ``), a key of another type than a typed key list is a type error, a list of
+/// keys reads each (a nested list item by item: `` (`a`b!1 2)(`a`b;`b) `` is `(1 2;2)`),
+/// `::` or a hole keeps the whole dictionary, and further indices apply to what was read,
+/// or to every value under `::` (`` (`a`b!(1 2;3 4))[;1] `` is `` `a`b!2 4 ``).
+fn indexDict(vm: *Vm, dict_value: *Value, args: []*Value) RunError!*Value {
+    const dict = dict_value.as.dict;
+    const first = args[0];
+    const rest = args[1..];
+    if (first.isEmpty() or (first.as == .unary_primitive and first.as.unary_primitive == .identity)) {
+        if (rest.len == 0) return dict_value.ref();
+        const values = try vm.indexList(dict.values, args);
+        errdefer values.deref(vm.gpa);
+        return vm.createValue(.dict, .{ .keys = dict.keys.ref(), .values = values });
+    }
+    if (!first.isList()) return vm.lookupKey(dict_value, first, rest);
+    const n = first.count();
+    const items = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(items);
+    var done: usize = 0;
+    defer for (items[0..done]) |item| item.deref(vm.gpa);
+    const each_args = try vm.gpa.alloc(*Value, args.len);
+    defer vm.gpa.free(each_args);
+    @memcpy(each_args[1..], rest);
+    for (0..n) |i| {
+        const key = try q.operators.itemAt(vm, first, i);
+        defer key.deref(vm.gpa);
+        each_args[0] = key;
+        items[done] = try vm.indexDict(dict_value, each_args);
+        done += 1;
+    }
+    return vm.enlist(items);
+}
+
+/// One key's value, the values' null when it is missing, indexed further by `rest`.
+fn lookupKey(vm: *Vm, dict_value: *Value, key: *Value, rest: []*Value) RunError!*Value {
+    const dict = dict_value.as.dict;
+    const value = if (try vm.keyPosition(dict.keys, key)) |i|
+        try q.operators.itemAt(vm, dict.values, i)
+    else
+        try q.operators.nullLike(vm, dict.values);
+    if (rest.len == 0) return value;
+    defer value.deref(vm.gpa);
+    return vm.applyImpl(value, rest);
+}
+
+/// Where `key` sits in a dictionary's keys, if at all. Typed keys only take an atom of
+/// their own type (`(1 2!3 4) 2h` is a type error), and nulls find themselves; general
+/// keys take anything that matches.
+fn keyPosition(vm: *Vm, keys: *Value, key: *Value) RunError!?usize {
+    switch (keys.as) {
+        .list => |items| {
+            for (items, 0..) |item, i| if (try q.operators.matches(vm, item, key)) return i;
+            return null;
+        },
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| {
+            const atom_tag = comptime q.operators.counterpart(tag);
+            if (key.as != atom_tag) return error.type;
+            const needle = @field(key.as, @tagName(atom_tag));
+            const Item = @TypeOf(needle);
+            for (items, 0..) |item, i| {
+                const same = if (Item == f32 or Item == f64) item == needle or (std.math.isNan(item) and std.math.isNan(needle)) else item == needle;
+                if (same) return i;
+            }
+            return null;
+        },
+        else => return error.type,
+    }
+}
+
 /// Indexing a list, as `x[i]` or `x i`: an integer picks an item, with a null shaped like
 /// the first item when it is out of range (`1 2 3[-1]` is `0N`, `"abc" 5` is `" "`), a list
 /// of indices picks each, `::` or a hole keeps everything, and further indices apply to what
@@ -2023,8 +2127,11 @@ fn indexList(vm: *Vm, list: *Value, args: []*Value) RunError!*Value {
     const rest = args[1..];
     const all = first.isEmpty() or (first.as == .unary_primitive and first.as.unary_primitive == .identity);
     if (!all and !first.isList()) {
+        // Chars and bytes index by their codes, as `"abc" "a"` and `x["a"]` do in q.
         const index: ?i64 = switch (first.as) {
             .boolean => |b| @intFromBool(b),
+            .byte => |b| b,
+            .char => |c| c,
             .short => |v| if (v == @backingInt(Value.Short.null)) null else v,
             .int => |v| if (v == @backingInt(Value.Int.null)) null else v,
             .long => |v| if (v == @backingInt(Value.Long.null)) null else v,
@@ -2479,9 +2586,9 @@ test "natives from .Q.res work in both modes" {
     try expectEvalMode(vm, .k, "1 in", "in[1]");
     try expectEval(vm, "2 xexp", "xexp[2]");
     try expectEval(vm, "(1 in;2 bin)", "(in[1];bin[2])");
-    try testing.expectError(error.nyi, vm.evalSource("1 in 1 2", .q, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("(*1 2)in 1 4", .k, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("(n:1 2)bin 2", .k, "<test>"));
+    try expectEval(vm, "1 in 1 2", "1b");
+    try expectEvalMode(vm, .k, "(*1 2)in 1 4", "1b");
+    try expectEvalMode(vm, .k, "(n:1 2)bin 2", "1");
 }
 
 test "system commands through value" {
@@ -4176,7 +4283,7 @@ test "review fixes: precedence, k newlines, scans, equality, stubs and long list
 
     // An assignment inside a bracketed cond used after a name compiles (the scan pass
     // walks the operator node), and compositions compile inside lambdas.
-    try expectEvalMode(vm, .k, "{n:1;n+.z.s$[p:x;n;p]}", "{n:1;n+.z.s$[p:x;n;p]}");
+    try expectEvalMode(vm, .k, "{n:1;n+.z.s$[p:x;n;p]}", "k){n:1;n+.z.s$[p:x;n;p]}");
     try expectEvalMode(vm, .k, "{$[1;2;f $[p:1;2;3]]}[]", "2");
     try expectEvalMode(vm, .k, "{(!#:)'x}(1 2;3 4 5)", "(0 1;0 1 2)");
 
@@ -4195,8 +4302,8 @@ test "review fixes: precedence, k newlines, scans, equality, stubs and long list
     try expectEval(vm, "(1;`a)~(1;`a;2)", "0b");
 
     // Stubs fail with nyi instead of crashing.
-    try testing.expectError(error.nyi, vm.evalSource("reverse 1 2 3", .q, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("string 1", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("flip `a`b!(1 2;3 4)", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("1?5", .q, "<test>"));
 
     // A long list literal that fails part way is cleaned up (it used to move the stack).
     try testing.expectError(error.type, vm.evalSource("(\"a\";\"b\";\"c\";\"d\";\"e\";\"f\";\"g\";\"h\";\"i\";\"j\";\"k\";\"l\";\"m\";\"n\";\"o\";\"p\";\"q\";\"r\";\"s\";\"t\";\"u\";\"v\" \"w\";\"x\")", .q, "<test>"));
@@ -4210,7 +4317,7 @@ test "keywords bound to derived functions parse as q parses them" {
     try expectEvalMode(vm, .k, ".q.prev: :':", ":':");
     try expectEvalMode(vm, .k, ".q.sums:+\\", "+\\");
     try expectEvalMode(vm, .k, ".q.deltas:-':", "-':");
-    try expectEvalMode(vm, .k, ".q.f7:{x+y}'", "{x+y}'");
+    try expectEvalMode(vm, .k, ".q.f7:{x+y}'", "k){x+y}'");
     try expectEval(vm, "prev til 10", "0N 0 1 2 3 4 5 6 7 8");
     try expectEval(vm, "prev prev til 10", "0N 0N 0 1 2 3 4 5 6 7");
     try expectEval(vm, "parse \"prev prev 3\"", "(:':;(:':;3))");
@@ -4218,9 +4325,904 @@ test "keywords bound to derived functions parse as q parses them" {
     try expectEval(vm, "parse \"sums sums 1 2\"", "(+\\;(+\\;1 2))");
     try expectEval(vm, "parse \"1 deltas 2\"", "(1;(-':;2))");
     try expectEval(vm, "parse \"1 mmu 2\"", "($;1;2)");
-    try expectEval(vm, "parse \"1 f7 2\"", "({x+y}';1;2)");
+    try expectEval(vm, "parse \"1 f7 2\"", "(k){x+y}';1;2)");
     try expectEval(vm, "sums 1 2 3", "1 3 6");
     try expectEval(vm, "deltas 1 3 6", "1 2 3");
     try expectEval(vm, "1 2 f7 3 4", "4 6");
     try expectEval(vm, "prev 0N 0 1", "0N 0N 0");
+}
+
+test "join follows q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "1,2", "1 2");
+    try expectEval(vm, "1,2 3", "1 2 3");
+    try expectEval(vm, "1 2,3", "1 2 3");
+    try expectEval(vm, "1 2,3 4", "1 2 3 4");
+    try expectEval(vm, "1,2h", "(1;2h)");
+    try expectEval(vm, "1 2,3h", "(1;2;3h)");
+    try expectEval(vm, "1,2.5", "(1;2.5)");
+    try expectEval(vm, "1,`a", "(1;`a)");
+    try expectEval(vm, "`a,`b", "`a`b");
+    try expectEval(vm, "`a`b,`c", "`a`b`c");
+    try expectEval(vm, "\"a\",\"b\"", "\"ab\"");
+    try expectEval(vm, "\"ab\",\"cd\"", "\"abcd\"");
+    try expectEval(vm, "\"a\",1", "(\"a\";1)");
+    try expectEval(vm, "\"ab\",1", "(\"a\";\"b\";1)");
+    try expectEval(vm, "1b,0b", "10b");
+    try expectEval(vm, "1b,1", "(1b;1)");
+    try expectEval(vm, "0x01,0x02", "0x0102");
+    try expectEval(vm, "(1 2;3),4", "(1 2;3;4)");
+    try expectEval(vm, "(1 2;3 4),(5 6;7 8)", "(1 2;3 4;5 6;7 8)");
+    try expectEval(vm, "2023.01.01,2023.01.02", "2023.01.01 2023.01.02");
+    try expectEval(vm, "2023.01.01,1", "(2023.01.01;1)");
+    try expectEval(vm, "12:00,13:00", "12:00 13:00");
+    try expectEval(vm, "1 2,0N", "1 2 0N");
+    try expectEval(vm, "type 1,2h", "0h");
+    try expectEval(vm, "(neg;abs),neg", "(-:;abs;-:)");
+    try expectEval(vm, ",[1;2]", "1 2");
+    try expectEval(vm, "(,)[1;2]", "1 2");
+
+    // Empty lists.
+    try expectEval(vm, "1,()", ",1");
+    try expectEval(vm, "(),1", ",1");
+    try expectEval(vm, "(),()", "()");
+    try expectEval(vm, "1 2,()", "1 2");
+    try expectEval(vm, "(),1 2", "1 2");
+    try expectEval(vm, "\"\",1", ",1");
+    try expectEval(vm, "\"\",`a", ",`a");
+    try expectEval(vm, "\"\",\"a\"", ",\"a\"");
+    try expectEval(vm, "\"\",\"ab\"", "\"ab\"");
+    try expectEval(vm, "\"\",`long$()", "`long$()");
+    try expectEval(vm, "1.5,`long$()", ",1.5");
+    try expectEval(vm, "1 2,`symbol$()", "1 2");
+    try expectEval(vm, "`long$(),1", ",1");
+    try expectEval(vm, "`long$(),1.5", ",2");
+    try expectEval(vm, "`long$(),\"a\"", ",97");
+    try expectEval(vm, "`long$(),1h", ",1");
+    try expectEval(vm, "`float$(),1", ",1f");
+    try expectEval(vm, "`float$(),1 2", "1 2f");
+    try expectEval(vm, "`long$(),\"\"", "`long$()");
+    try expectEval(vm, "(0#`),`a", ",`a");
+    try expectEval(vm, "(0#0x00),1", ",1");
+    try testing.expectError(error.type, vm.evalSource("`long$(),`a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`symbol$(),1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`float$(),`a`b", .q, "<test>"));
+
+    // Dictionaries merge; a dictionary joined with anything else is a type error.
+    try expectEval(vm, "(`a`b!1 2),(`c`d!3 4)", "`a`b`c`d!1 2 3 4");
+    try expectEval(vm, "(`a`b!1 2),(`b`c!3 4)", "`a`b`c!1 3 4");
+    try testing.expectError(error.type, vm.evalSource("(`a`b!1 2),`c", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2,`a`b!1 2", .q, "<test>"));
+
+    // Through iterators, compound assignment and the amend forms.
+    try expectEval(vm, "\"ab\",'\"cd\"", "(\"ac\";\"bd\")");
+    try expectEval(vm, "(1 2;3 4),'(5 6;7 8)", "(1 2 5 6;3 4 7 8)");
+    try expectEval(vm, "(,/)(1 2;3;(4;`a))", "(1;2;3;4;`a)");
+    try expectEval(vm, "1,/(2;3;4)", "1 2 3 4");
+    try expectEval(vm, "x:1 2;x,:3;x", "1 2 3");
+    try expectEval(vm, "y:();y,:1;y", ",1");
+    try expectEval(vm, "z:\"\";z,:\"a\";z", ",\"a\"");
+    try expectEval(vm, "u:.[;();,;];u[1 2;3]", "1 2 3");
+}
+
+test "comparisons, match, min, max, in and the aggregates follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "1=1", "1b");
+    try expectEval(vm, "1=1.0", "1b");
+    try expectEval(vm, "1=1h", "1b");
+    try expectEval(vm, "1<2", "1b");
+    try expectEval(vm, "1 2 3=2", "010b");
+    try expectEval(vm, "1 2 3<2", "100b");
+    try expectEval(vm, "2<1 2 3", "001b");
+    try expectEval(vm, "1 2=1 2", "11b");
+    try expectEval(vm, "`a=`b", "0b");
+    try expectEval(vm, "`a<`b", "1b");
+    try expectEval(vm, "\"ab\"=\"ba\"", "00b");
+    try expectEval(vm, "\"a\"=97", "1b");
+    try expectEval(vm, "1b=1", "1b");
+    try expectEval(vm, "1b<1", "0b");
+    try expectEval(vm, "0x01<0x02", "1b");
+    try expectEval(vm, "2023.01.01<2023.01.02", "1b");
+    try expectEval(vm, "2023.01.01=8401", "1b");
+    try expectEval(vm, "0N=0N", "1b");
+    try expectEval(vm, "0N=0n", "1b");
+    try expectEval(vm, "0N<1", "1b");
+    try expectEval(vm, "1<0N", "0b");
+    try expectEval(vm, "1=0n", "0b");
+    try expectEval(vm, "1=1+1e-13", "1b");
+    try expectEval(vm, "1=1+1e-12", "0b");
+    try expectEval(vm, "(1;`a)=(1;`b)", "10b");
+    try expectEval(vm, "`a=`a`b", "10b");
+    try expectEval(vm, "1 2h=1 2", "11b");
+    try expectEval(vm, "\"ab\"<\"b\"", "10b");
+    try testing.expectError(error.length, vm.evalSource("1 2=1 2 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`a=1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2=(1;`a)", .q, "<test>"));
+
+    try expectEval(vm, "1~1", "1b");
+    try expectEval(vm, "1~1f", "0b");
+    try expectEval(vm, "1 2~1 2", "1b");
+    try expectEval(vm, "(1;`a)~(1;`a)", "1b");
+    try expectEval(vm, "\"\"~()", "0b");
+    try expectEval(vm, "()~()", "1b");
+    try expectEval(vm, "0n~0n", "1b");
+    try expectEval(vm, "{x}~{x}", "1b");
+    try expectEval(vm, "1.0~1.0+1e-13", "1b");
+    try expectEval(vm, "1.0~1.0+1e-12", "0b");
+    try expectEval(vm, "1~1 2", "0b");
+    try expectEval(vm, "(`a`b!1 2)~`a`b!1 2", "1b");
+    // The keyword must exist before the line using it is parsed, in q as well.
+    try expectEval(vm, ".q.f:{x+y}", "{x+y}");
+    try expectEval(vm, "3~1 f 2", "1b");
+
+    try expectEval(vm, "1&2", "1");
+    try expectEval(vm, "1|2", "2");
+    try expectEval(vm, "1 2&2 1", "1 1");
+    try expectEval(vm, "0N&1", "0N");
+    try expectEval(vm, "0N|1", "1");
+    try expectEval(vm, "1b&0b", "0b");
+    try expectEval(vm, "1.5&2", "1.5");
+    try expectEval(vm, "1&2.5", "1f");
+    try expectEval(vm, "0n|1", "1f");
+    try expectEval(vm, "\"a\"&\"b\"", "\"a\"");
+    try expectEval(vm, "2023.01.01&2023.01.02", "2023.01.01");
+    try testing.expectError(error.type, vm.evalSource("`a&`b", .q, "<test>"));
+
+    try expectEval(vm, "1 2 3 in 2 4", "010b");
+    try expectEval(vm, "2 in 1 2 3", "1b");
+    try expectEval(vm, "(1;`a) in (1;`b;`a)", "11b");
+    try expectEval(vm, "`a in `a`b", "1b");
+    try expectEval(vm, "\"a\" in \"abc\"", "1b");
+    try expectEval(vm, "\"ab\" in (\"ab\";\"cd\")", "1b");
+    try expectEval(vm, "1 2 in 1", "10b");
+    try testing.expectError(error.type, vm.evalSource("1.0 in 1 2", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1h in 1 2", .q, "<test>"));
+
+    try expectEval(vm, "sum 1 2 3", "6");
+    try expectEval(vm, "sum 1 2 3h", "6i");
+    try expectEval(vm, "sum 1 2 3f", "6f");
+    try expectEval(vm, "sum 1 2 3e", "6e");
+    try expectEval(vm, "sum 101b", "2i");
+    try expectEval(vm, "sum \"ab\"", "195i");
+    try expectEval(vm, "sum 1 0N 3", "4");
+    try expectEval(vm, "sum ()", "()");
+    try expectEval(vm, "sum `long$()", "0");
+    try expectEval(vm, "sum `float$()", "0f");
+    try expectEval(vm, "sum 5", "5");
+    try expectEval(vm, "sum 0x01", "0x01");
+    try expectEval(vm, "sum (1 2;3 4)", "4 6");
+    try expectEval(vm, "sum 12:00 13:00", "25:00");
+    try expectEval(vm, "sum 2023.01.01 2023.01.02", "2046.01.02");
+    try expectEval(vm, "sum 0x0102", "3i");
+    try expectEval(vm, "sum `byte$()", "0i");
+    try expectEval(vm, "sum `date$()", "2000.01.01");
+    try expectEval(vm, "prd 1 2 3", "6");
+    try expectEval(vm, "prd 1 0N 3", "3");
+    try expectEval(vm, "prd 2 3.5", "7f");
+    try expectEval(vm, "prd 0x0102", "2i");
+    try expectEval(vm, "prd 101b", "0i");
+    try testing.expectError(error.type, vm.evalSource("prd \"ab\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("prd 2023.01.01 2023.01.02", .q, "<test>"));
+    try expectEval(vm, "min 0x0201", "0x01");
+    try expectEval(vm, "min `byte$()", "0xff");
+    try expectEval(vm, "max `byte$()", "0x00");
+    try expectEval(vm, "min \"\"", "\"\\377\"");
+    try expectEval(vm, "max \"\"", "\"\\000\"");
+    try expectEval(vm, "min `date$()", "0Wd");
+    try expectEval(vm, "max `date$()", "-0Wd");
+    try expectEval(vm, "avg 0x0102", "1.5");
+    try expectEval(vm, "avg \"ab\"", "97.5");
+    try expectEval(vm, "avg 2000.01.01 2000.01.03", "1f");
+    try expectEval(vm, "avg 11b", "1f");
+    // A symbol applies as the global it names.
+    try expectEval(vm, "a:1 2 3;`a 1", "2");
+    try expectEval(vm, "`a[1 2]", "2 3");
+    try expectEval(vm, "`a[]", "1 2 3");
+    try expectEval(vm, "g9:{x+1};`g9 2", "3");
+    try expectEval(vm, "b:(1 2;3 4);`b[1;0]", "3");
+    try expectEval(vm, "`a`b 1", "`b");
+    try testing.expectError(error.identifier, vm.evalSource("`nope 1", .q, "<test>"));
+    // Chars above 127 display as octal escapes.
+    try expectEval(vm, "\"c\"$200 65", "\"\\310A\"");
+    try expectEval(vm, "\"c\"$127", "\"\\177\"");
+}
+
+test "dictionary indexing follows q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+    try expectEval(vm, "(`a`b!1 2)`a", "1");
+    try expectEval(vm, "(`a`b!1 2)`c", "0N");
+    try expectEval(vm, "(`a`b!1 2)`", "0N");
+    try expectEval(vm, "(`a`b!1 2)`a`c", "1 0N");
+    try expectEval(vm, "(`a`b!1 2)[(`a;`c)]", "1 0N");
+    try expectEval(vm, "(`a`b!1 2)(`a`b;`b)", "(1 2;2)");
+    try expectEval(vm, "(`a`b!(1 2;3))`a`b`c", "(1 2;3;`long$())");
+    try expectEval(vm, "(`a`b!(1;`x))`c", "0N");
+    try expectEval(vm, "(`a`b!(`x;1))`c", "`");
+    try expectEval(vm, "(`a`b!(#:;*:))`c", "::");
+    try expectEval(vm, "(`a`b!\"xy\")`c", "\" \"");
+    try expectEval(vm, "(`a`b!2000.01.01 2000.01.02)`c", "0Nd");
+    try expectEval(vm, "(1 2!3 4) 2", "4");
+    try expectEval(vm, "(1 2!3 4) 5", "0N");
+    try expectEval(vm, "(1 2!3 4) 0N", "0N");
+    try expectEval(vm, "(0N 2!3 4) 0N", "3");
+    try expectEval(vm, "(1.5 2!3 4) 2f", "4");
+    try expectEval(vm, "((1;`a)!3 4)`a", "4");
+    try expectEval(vm, "((1;`a)!3 4) 2", "0N");
+    try expectEval(vm, "((1;`a)!3 4)(1;`a)", "3 4");
+    try testing.expectError(error.type, vm.evalSource("(1 2!3 4) 2h", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(1 2!3 4) 2f", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(1 2!3 4) `a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(`a`b!1 2)[0 1]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(1.5 2!3 4) 2", .q, "<test>"));
+    try expectEval(vm, "(`a`b!1 2)[]", "`a`b!1 2");
+    try expectEval(vm, "(`a`b!1 2)[::]", "`a`b!1 2");
+    try expectEval(vm, "(`a`b!(1 2;3 4))[;1]", "`a`b!2 4");
+    try expectEval(vm, "(`a`b!(1 2;3 4))[`a;1]", "2");
+    try expectEval(vm, "(`a`b!(1 2;3 4))[`a`b;1]", "2 4");
+    try expectEval(vm, "(`a`b!(1 2;3 4))[`a`b;0 1]", "(1 2;3 4)");
+    try expectEval(vm, "(`a`b!(1 2;3 4))[`a;]", "1 2");
+    try testing.expectError(error.type, vm.evalSource("(`a`b!(1 2;3 4))[`a;`b]", .q, "<test>"));
+    try expectEval(vm, "`.q[`count;0]", "1");
+    try expectEval(vm, "`.q `count`first", "(#:;*:)");
+    try expectEval(vm, "min 3 1 2", "1");
+    try expectEval(vm, "min 3 1 2f", "1f");
+    try expectEval(vm, "min 0N 1", "1");
+    try expectEval(vm, "min `long$()", "0W");
+    try expectEval(vm, "max `long$()", "-0W");
+    try expectEval(vm, "min 1 2 3h", "1h");
+    try expectEval(vm, "min \"ba\"", "\"a\"");
+    try expectEval(vm, "max 101b", "1b");
+    try expectEval(vm, "max 2023.01.01 2023.01.02", "2023.01.02");
+    try expectEval(vm, "max 3 1 2", "3");
+    try expectEval(vm, "avg 1 2 3", "2f");
+    try expectEval(vm, "avg 1 2", "1.5");
+    try expectEval(vm, "avg 1 0N 3", "2f");
+    try expectEval(vm, "avg ()", "0n");
+    try expectEval(vm, "avg `long$()", "0n");
+    try expectEval(vm, "avg 5", "5f");
+    try expectEval(vm, "avg 101b", "0.6666667");
+    try expectEval(vm, "avg (1 2;3 4)", "2 3f");
+    try expectEval(vm, "last 1 2 3", "3");
+    try expectEval(vm, "last `long$()", "0N");
+    try expectEval(vm, "last 5", "5");
+    try expectEval(vm, "type sum 1 2h", "-6h");
+    try expectEval(vm, "type max 1 2h", "-5h");
+    try testing.expectError(error.type, vm.evalSource("sum `a`b", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("sum 0x01 0x02", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("max 0x01 0x02", .q, "<test>"));
+}
+
+test "string, not, null, where, reverse and reciprocal follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "string `a", ",\"a\"");
+    try expectEval(vm, "string `a`b", "(,\"a\";,\"b\")");
+    try expectEval(vm, "string `", "\"\"");
+    try expectEval(vm, "string 1", ",\"1\"");
+    try expectEval(vm, "string 1 2", "(,\"1\";,\"2\")");
+    try expectEval(vm, "string 1.5", "\"1.5\"");
+    try expectEval(vm, "string 1.0", ",\"1\"");
+    try expectEval(vm, "string 1e", ",\"1\"");
+    try expectEval(vm, "string 1h", ",\"1\"");
+    try expectEval(vm, "string 1i", ",\"1\"");
+    try expectEval(vm, "string 1b", ",\"1\"");
+    try expectEval(vm, "string 101b", "(,\"1\";,\"0\";,\"1\")");
+    try expectEval(vm, "string 0x01", "\"01\"");
+    try expectEval(vm, "string 0x0102", "(\"01\";\"02\")");
+    try expectEval(vm, "string \"a\"", ",\"a\"");
+    try expectEval(vm, "string \"ab\"", "(,\"a\";,\"b\")");
+    try expectEval(vm, "string \"\"", "()");
+    try expectEval(vm, "string 2023.01.01", "\"2023.01.01\"");
+    try expectEval(vm, "string 2023.01m", "\"2023.01\"");
+    try expectEval(vm, "string 12:00", "\"12:00\"");
+    try expectEval(vm, "string 12:00:00.123", "\"12:00:00.123\"");
+    try expectEval(vm, "string 0D12", "\"0D12:00:00.000000000\"");
+    try expectEval(vm, "string 2023.01.01D12", "\"2023.01.01D12:00:00.000000000\"");
+    try expectEval(vm, "string 2023.01.01T12", "\"2023.01.01T12:00:00.000\"");
+    try expectEval(vm, "string 0N", "\"\"");
+    try expectEval(vm, "string 0n", "\"\"");
+    try expectEval(vm, "string 0Nh", "\"\"");
+    try expectEval(vm, "string 0Nd", "\"\"");
+    try expectEval(vm, "string 0W", "\"0W\"");
+    try expectEval(vm, "string -0W", "\"-0W\"");
+    try expectEval(vm, "string 0w", "\"0w\"");
+    try expectEval(vm, "string -0w", "\"-0w\"");
+    try expectEval(vm, "string 0Wd", "\"0W\"");
+    try expectEval(vm, "string 0We", "\"0w\"");
+    try expectEval(vm, "string -0Wz", "\"-0w\"");
+    try expectEval(vm, "string ()", "()");
+    try expectEval(vm, "string (1;`a;\"ab\")", "(,\"1\";,\"a\";(,\"a\";,\"b\"))");
+    try expectEval(vm, "string (1 2;3)", "((,\"1\";,\"2\");,\"3\")");
+    try expectEval(vm, "string {x+y}", "\"{x+y}\"");
+    try expectEval(vm, "string (+)", ",\"+\"");
+    try expectEval(vm, "string (-:)", "\"-:\"");
+    try expectEval(vm, "string (+/)", "\"+/\"");
+    try expectEval(vm, "string (1+)", "\"+[1]\"");
+    try expectEval(vm, "string (::)", "\"::\"");
+    try expectEval(vm, "string `a`b!1 2", "`a`b!(,\"1\";,\"2\")");
+    try expectEval(vm, "string 1.5 2", "(\"1.5\";,\"2\")");
+    try expectEval(vm, "string 1 0N 2", "(,\"1\";\"\";,\"2\")");
+    try expectEval(vm, "string 1e10", "\"1e+10\"");
+    try expectEval(vm, "string 123456789.123", "\"1.234568e+08\"");
+    try expectEval(vm, "string 0.1+0.2", "\"0.3\"");
+    try expectEval(vm, "string -1.5", "\"-1.5\"");
+    try expectEval(vm, "string 100000000000000000", "\"100000000000000000\"");
+    try expectEval(vm, "string 1 0W -0W 0N", "(,\"1\";\"0W\";\"-0W\";\"\")");
+    try expectEval(vm, "string 2023.01.01 0Nd", "(\"2023.01.01\";\"\")");
+    try expectEval(vm, "type string 1 2", "0h");
+    try expectEval(vm, "type string \"\"", "0h");
+
+    try expectEval(vm, "not 1", "0b");
+    try expectEval(vm, "not 0", "1b");
+    try expectEval(vm, "not 1 2 0", "001b");
+    try expectEval(vm, "not 1.5", "0b");
+    try expectEval(vm, "not 0n", "0b");
+    try expectEval(vm, "not 0N", "0b");
+    try expectEval(vm, "not \"a\"", "0b");
+    try expectEval(vm, "not 101b", "010b");
+    try expectEval(vm, "not 0x00", "1b");
+    try expectEval(vm, "not 2023.01.01", "0b");
+    try expectEval(vm, "not ()", "()");
+    try expectEval(vm, "not `a`b!1 0", "`a`b!01b");
+    try expectEval(vm, "not (1 2;0 1)", "(00b;10b)");
+    try testing.expectError(error.nyi, vm.evalSource("not `a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("not `a`b", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("not `a`b!(`a;1)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("not {x}", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("not (1;0;`a)", .q, "<test>"));
+
+    try expectEval(vm, "null 0N", "1b");
+    try expectEval(vm, "null 1", "0b");
+    try expectEval(vm, "null 0n", "1b");
+    try expectEval(vm, "null \" \"", "1b");
+    try expectEval(vm, "null \"ab \"", "001b");
+    try expectEval(vm, "null `", "1b");
+    try expectEval(vm, "null `a", "0b");
+    try expectEval(vm, "null `a`", "01b");
+    try expectEval(vm, "null 0Nh", "1b");
+    try expectEval(vm, "null 0Nd", "1b");
+    try expectEval(vm, "null 1 0N 3", "010b");
+    try expectEval(vm, "null ()", "()");
+    try expectEval(vm, "null (1;0N;`)", "011b");
+    try expectEval(vm, "null `a`b!1 0N", "`a`b!01b");
+    try expectEval(vm, "null {x}", "0b");
+    try expectEval(vm, "null 0x00", "0b");
+    try expectEval(vm, "null 0b", "0b");
+    try expectEval(vm, "null (::)", "1b");
+    try expectEval(vm, "null (+)", "0b");
+    try expectEval(vm, "null (1 0N;0N)", "(01b;1b)");
+
+    try expectEval(vm, "where 101b", "0 2");
+    try expectEval(vm, "where 1 2 0", "0 1 1");
+    try expectEval(vm, "where 1 0 2", "0 2 2");
+    try expectEval(vm, "where 0 3", "1 1 1");
+    try expectEval(vm, "where `long$()", "`long$()");
+    try expectEval(vm, "where `boolean$()", "`long$()");
+    try expectEval(vm, "where ()", "`long$()");
+    try expectEval(vm, "where `a`b!1 0", ",`a");
+    try expectEval(vm, "where `a`b!2 1", "`a`a`b");
+    try expectEval(vm, "where `a`b!(1;2)", "`a`b`b");
+    try expectEval(vm, "where ()!()", "()");
+    try expectEval(vm, "where 1 2i", "0 1 1");
+    try expectEval(vm, "where (1;2)", "0 1 1");
+    try testing.expectError(error.type, vm.evalSource("where 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("where 1.5", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("where 1 2h", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("where \"ab\"", .q, "<test>"));
+    try testing.expectError(error.limit, vm.evalSource("where 1 -1", .q, "<test>"));
+    try testing.expectError(error.limit, vm.evalSource("where 0N 1", .q, "<test>"));
+
+    try expectEval(vm, "reverse 1 2 3", "3 2 1");
+    try expectEval(vm, "reverse \"abc\"", "\"cba\"");
+    try expectEval(vm, "reverse `a`b", "`b`a");
+    try expectEval(vm, "reverse (1;`a)", "(`a;1)");
+    try expectEval(vm, "reverse ()", "()");
+    try expectEval(vm, "reverse 1", "1");
+    try expectEval(vm, "reverse `a`b!1 2", "`b`a!2 1");
+    try expectEval(vm, "reverse 101b", "101b");
+    try expectEval(vm, "reverse enlist 1", ",1");
+    try expectEval(vm, "reverse (::)", "::");
+    try expectEval(vm, "reverse (+)", "+");
+
+    try expectEval(vm, "reciprocal 2", "0.5");
+    try expectEval(vm, "reciprocal 0", "0w");
+    try expectEval(vm, "reciprocal 1 2", "1 0.5");
+    try expectEval(vm, "reciprocal 0N", "0n");
+    try expectEval(vm, "reciprocal \"a\"", "0.01030928");
+    try expectEval(vm, "reciprocal 1b", "1f");
+    try expectEval(vm, "reciprocal 0x02", "0.5");
+    try expectEval(vm, "reciprocal (1;2)", "1 0.5");
+    try expectEval(vm, "reciprocal `a`b!1 2", "`a`b!1 0.5");
+    try expectEval(vm, "reciprocal 2e", "0.5");
+    try expectEval(vm, "reciprocal 0w", "0f");
+    try expectEval(vm, "reciprocal -0w", "-0f");
+    try expectEval(vm, "reciprocal 0n", "0n");
+    try expectEval(vm, "reciprocal 1h", "1f");
+    try expectEval(vm, "reciprocal 12:00", "0.001388889");
+    try expectEval(vm, "reciprocal 2023.01.01", "0.0001190334");
+    try expectEval(vm, "reciprocal ()", "()");
+    try expectEval(vm, "reciprocal 2 4e", "0.5 0.25");
+    try expectEval(vm, "reciprocal 2 4h", "0.5 0.25");
+    try expectEval(vm, "reciprocal `long$()", "`float$()");
+    try testing.expectError(error.type, vm.evalSource("reciprocal `a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("reciprocal {x}", .q, "<test>"));
+}
+
+test "distinct, group and grade follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "distinct 1 2 1", "1 2");
+    try expectEval(vm, "distinct \"abca\"", "\"abc\"");
+    try expectEval(vm, "distinct `a`b`a", "`a`b");
+    try expectEval(vm, "distinct (1;`a;1)", "(1;`a)");
+    try expectEval(vm, "distinct ()", "()");
+    try expectEval(vm, "distinct 1.0 1.0 2", "1 2f");
+    try expectEval(vm, "distinct 0n 0n", ",0n");
+    try expectEval(vm, "distinct (1 2;1 2;3)", "(1 2;3)");
+    try expectEval(vm, "distinct enlist 1", ",1");
+    try expectEval(vm, "distinct (1 2;1 2)", ",1 2");
+    try expectEval(vm, "distinct 0N 0N 1", "0N 1");
+    try expectEval(vm, "distinct 1 1+1e-14", ",1f");
+    try expectEval(vm, "distinct (1;1f;1)", "(1;1f)");
+    try expectEval(vm, "distinct (0N;0n;0N)", "(0N;0n)");
+    try expectEval(vm, "distinct 2023.01.01 2023.01.01", ",2023.01.01");
+    try testing.expectError(error.type, vm.evalSource("distinct 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("distinct `a`b!1 2", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("distinct (+)", .q, "<test>"));
+
+    try expectEval(vm, "group 1 2 1", "1 2!(0 2;,1)");
+    try expectEval(vm, "group \"abca\"", "\"abc\"!(0 3;,1;,2)");
+    try expectEval(vm, "group `a`b`a", "`a`b!(0 2;,1)");
+    try expectEval(vm, "group (1;`a;1)", "(1;`a)!(0 2;,1)");
+    try expectEval(vm, "group ()", "()!()");
+    try expectEval(vm, "group 101b", "10b!(0 2;,1)");
+    try expectEval(vm, "group `a`b!1 2", "1 2!(,`a;,`b)");
+    try expectEval(vm, "group `a`b`c!1 2 1", "1 2!(`a`c;,`b)");
+    try expectEval(vm, "group (1 2;1 2;3)", "(1 2;3)!(0 1;,2)");
+    try expectEval(vm, "group enlist 1", "(,1)!,,0");
+    try expectEval(vm, "group `long$()", "(`long$())!()");
+    try expectEval(vm, "group 0N 0N 1", "0N 1!(0 1;,2)");
+    try expectEval(vm, "group 1 1+1e-14", "(,1f)!,0 1");
+    try testing.expectError(error.type, vm.evalSource("group 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("group {x}", .q, "<test>"));
+
+    try expectEval(vm, "iasc 3 1 2", "1 2 0");
+    try expectEval(vm, "idesc 3 1 2", "0 2 1");
+    try expectEval(vm, "iasc \"cab\"", "1 2 0");
+    try expectEval(vm, "iasc `c`a`b", "1 2 0");
+    try expectEval(vm, "iasc (3;1;2)", "1 2 0");
+    try expectEval(vm, "iasc (1;`a;2)", "0 2 1");
+    try expectEval(vm, "iasc ()", "`long$()");
+    try expectEval(vm, "iasc 1 1 1", "0 1 2");
+    try expectEval(vm, "idesc 1 1 2", "2 0 1");
+    try expectEval(vm, "idesc 1 1 1", "0 1 2");
+    try expectEval(vm, "iasc 0N 1 -1", "0 2 1");
+    try expectEval(vm, "idesc 0N 1 -1", "1 2 0");
+    try expectEval(vm, "iasc 0n 1 -1", "0 2 1");
+    try expectEval(vm, "iasc 101b", "1 0 2");
+    try expectEval(vm, "iasc `a`b!3 1", "`b`a");
+    try expectEval(vm, "idesc `a`b!3 1", "`a`b");
+    try expectEval(vm, "iasc (1 2;1 1;0 5)", "2 1 0");
+    try expectEval(vm, "iasc (1 2;1)", "1 0");
+    try expectEvalMode(vm, .k, "<<3 1 2", "2 0 1");
+    try expectEval(vm, "iasc 2023.01.02 2023.01.01", "1 0");
+    try expectEval(vm, "iasc 0x0201", "1 0");
+    try expectEval(vm, "iasc 1 2 3h", "0 1 2");
+    try expectEval(vm, "iasc 1 1+1e-14", "0 1");
+    try expectEval(vm, "iasc (1;\"a\";`b;2.5;0x01;1b)", "5 4 0 3 1 2");
+    try expectEval(vm, "idesc (1;\"a\";`b;2.5;0x01;1b)", "2 1 3 0 4 5");
+    try expectEval(vm, "iasc (2 1;1 2 3;1 2)", "2 1 0");
+    try expectEval(vm, "iasc (`a`b;`a)", "1 0");
+    try expectEval(vm, "iasc (1 2;\"ab\")", "0 1");
+    try expectEval(vm, "iasc (\"ab\";\"a\";\"b\")", "1 2 0");
+    try expectEval(vm, "idesc (\"ab\";\"a\";\"b\")", "0 2 1");
+    try expectEval(vm, "iasc (1;1 2;0)", "2 0 1");
+    try expectEval(vm, "iasc 1 0W 0N -0W", "2 3 0 1");
+    try expectEval(vm, "iasc -0w 0w 0n 0", "2 0 3 1");
+    try expectEval(vm, "iasc (98;\"a\";97;\"b\";96)", "4 2 0 1 3");
+    try expectEval(vm, "iasc (0N;1;-0W;0n;`a)", "0 2 1 3 4");
+    try expectEval(vm, "iasc (1 2;`a;3;\"x\";+)", "2 3 1 0 4");
+    try expectEval(vm, "iasc ((1;2);(1;3);(1;2 3);(0;9))", "2 3 0 1");
+    try expectEval(vm, "iasc (`a`b;`b;`c;`a)", "3 1 2 0");
+    try testing.expectError(error.type, vm.evalSource("iasc {x}", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("idesc (::)", .q, "<test>"));
+}
+
+test "key, value, find, bin and binr follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "key 3", "0 1 2");
+    try expectEval(vm, "key 0", "`long$()");
+    try expectEval(vm, "key `a`b!1 2", "`a`b");
+    try expectEval(vm, "key 1 2", "`long");
+    try expectEval(vm, "key \"ab\"", "`char");
+    try expectEval(vm, "key `a`b", "`symbol");
+    try expectEval(vm, "key 3h", "0 1 2");
+    try expectEval(vm, "key 1b", ",0");
+    try expectEval(vm, "key 0x02", "0 1");
+    try expectEval(vm, "key 0x00", "`long$()");
+    try expectEval(vm, "qqq:1 2;key `qqq", "`qqq");
+    try expectEval(vm, "key `zzz", "()");
+    try expectEval(vm, "key `.zzz", "()");
+    try expectEval(vm, "key `.", ",`qqq");
+    try expectEval(vm, "first key `", "`");
+    try expectEval(vm, "`q in key `", "1b");
+    try expectEval(vm, "2#key `.q", "``neg");
+    try expectEval(vm, ".zq.a:1;key `.zq", "``a");
+    try testing.expectError(error.domain, vm.evalSource("key -1", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("key 0N", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key ()", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key 3.0", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key {x}", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key \"a\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key (1 2;3)", .q, "<test>"));
+
+    try expectEval(vm, "value `a`b!1 2", "1 2");
+    try expectEval(vm, "value ()", "()");
+    try expectEval(vm, "value \"1+1\"", "2");
+    try expectEval(vm, "value \"\"", "::");
+    try expectEval(vm, "value (+;1;2)", "3");
+    try expectEval(vm, "value (+;1)", "+[1]");
+    try expectEval(vm, "value (+/)", "+");
+    try expectEval(vm, "value (1+)", "(+;1)");
+    try expectEval(vm, "value (+')", "+");
+    try expectEval(vm, "value {x+y}[1]", "({x+y};1)");
+    try expectEval(vm, "value {x+y}[;1]", "({x+y};::;1)");
+    try expectEval(vm, "value (\"+\";1;2)", "3");
+    try expectEval(vm, "value (+;1 2;3 4)", "4 6");
+    try expectEval(vm, "value ({x+y};1;2)", "3");
+    try expectEval(vm, "value (`a`b!1 2;`a)", "1");
+    try expectEval(vm, "value ({x};1)", "1");
+    try expectEval(vm, "value (enlist;1)", ",1");
+    try testing.expectError(error.type, vm.evalSource("value 1 2 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("value 101b", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("value (1;2)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("value 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("value (\"1+1\";2)", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("value `zzz", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("value (`nope;1)", .q, "<test>"));
+
+    try expectEval(vm, "1 2 3?2", "1");
+    try expectEval(vm, "1 2 3?5", "3");
+    try expectEval(vm, "1 2 3?2 5", "1 3");
+    try expectEval(vm, "\"abc\"?\"b\"", "1");
+    try expectEval(vm, "\"abc\"?\"bc\"", "1 2");
+    try expectEval(vm, "`a`b?`b", "1");
+    try expectEval(vm, "`a`b?`a`c", "0 2");
+    try expectEval(vm, "(1;`a;\"x\")?`a", "1");
+    try expectEval(vm, "(1 2;3 4)?3 4", "1");
+    try expectEval(vm, "(1;2)?1 2", "0 1");
+    try expectEval(vm, "(1;2)?(1;2)", "0 1");
+    try expectEval(vm, "(1 2;3 4)?(3 4;1 2)", "1 0");
+    try expectEval(vm, "(1 2;3)?3", "2");
+    try expectEval(vm, "(3;1 2)?3", "0");
+    try expectEval(vm, "(3;1 2)?1 2", "2 2");
+    try expectEval(vm, "(1 2;3)?(3;1 2)", "2");
+    try expectEval(vm, "(1 2;3 4)?(1 2;3)", "0 2");
+    try expectEval(vm, "(1;2)?(1 2;3)", "(0 1;2)");
+    try expectEval(vm, "(1;\"ab\")?\"ab\"", "2 2");
+    try expectEval(vm, "(\"ab\";1)?\"ab\"", "0");
+    try expectEval(vm, "(1 2;3 4)?5 6", "2");
+    try expectEval(vm, "(1 2;3) bin 3", "1");
+    try expectEval(vm, "(1 2;3)?(1 2;3)", "0 1");
+    try expectEval(vm, "(1 2;3)?enlist 1 2", ",0");
+    try expectEval(vm, "1 2 3?()", "`long$()");
+    try expectEval(vm, "()?1", "0");
+    try expectEval(vm, "(`a`b!1 2)?2", "`b");
+    try expectEval(vm, "(`a`b!1 2)?3", "`");
+    try expectEval(vm, "(`a`b!1 2)?1 2", "`a`b");
+    try expectEval(vm, "1 2 3?0N", "3");
+    try expectEval(vm, "0N 1?0N", "0");
+    try expectEval(vm, "1.0 2?1+1e-14", "2");
+    try expectEval(vm, "(1;`a)?1f", "2");
+    try expectEval(vm, "(1;1f)?1f", "1");
+    try testing.expectError(error.type, vm.evalSource("1 2 3?2h", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3?2.0", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3?(2;1 3)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\"abc\"?98", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3?2 3h", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`a`b?\"a\"", .q, "<test>"));
+
+    try expectEval(vm, "1 2 5h bin 3h", "1");
+    try expectEval(vm, "1 3 5 bin 0 1 2 3 4 5 6", "-1 0 0 1 1 2 2");
+    try expectEval(vm, "1 3 5 binr 3", "1");
+    try expectEval(vm, "1 3 5 binr 0 1 2 3 4 5 6", "0 0 1 1 2 2 3");
+    try expectEval(vm, "1 3 5 binr 5 6", "2 3");
+    try expectEval(vm, "1 1 3 3 bin 1 3", "1 3");
+    try expectEval(vm, "1 1 3 3 binr 1 3", "0 2");
+    try expectEval(vm, "`a`c bin `b", "0");
+    try expectEval(vm, "`a`c bin `a`b`c`d", "0 0 1 1");
+    try expectEval(vm, "\"ace\" bin \"b\"", "0");
+    try expectEval(vm, "1 3 5 bin 0N", "-1");
+    try expectEval(vm, "0N 1 3 bin 0N", "0");
+    try expectEval(vm, "1 3 5 binr 0N", "0");
+    try expectEval(vm, "1 3 5 bin -0W", "-1");
+    try expectEval(vm, "1 3 5 bin 0W", "2");
+    try expectEval(vm, "1 3 5 binr 0W", "3");
+    try expectEval(vm, "1 3 5 bin ()", "`long$()");
+    try expectEval(vm, "1 3 5 bin `long$()", "`long$()");
+    try expectEval(vm, "(1 2;3 4) bin 3 4", "1");
+    try expectEval(vm, "(1 2;3 4) bin (2 3;3 4)", "0 1");
+    try expectEval(vm, "(1 2;3 4) bin (1 2;5)", "0 -1");
+    try expectEval(vm, "(1 2;3 4) bin (1;3)", "0");
+    try expectEval(vm, "(1 2;3 4) bin 3", "0");
+    try expectEval(vm, "(`a;1;`c) bin `b", "1");
+    try expectEval(vm, "1 3 5 bin (1 2;3)", "(0 0;1)");
+    try expectEval(vm, "1 3 5h bin 3 4h", "1 1");
+    try expectEval(vm, "01b bin 1b", "1");
+    try expectEval(vm, "() bin 1", "-1");
+    try expectEval(vm, "2023.01.01 2023.01.03 bin 2023.01.02", "0");
+    try expectEval(vm, "1 3 5 bin 0N 3", "-1 1");
+    try expectEval(vm, "(`a`b!1 2) bin 1", "`a");
+    try testing.expectError(error.type, vm.evalSource("1 3 5 bin 3.5", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 3 5.0 bin 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 5h bin 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 bin 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 3 5 bin `a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 3 5 bin 1b", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 3 5 bin 1 3 5f", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1b bin 1b", .q, "<test>"));
+
+    // Dictionaries in lists, and a built-in system command reads one word.
+    try expectEval(vm, "enlist ()!()", ",()!()");
+    try expectEval(vm, "(enlist `)!enlist ()!()", "(,`)!,()!()");
+    try expectEval(vm, "type (enlist `)!enlist ()!()", "99h");
+    try expectEval(vm, "type enlist ()!()", "0h");
+    try expectEval(vm, "(()!();()!())", "(()!();()!())");
+    try expectEval(vm, "(`a`b!1 2;`a`b!3 4)", "(`a`b!1 2;`a`b!3 4)");
+    try expectEval(vm, "value \"\\\\d .h / comment\"", "::");
+    try expectEval(vm, "value \"\\\\d\"", "`.h");
+    try expectEval(vm, "value \"\\\\d .\"", "::");
+    try expectEval(vm, "value \"\\\\P 5 / c\"", "::");
+    try expectEval(vm, "value \"\\\\P\"", "5i");
+    try expectEval(vm, "value \"\\\\P 7\"", "::");
+}
+
+test "sv and vs through data on the left of /: and \\:, getenv and setenv" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Strings.
+    try expectEvalMode(vm, .k, "\" \"\\:\"a b c\"", "(,\"a\";,\"b\";,\"c\")");
+    try expectEvalMode(vm, .k, "\" \"\\:\"  a  b \"", "(\"\";\"\";,\"a\";\"\";,\"b\";\"\")");
+    try expectEvalMode(vm, .k, "\" \"\\:\"\"", ",\"\"");
+    try expectEvalMode(vm, .k, "\" \"\\:\"abc\"", ",\"abc\"");
+    try expectEvalMode(vm, .k, "\"\\n\"\\:\"a\\nb\"", "(,\"a\";,\"b\")");
+    try expectEvalMode(vm, .k, "\",\"\\:\"a,b,\"", "(,\"a\";,\"b\";\"\")");
+    try expectEvalMode(vm, .k, "\"ab\"\\:\"xabyabz\"", "(,\"x\";,\"y\";,\"z\")");
+    try expectEvalMode(vm, .k, "\"%\"\\:\"a%20b\"", "(,\"a\";\"20b\")");
+    try expectEvalMode(vm, .k, "\"a\"\\:\"abc\"", "(\"\";\"bc\")");
+    try expectEvalMode(vm, .k, "@\" \"\\:\"a b\"", "0h");
+    try testing.expectError(error.length, vm.evalSource("\"\"\\:\"abc\"", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\" \"\\:`a", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\" \"\\:1 2", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\" \"\\:,\"a b\"", .k, "<test>"));
+    try expectEvalMode(vm, .k, "\" \"/:(\"ab\";\"cd\")", "\"ab cd\"");
+    try expectEvalMode(vm, .k, "\" \"/:(\"ab\";\"\";\"cd\")", "\"ab  cd\"");
+    try expectEvalMode(vm, .k, "\" \"/:()", "\"\"");
+    try expectEvalMode(vm, .k, "\" \"/:,\"ab\"", "\"ab\"");
+    try expectEvalMode(vm, .k, "\" \"/:,\"\"", "\"\"");
+    try expectEvalMode(vm, .k, "\", \"/:(\"ab\";\"cd\")", "\"ab, cd\"");
+    try expectEvalMode(vm, .k, "@\" \"/:(\"ab\";\"cd\")", "10h");
+    try testing.expectError(error.type, vm.evalSource("\" \"/:\"ab\"", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\" \"/:(1;2)", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\" \"/:(\"a\";\"bc\")", .k, "<test>"));
+
+    // Symbols and lines.
+    try expectEvalMode(vm, .k, "`\\:`a.b.c", "`a`b`c");
+    try expectEvalMode(vm, .k, "`\\:`abc", ",`abc");
+    try expectEvalMode(vm, .k, "`\\:`", ",`");
+    try expectEvalMode(vm, .k, "`\\:`.a.b", "``a`b");
+    try expectEvalMode(vm, .k, "`\\:\"abc\"", ",\"abc\"");
+    try expectEvalMode(vm, .k, "`\\:\"a\\nb\"", "(,\"a\";,\"b\")");
+    try expectEvalMode(vm, .k, "`\\:\"a\\nb\\n\"", "(,\"a\";,\"b\")");
+    try expectEvalMode(vm, .k, "`\\:\"a\\r\\nb\"", "(,\"a\";,\"b\")");
+    try expectEvalMode(vm, .k, "`\\:\"\"", "()");
+    try expectEvalMode(vm, .k, "@`\\:`a", "11h");
+    try testing.expectError(error.type, vm.evalSource("`\\:`a`b", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`\\:1", .k, "<test>"));
+    try expectEvalMode(vm, .k, "`/:`a`b", "`a.b");
+    try expectEvalMode(vm, .k, "`/:`a`b`c", "`a.b.c");
+    try expectEvalMode(vm, .k, "`/:,`a", "`a");
+    try expectEvalMode(vm, .k, "`/:``a", "`.a");
+    try expectEvalMode(vm, .k, "`/:(\"ab\";\"cd\")", "\"ab\\ncd\\n\"");
+    try expectEvalMode(vm, .k, "`/:(\"ab\";,\"c\")", "\"ab\\nc\\n\"");
+    try expectEvalMode(vm, .k, "`/:(\"\";\"\")", "\"\\n\\n\"");
+    try expectEvalMode(vm, .k, "`/:,\"ab\"", "\"ab\\n\"");
+    try expectEvalMode(vm, .k, "`/:()", "\"\"");
+    try expectEvalMode(vm, .k, "@`/:`a`b", "-11h");
+    try testing.expectError(error.type, vm.evalSource("`/:`symbol$()", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`/:\"ab\"", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`/:(`a;\"b\")", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`/:(\"ab\";\"c\")", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`/:`a`b!1 2", .k, "<test>"));
+
+    // Bytes.
+    try expectEvalMode(vm, .k, "0x00\\:1234", "0x00000000000004d2");
+    try expectEvalMode(vm, .k, "0x00\\:1234h", "0x04d2");
+    try expectEvalMode(vm, .k, "0x00\\:1234i", "0x000004d2");
+    try expectEvalMode(vm, .k, "0x00\\:1.5", "0x3ff8000000000000");
+    try expectEvalMode(vm, .k, "0x00\\:1e", "0x3f800000");
+    try expectEvalMode(vm, .k, "0x00\\:\"a\"", ",0x61");
+    try expectEvalMode(vm, .k, "0x00\\:0N", "0x8000000000000000");
+    try expectEvalMode(vm, .k, "0x00\\:-1", "0xffffffffffffffff");
+    try expectEvalMode(vm, .k, "0x40\\:1234", "0x00000000000000001312");
+    try expectEvalMode(vm, .k, "0x40\\:-1", "0x3f3f3f3f3f3f3f3f3f3f");
+    try expectEvalMode(vm, .k, "0x40\\:0W", "0x3f3f3f3f3f3f3f3f3f3f");
+    try expectEvalMode(vm, .k, "0x40\\:0N", "`byte$()");
+    try expectEvalMode(vm, .k, "0x24\\:1234", "0x00000000000000000000220a");
+    try expectEvalMode(vm, .k, "0x24\\:0", "0x000000000000000000000000");
+    try testing.expectError(error.type, vm.evalSource("0x00\\:`a", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0x00\\:2023.01.01", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0x00\\:1b", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0x00\\:1 2", .k, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("0x02\\:5", .k, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("0x40\\:1234h", .k, "<test>"));
+    try expectEvalMode(vm, .k, "0x00/:0x00000000000004d2", "1234");
+    try expectEvalMode(vm, .k, "0x00/:0x04d2", "1234h");
+    try expectEvalMode(vm, .k, "0x00/:0x000004d2", "1234i");
+    try expectEvalMode(vm, .k, "0x00/:0x3ff8000000000000", "4609434218613702656");
+    try expectEvalMode(vm, .k, "0x40/:0x00000000000000001312", "1234");
+    try expectEvalMode(vm, .k, "0x40/:0x40\\:-1", "1152921504606846975");
+    try testing.expectError(error.length, vm.evalSource("0x00/:0x0000000004d2", .k, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("0x40/:0x1312", .k, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0x00/:0x01", .k, "<test>"));
+
+    // Numbers and radixes.
+    try expectEvalMode(vm, .k, "10\\:123", "1 2 3");
+    try expectEvalMode(vm, .k, "10\\:0", "`long$()");
+    try expectEvalMode(vm, .k, "10\\:-1", "`long$()");
+    try expectEvalMode(vm, .k, "10\\:0N", "`long$()");
+    try expectEvalMode(vm, .k, "2\\:5", "1 0 1");
+    try expectEvalMode(vm, .k, "2\\:5h", "1 0 1");
+    try expectEvalMode(vm, .k, "2\\:5i", "1 0 1");
+    try expectEvalMode(vm, .k, "2 4\\:10", "0 2");
+    try expectEvalMode(vm, .k, "24 60 60\\:3661", "1 1 1");
+    try expectEvalMode(vm, .k, "0 24 60 60\\:3661", "0N 1 1 1");
+    try expectEvalMode(vm, .k, "10\\:12 345", "(0 3;1 4;2 5)");
+    try expectEvalMode(vm, .k, "10\\:1234 5", "(1 0;2 0;3 0;4 5)");
+    try expectEvalMode(vm, .k, "2\\:1 2 3", "(0 1 1;1 0 1)");
+    try expectEvalMode(vm, .k, "10\\:0 5", ",0 5");
+    try expectEvalMode(vm, .k, "10\\:-1 5", ",9 5");
+    try expectEvalMode(vm, .k, "10\\:0N 5", ",0N 5");
+    try expectEvalMode(vm, .k, "@10\\:123", "7h");
+    try expectEvalMode(vm, .k, "10/:1 2 3", "123");
+    try expectEvalMode(vm, .k, "10/:0 1 2 3", "123");
+    try expectEvalMode(vm, .k, "64/:1 2", "66");
+    try expectEvalMode(vm, .k, "10/:1 2 3h", "123");
+    try expectEvalMode(vm, .k, "10/:1 2 3i", "123");
+    try expectEvalMode(vm, .k, "10/:1 2 3f", "123f");
+    try expectEvalMode(vm, .k, "10/:`long$()", "0");
+    try expectEvalMode(vm, .k, "10/:,5", "5");
+    try expectEvalMode(vm, .k, "2 4/:1 2", "6");
+    try expectEvalMode(vm, .k, "2 4 8/:1 2 3", "51");
+    try expectEvalMode(vm, .k, "0 24 60 60/:1 1 1 1", "90061");
+    try expectEvalMode(vm, .k, "10/:(1 2;3 4)", "13 24");
+    try expectEvalMode(vm, .k, "10/:(1 2;3)", "13 23");
+    try expectEvalMode(vm, .k, "2 4/:(1 2;3 3)", "7 11");
+    try expectEvalMode(vm, .k, "@10/:1 2 3h", "-7h");
+    try testing.expectError(error.type, vm.evalSource("10/:1", .k, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("10/:()", .k, "<test>"));
+    // q.k's own definitions: `sv:{x/:y}` and `vs:{x\\:y}`, `j10:64/:b6?` and `x10:b6@0x40\\:`.
+    try expectEvalMode(vm, .k, "sv9:{x/:y};vs9:{x\\:y};sv9[\" \"]vs9[\" \"]\"a b\"", "\"a b\"");
+    try expectEvalMode(vm, .k, "b6:\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";x10:b6@0x40\\:;x10 1234", "\"AAAAAAAATS\"");
+    try expectEvalMode(vm, .k, "j10:64/:b6?;j10 x10 1234", "1234");
+
+    // The environment: empty in tests, `setenv` fills it.
+    try expectEval(vm, "getenv`NOPE_ZZZ_UNSET", "\"\"");
+    try expectEval(vm, "getenv`", "\"\"");
+    try expectEval(vm, "getenv()", "()");
+    try expectEval(vm, "getenv`symbol$()", "()");
+    try expectEval(vm, "setenv[`ZZQ;\"ab\"]", "::");
+    try expectEval(vm, "getenv`ZZQ", "\"ab\"");
+    try expectEval(vm, "getenv`ZZQ`ZZQ", "(\"ab\";\"ab\")");
+    try expectEval(vm, "getenv`ZZQ`NOPE", "(\"ab\";\"\")");
+    try expectEval(vm, "setenv[`ZZQ;\"\"];getenv`ZZQ", "\"\"");
+    try expectEval(vm, "type getenv`NOPE", "10h");
+    try testing.expectError(error.type, vm.evalSource("getenv\"HOME\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("getenv 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("setenv[`ZZQ;\"1\"]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("setenv[`ZZQ;1]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("setenv[\"ZZQ\";\"ab\"]", .q, "<test>"));
+    // q.k's last line: a missing q.q is a caught error, not a crash.
+    try expectEvalMode(vm, .k, "{@[.:;\"\\\\l \",$[#e:getenv`QINIT;e;\"q.q\"];::]}[]", "\"os\"");
+}
+
+test "flip transposes a list of lists as q does" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "flip (1 2;3)", "(1 3;2 3)");
+    try expectEval(vm, "flip (1 2;3 4)", "(1 3;2 4)");
+    try expectEval(vm, "flip (\"ab\";\"cd\")", "(\"ac\";\"bd\")");
+    try expectEval(vm, "flip ()", "()");
+    try expectEval(vm, "flip enlist 1 2", "(,1;,2)");
+    try expectEval(vm, "flip (1 2;`a`b)", "((1;`a);(2;`b))");
+    try expectEval(vm, "flip (1 2;3 4;5 6)", "(1 3 5;2 4 6)");
+    try expectEval(vm, "flip (1 2;3;4 5)", "(1 3 4;2 3 5)");
+    try expectEval(vm, "flip (1 2;\"ab\")", "((1;\"a\");(2;\"b\"))");
+    try expectEval(vm, "flip (1 2f;3 4)", "((1f;3);(2f;4))");
+    try expectEval(vm, "flip (0N 1;2 3)", "(0N 2;1 3)");
+    try expectEval(vm, "flip (enlist 1;enlist 2)", ",1 2");
+    try expectEval(vm, "flip ((1 2;3 4);(5 6;7 8))", "((1 2;5 6);(3 4;7 8))");
+    try expectEval(vm, "flip ((1 2;3);(4;5 6))", "((1 2;4);(3;5 6))");
+    try expectEval(vm, "flip (`long$();`long$())", "()");
+    try expectEval(vm, "flip 2#enlist 1 2", "(1 1;2 2)");
+    try expectEval(vm, "type flip (1 2;3 4)", "0h");
+    try expectEvalMode(vm, .k, "+\" \"\\:'(\"htm text/html\";\"csv text/csv\")", "((\"htm\";\"csv\");(\"text/html\";\"text/csv\"))");
+    try testing.expectError(error.rank, vm.evalSource("flip 1 2", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip 1", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip `a", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip {x}", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip (1;`a)", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("flip (1 2;3 4 5)", .q, "<test>"));
+}
+
+test "value of a primitive is its q table number and k lambdas show a k) prefix" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "value (::)", "0");
+    try expectEval(vm, "type value (::)", "-7h");
+    try expectEval(vm, "value (:)", "0");
+    try expectEval(vm, "value (+)", "1");
+    try expectEval(vm, "value (-:)", "2");
+    try expectEval(vm, "value (neg)", "2");
+    try expectEval(vm, "value (#:)", "13");
+    try expectEval(vm, "value (@)", "18");
+    try expectEval(vm, "value (.:)", "19");
+    try expectEval(vm, "value (2:)", "22");
+    try expectEval(vm, "value (avg)", "23");
+    try expectEval(vm, "value (last)", "24");
+    try expectEval(vm, "value (enlist)", "41");
+    try expectEval(vm, "value (hopen)", "44");
+    try expectEval(vm, "value (in)", "23");
+    try expectEval(vm, "value (bin)", "26");
+    try expectEval(vm, "value (setenv)", "33");
+    try expectEval(vm, "value (cor)", "36");
+    try expectEval(vm, "value (')", "0");
+    try expectEval(vm, "value (/)", "1");
+    try expectEval(vm, "value (\\:)", "5");
+    try expectEvalMode(vm, .k, ".(::)", "0");
+    try expectEvalMode(vm, .k, ".(::;1)", "1");
+
+    try expectEvalMode(vm, .k, "{x+y}", "k){x+y}");
+    try expectEvalMode(vm, .k, "f:{x+y};f", "k){x+y}");
+    try expectEvalMode(vm, .k, "{[a;b]a+b}", "k){[a;b]a+b}");
+    try expectEvalMode(vm, .k, "{}", "k){}");
+    try expectEvalMode(vm, .k, "$({x+y})", "\"k){x+y}\"");
+    try expectEvalMode(vm, .k, "-3!{x+y}", "\"k){x+y}\"");
+    try expectEvalMode(vm, .k, "@[{x+y};1]", "k){x+y}[1]");
+    try expectEvalMode(vm, .k, "(1;{x})", "(1;k){x})");
+    try expectEvalMode(vm, .k, "`a`b!(1;{x})", "`a`b!(1;k){x})");
+    try expectEvalMode(vm, .k, "{.z.s}[]", "k){.z.s}");
+    try expectEvalMode(vm, .k, "{x}[1]", "1");
+    try expectEvalMode(vm, .k, "q){x}", "{x}");
+    try expectEvalMode(vm, .k, "k){x}", "k){x}");
+    try expectEval(vm, "{x+y}", "{x+y}");
+    try expectEval(vm, "k){x}", "k){x}");
+    try expectEval(vm, "q){x}", "{x}");
+    try expectEval(vm, "parse \"k){x}\"", "k){x}");
+    try expectEval(vm, "last value value \"k){x}\"", "\"k){x}\"");
+    try expectEval(vm, "last value {x}", "\"{x}\"");
+    try expectEval(vm, "value `.q.each", "k){x'y}");
+    try expectEval(vm, "value (`.q.each;1)", "k){x'y}[1]");
+    try expectEvalMode(vm, .k, "(:;`f;{x})", "(:;`f;k){x})");
 }

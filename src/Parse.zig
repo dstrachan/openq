@@ -902,6 +902,7 @@ fn parseLambda(p: *Parse) !Node.Index {
         .body_start = body.start,
         .body_end = body.end,
         .trailing_semicolon = trailing_semicolon,
+        .k_mode = p.mode == .k,
     };
     return p.setNode(lambda_index, .{
         .tag = .lambda,

@@ -354,7 +354,7 @@ fn formatIntegers(comptime I: type, w: *Io.Writer, list: anytype, empty: []const
 
 /// Writes chars in double quotes the way q displays them: `"` and `\` are backslashed,
 /// newline, tab and return are `\n`, `\t` and `\r`, and other control characters are
-/// three-digit octal escapes such as `\001`. Bytes above 127 print as they are.
+/// three-digit octal escapes such as `\001`, and so do bytes above 127 (`"\310"`).
 fn formatChars(w: *Io.Writer, chars: []const u8) Io.Writer.Error!void {
     try w.writeByte('"');
     for (chars) |c| switch (c) {
@@ -363,7 +363,7 @@ fn formatChars(w: *Io.Writer, chars: []const u8) Io.Writer.Error!void {
         '\n' => try w.writeAll("\\n"),
         '\t' => try w.writeAll("\\t"),
         '\r' => try w.writeAll("\\r"),
-        0...8, 11, 12, 14...31, 127 => try w.print("\\{o:0>3}", .{c}),
+        0...8, 11, 12, 14...31, 127...255 => try w.print("\\{o:0>3}", .{c}),
         else => try w.writeByte(c),
     };
     try w.writeByte('"');
@@ -943,8 +943,6 @@ pub const Operator = enum {
     file_binary, // 1:
     dynamic_load, // 2:
 
-    _unused,
-
     // Named operators: the dyadic natives of `.Q.res`.
     in,
     within,
@@ -986,8 +984,6 @@ pub const Operator = enum {
             .file_text => try w.writeAll("0:"),
             .file_binary => try w.writeAll("1:"),
             .dynamic_load => try w.writeAll("2:"),
-
-            ._unused => unreachable,
 
             inline .in,
             .within,

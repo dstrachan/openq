@@ -59,10 +59,13 @@ pub fn compile(c: *Compiler, node: Node.Index) Error!*Value {
 
     const l_brace = tree.nodeMainToken(node);
     const extra_index, const r_brace = tree.nodeData(node).extra_and_token;
-    const source = try vm.gpa.dupe(u8, tree.source[tree.tokenStart(l_brace) .. tree.tokenStart(r_brace) + 1]);
-    errdefer vm.gpa.free(source);
-
     const lambda = tree.extraData(extra_index, Node.Lambda);
+
+    // A lambda made in k mode carries a `k)` prefix in its source, as q shows it
+    // (`k){x+y}`), in `value` and in `-3!` alike.
+    const text = tree.source[tree.tokenStart(l_brace) .. tree.tokenStart(r_brace) + 1];
+    const source = if (lambda.k_mode) try std.mem.concat(vm.gpa, u8, &.{ "k)", text }) else try vm.gpa.dupe(u8, text);
+    errdefer vm.gpa.free(source);
 
     const params = tree.extraDataSlice(
         .{ .start = lambda.params_start, .end = lambda.body_start },

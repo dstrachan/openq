@@ -1000,6 +1000,8 @@ pub const Node = struct {
         body_start: ExtraIndex,
         body_end: ExtraIndex,
         trailing_semicolon: bool,
+        /// Parsed in k mode: the lambda displays and stores its source with a `k)` prefix.
+        k_mode: bool,
     };
 
     pub const Table = struct {

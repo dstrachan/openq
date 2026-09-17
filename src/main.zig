@@ -147,7 +147,6 @@ const banner = "OpenQ " ++ build_options.version ++ " " ++
     @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n";
 
 fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void {
-    _ = environ_map; // autofix
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
@@ -155,6 +154,7 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
 
     const vm: *Vm = try .init(io, gpa, stdout);
     defer vm.deinit();
+    try vm.environ.putAll(environ_map);
 
     var buffer: Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();

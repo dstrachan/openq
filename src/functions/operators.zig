@@ -112,7 +112,7 @@ fn listArithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) Arithm
 }
 
 /// The list type holding atoms of `tag`, or the atom type of the list type `tag`.
-fn counterpart(comptime tag: Value.Type) Value.Type {
+pub fn counterpart(comptime tag: Value.Type) Value.Type {
     return @fromBackingInt(-@backingInt(tag));
 }
 
@@ -394,19 +394,9 @@ const Numeric = union(enum) {
     }
 };
 
-pub fn @"and"(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
+// @"and" is defined with the comparisons below.
 
-pub fn @"or"(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
+// @"or" is defined with the comparisons below.
 
 pub fn fill(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
@@ -415,139 +405,114 @@ pub fn fill(vm: *Vm, x: *Value, y: *Value) !*Value {
     return error.nyi;
 }
 
-pub fn equal(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
+// equal is defined with the comparisons below.
 
-pub fn less_than(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
+// less_than is defined with the comparisons below.
 
-pub fn greater_than(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
+// greater_than is defined with the comparisons below.
 
+/// `x,y` joins: items of the same type make a typed list (`1,2` is `1 2`, `"ab","cd"` is
+/// `"abcd"`) and anything else a general list of the items (`1,2h` is `(1;2h)`, `(1 2;3),4`
+/// is `(1 2;3;4)`). An empty right side is dropped; an empty left side is dropped too when
+/// it is `()` or a boolean, byte or char empty, while another typed empty casts the right
+/// side to its type (`` `long$(),1.5 `` is `,2`, `` `long$(),`a `` is a type error), as q
+/// does. Two dictionaries merge with the right side's values winning.
 pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
-    switch (x.as) {
-        .list => |x_val| {
-            const list = try vm.allocValue(.list, x_val.len + 1);
-            errdefer comptime unreachable;
-            for (list.as.list[0..x_val.len], x_val) |*v, x_v| v.* = x_v.ref();
-            list.as.list[x_val.len] = y.ref();
-            return list;
-        },
-        .boolean => return error.nyi,
-        .byte => return error.nyi,
-        .short => return error.nyi,
-        .int => return error.nyi,
-        .real => return error.nyi,
-        .timestamp => return error.nyi,
-        .month => return error.nyi,
-        .date => return error.nyi,
-        .datetime => return error.nyi,
-        .timespan => return error.nyi,
-        .minute => return error.nyi,
-        .second => return error.nyi,
-        .time => return error.nyi,
-        .boolean_list => return error.nyi,
-        .byte_list => return error.nyi,
-        .short_list => return error.nyi,
-        .int_list => return error.nyi,
-        .real_list => return error.nyi,
-        .timestamp_list => return error.nyi,
-        .month_list => return error.nyi,
-        .date_list => return error.nyi,
-        .datetime_list => return error.nyi,
-        .timespan_list => return error.nyi,
-        .minute_list => return error.nyi,
-        .second_list => return error.nyi,
-        .time_list => return error.nyi,
-        .long => return error.nyi,
-        .long_list => return error.nyi,
-        .float => return error.nyi,
-        .float_list => return error.nyi,
-        .char => return error.nyi,
-        .char_list => return error.nyi,
-        .symbol => return error.nyi,
-        .symbol_list => |x_val| switch (y.as) {
-            .list => return error.nyi,
-            .boolean => return error.nyi,
-            .byte => return error.nyi,
-            .short => return error.nyi,
-            .int => return error.nyi,
-            .real => return error.nyi,
-            .timestamp => return error.nyi,
-            .month => return error.nyi,
-            .date => return error.nyi,
-            .datetime => return error.nyi,
-            .timespan => return error.nyi,
-            .minute => return error.nyi,
-            .second => return error.nyi,
-            .time => return error.nyi,
-            .boolean_list => return error.nyi,
-            .byte_list => return error.nyi,
-            .short_list => return error.nyi,
-            .int_list => return error.nyi,
-            .real_list => return error.nyi,
-            .timestamp_list => return error.nyi,
-            .month_list => return error.nyi,
-            .date_list => return error.nyi,
-            .datetime_list => return error.nyi,
-            .timespan_list => return error.nyi,
-            .minute_list => return error.nyi,
-            .second_list => return error.nyi,
-            .time_list => return error.nyi,
-            .long => return error.nyi,
-            .long_list => return error.nyi,
-            .float => return error.nyi,
-            .float_list => return error.nyi,
-            .char => return error.nyi,
-            .char_list => return error.nyi,
-            .symbol => |y_val| {
-                const list = try vm.allocValue(.symbol_list, x_val.len + 1);
-                errdefer comptime unreachable;
-                @memcpy(list.as.symbol_list[0..x_val.len], x_val);
-                list.as.symbol_list[x_val.len] = y_val;
-                return list;
+    if (x.as == .dict and y.as == .dict) return joinDicts(vm, x, y);
+    if (x.as == .dict or y.as == .dict) return error.type;
+
+    if (x.isList() and x.count() == 0) {
+        switch (x.as) {
+            .list, .boolean_list, .byte_list, .char_list => return asList(vm, y),
+            inline .short_list,
+            .int_list,
+            .long_list,
+            .real_list,
+            .float_list,
+            .symbol_list,
+            .timestamp_list,
+            .month_list,
+            .date_list,
+            .datetime_list,
+            .timespan_list,
+            .minute_list,
+            .second_list,
+            .time_list,
+            => |_, tag| {
+                if (y.isList() and y.count() == 0) return x.ref();
+                const cast_value = try castTo(vm, .{ .atom = comptime counterpart(tag) }, y);
+                if (cast_value.isList()) return cast_value;
+                defer cast_value.deref(vm.gpa);
+                return asList(vm, cast_value);
             },
-            .symbol_list => return error.nyi,
-            .dict => return error.nyi,
-            .lambda => return error.nyi,
-            .unary_primitive => return error.nyi,
-            .operator => return error.nyi,
-            .iterator => return error.nyi,
-            .projection => return error.nyi,
-            .each => return error.nyi,
-            .over => return error.nyi,
-            .scan => return error.nyi,
-            .each_prior => return error.nyi,
-            .each_right => return error.nyi,
-            .each_left => return error.nyi,
-            .composition => return error.nyi,
-        },
-        .dict => return error.nyi,
-        .lambda => return error.nyi,
-        .unary_primitive => return error.nyi,
-        .operator => return error.nyi,
-        .iterator => return error.nyi,
-        .projection => return error.nyi,
-        .each => return error.nyi,
-        .over => return error.nyi,
-        .scan => return error.nyi,
-        .each_prior => return error.nyi,
-        .each_right => return error.nyi,
-        .each_left => return error.nyi,
-        .composition => return error.nyi,
+            else => unreachable,
+        }
     }
+    if (y.isList() and y.count() == 0) return asList(vm, x);
+
+    const x_len = if (x.isList()) x.count() else 1;
+    const y_len = if (y.isList()) y.count() else 1;
+    const items = try vm.gpa.alloc(*Value, x_len + y_len);
+    defer vm.gpa.free(items);
+    var done: usize = 0;
+    defer for (items[0..done]) |item| item.deref(vm.gpa);
+    for (0..x_len) |i| {
+        items[done] = if (x.isList()) try itemAt(vm, x, i) else x.ref();
+        done += 1;
+    }
+    for (0..y_len) |i| {
+        items[done] = if (y.isList()) try itemAt(vm, y, i) else y.ref();
+        done += 1;
+    }
+    return vm.enlist(items);
+}
+
+/// A value as a list: a list as it is, an atom as a one-item list.
+fn asList(vm: *Vm, value: *Value) !*Value {
+    if (value.isList()) return value.ref();
+    var one = [_]*Value{value};
+    return vm.enlist(&one);
+}
+
+/// `(`a`b!1 2),(`b`c!3 4)` is `` `a`b`c!1 3 4 ``: the left keys in order, then the right
+/// side's new keys, with the right side's value for any key it has.
+fn joinDicts(vm: *Vm, x: *Value, y: *Value) !*Value {
+    const xd = x.as.dict;
+    const yd = y.as.dict;
+    const x_len = xd.keys.count();
+    const y_len = yd.keys.count();
+    const keys = try vm.gpa.alloc(*Value, x_len + y_len);
+    defer vm.gpa.free(keys);
+    const values = try vm.gpa.alloc(*Value, x_len + y_len);
+    defer vm.gpa.free(values);
+    var n: usize = 0;
+    defer for (keys[0..n], values[0..n]) |k, v| {
+        k.deref(vm.gpa);
+        v.deref(vm.gpa);
+    };
+    for (0..x_len) |i| {
+        const key = try itemAt(vm, xd.keys, i);
+        errdefer key.deref(vm.gpa);
+        values[n] = if (findKey(yd.keys, key)) |j| try itemAt(vm, yd.values, j) else try itemAt(vm, xd.values, i);
+        keys[n] = key;
+        n += 1;
+    }
+    for (0..y_len) |i| {
+        const key = try itemAt(vm, yd.keys, i);
+        if (findKey(xd.keys, key) != null) {
+            key.deref(vm.gpa);
+            continue;
+        }
+        errdefer key.deref(vm.gpa);
+        values[n] = try itemAt(vm, yd.values, i);
+        keys[n] = key;
+        n += 1;
+    }
+    const key_list = if (n == 0) try vm.allocValue(.list, 0) else try vm.enlist(keys[0..n]);
+    errdefer key_list.deref(vm.gpa);
+    const value_list = if (n == 0) try vm.allocValue(.list, 0) else try vm.enlist(values[0..n]);
+    errdefer value_list.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = key_list, .values = value_list });
 }
 
 /// `n#y` takes `n` items of `y`, cycling through a list (`3#1 2` is `1 2 1`), repeating an
@@ -1317,9 +1282,7 @@ pub fn drop(vm: *Vm, x: *Value, y: *Value) !*Value {
     return error.nyi;
 }
 
-pub fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
-    return vm.createValue(.boolean, x.eql(y));
-}
+// match is defined with the comparisons below.
 
 pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
     switch (x.as) {
@@ -1443,13 +1406,6 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
     }
 }
 
-pub fn find(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
-
 /// `f@x` applies or indexes with one argument: `{x*2}@3` is 6 and `neg@1 2` is `-1 -2`.
 pub fn apply_at(vm: *Vm, x: *Value, y: *Value) !*Value {
     var args = [_]*Value{y};
@@ -1496,12 +1452,7 @@ pub fn dynamic_load(vm: *Vm, x: *Value, y: *Value) !*Value {
     return error.nyi;
 }
 
-pub fn in(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
+// in is defined with the comparisons below.
 
 pub fn within(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
@@ -1511,20 +1462,6 @@ pub fn within(vm: *Vm, x: *Value, y: *Value) !*Value {
 }
 
 pub fn like(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
-
-pub fn bin(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
-}
-
-pub fn binr(vm: *Vm, x: *Value, y: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     _ = y; // autofix
@@ -1587,9 +1524,967 @@ pub fn cov(vm: *Vm, x: *Value, y: *Value) !*Value {
     return error.nyi;
 }
 
-pub fn setenv(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `setenv[x;y]` sets the environment variable named by the symbol `x` to the string `y`
+/// and gives `::`; a char atom is a type error, as in q.
+pub fn setenv(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.as != .symbol or y.as != .char_list) return error.type;
+    try vm.environ.put(vm.internedString(x.as.symbol), y.as.char_list);
+    return vm.getUnaryPrimitive(.identity);
+}
+
+// ---------------------------------------------------------------------------------------
+// Comparisons, match, min and max, and membership.
+
+/// A comparable atom: nulls of every kind are equal to each other and below everything,
+/// integers of every width, chars and booleans compare as numbers, temporal values by
+/// their underlying number, and floats and reals as floats.
+const Comparable = union(enum) {
+    null,
+    int: i64,
+    float: f64,
+
+    fn of(x: *Value) ?Comparable {
+        return switch (x.as) {
+            inline .boolean,
+            .byte,
+            .char,
+            .short,
+            .int,
+            .long,
+            .real,
+            .float,
+            .timestamp,
+            .month,
+            .date,
+            .datetime,
+            .timespan,
+            .minute,
+            .second,
+            .time,
+            => |v, tag| fromScalar(tag, v),
+            else => null,
+        };
+    }
+
+    /// The comparable of a scalar of atom type `tag`, as stored in the atom or its list.
+    fn fromScalar(comptime tag: Value.Type, v: anytype) Comparable {
+        return switch (tag) {
+            .boolean => .{ .int = @intFromBool(v) },
+            .byte, .char => .{ .int = v },
+            .short => if (v == @backingInt(Value.Short.null)) .null else .{ .int = v },
+            .int, .month, .date, .minute, .second, .time => if (v == @backingInt(Value.Int.null)) .null else .{ .int = v },
+            .long, .timestamp, .timespan => if (v == @backingInt(Value.Long.null)) .null else .{ .int = v },
+            .real, .float, .datetime => if (std.math.isNan(v)) .null else .{ .float = v },
+            else => comptime unreachable,
+        };
+    }
+
+    fn toFloat(self: Comparable) f64 {
+        return switch (self) {
+            .null => unreachable,
+            .int => |v| @floatFromInt(v),
+            .float => |v| v,
+        };
+    }
+};
+
+/// q compares floats to within one part in 2^43.
+fn floatsEqual(a: f64, b: f64) bool {
+    if (a == b) return true;
+    if (std.math.isInf(a) or std.math.isInf(b)) return false;
+    const scale = @max(@abs(a), @abs(b));
+    return @abs(a - b) <= scale * 0x1p-43;
+}
+
+/// The order of two comparable atoms, with q's float tolerance for equality.
+fn order(a: Comparable, b: Comparable) std.math.Order {
+    if (a == .null or b == .null) {
+        if (a == .null and b == .null) return .eq;
+        return if (a == .null) .lt else .gt;
+    }
+    if (a == .int and b == .int) return std.math.order(a.int, b.int);
+    const x = a.toFloat();
+    const y = b.toFloat();
+    if (floatsEqual(x, y)) return .eq;
+    return if (x < y) .lt else .gt;
+}
+
+const Comparison = enum { eq, lt, gt };
+
+/// `x=y`, `x<y` and `x>y` on atoms: numbers, chars and temporal values by `order`,
+/// symbols by name, and anything else, or a symbol against a number, is a type error.
+fn compareAtoms(vm: *Vm, x: *Value, y: *Value, comparison: Comparison) Vm.RunError!*Value {
+    const o: std.math.Order = if (x.as == .symbol and y.as == .symbol)
+        std.mem.order(u8, vm.internedString(x.as.symbol), vm.internedString(y.as.symbol))
+    else if (Comparable.of(x)) |a| (if (Comparable.of(y)) |b| order(a, b) else return error.type) else return error.type;
+    return vm.createValue(.boolean, switch (comparison) {
+        .eq => o == .eq,
+        .lt => o == .lt,
+        .gt => o == .gt,
+    });
+}
+
+/// Applies an atom function pairwise over lists, an atom pairing with every item, lists
+/// pairing item by item and needing the same length, results unified into a list.
+fn pairwise(vm: *Vm, x: *Value, y: *Value, comptime f: fn (*Vm, *Value, *Value) Vm.RunError!*Value) Vm.RunError!*Value {
+    if (!x.isList() and !y.isList()) return f(vm, x, y);
+    const x_len: ?usize = if (x.isList()) x.count() else null;
+    const y_len: ?usize = if (y.isList()) y.count() else null;
+    if (x_len != null and y_len != null and x_len.? != y_len.?) return error.length;
+    const len = x_len orelse y_len.?;
+    if (len == 0) return (if (x_len != null) x else y).ref();
+    const results = try vm.gpa.alloc(*Value, len);
+    defer vm.gpa.free(results);
+    var done: usize = 0;
+    defer for (results[0..done]) |r| r.deref(vm.gpa);
+    for (0..len) |i| {
+        const a = if (x_len != null) try itemAt(vm, x, i) else x.ref();
+        defer a.deref(vm.gpa);
+        const b = if (y_len != null) try itemAt(vm, y, i) else y.ref();
+        defer b.deref(vm.gpa);
+        results[done] = try f(vm, a, b);
+        done += 1;
+    }
+    return vm.enlist(results);
+}
+
+fn equalAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return compareAtoms(vm, x, y, .eq);
+}
+fn lessAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return compareAtoms(vm, x, y, .lt);
+}
+fn greaterAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return compareAtoms(vm, x, y, .gt);
+}
+
+pub fn equal(vm: *Vm, x: *Value, y: *Value) !*Value {
+    return pairwise(vm, x, y, equalAtoms);
+}
+
+pub fn less_than(vm: *Vm, x: *Value, y: *Value) !*Value {
+    return pairwise(vm, x, y, lessAtoms);
+}
+
+pub fn greater_than(vm: *Vm, x: *Value, y: *Value) !*Value {
+    return pairwise(vm, x, y, greaterAtoms);
+}
+
+/// `x~y`: the same type and the same items throughout, floats to within the comparison
+/// tolerance and nulls matching nulls, so `1~1f` is false and `0n~0n` true.
+pub fn match(vm: *Vm, x: *Value, y: *Value) !*Value {
+    return vm.createValue(.boolean, try matches(vm, x, y));
+}
+
+pub fn matches(vm: *Vm, x: *Value, y: *Value) Allocator.Error!bool {
+    if (std.meta.activeTag(x.as) != std.meta.activeTag(y.as)) return false;
+    switch (x.as) {
+        .float, .real, .datetime => return order(Comparable.of(x).?, Comparable.of(y).?) == .eq,
+        .float_list, .real_list, .datetime_list, .list => {
+            const n = x.count();
+            if (n != y.count()) return false;
+            for (0..n) |i| {
+                const a = try itemAt(vm, x, i);
+                defer a.deref(vm.gpa);
+                const b = try itemAt(vm, y, i);
+                defer b.deref(vm.gpa);
+                if (!try matches(vm, a, b)) return false;
+            }
+            return true;
+        },
+        .dict => |d| return try matches(vm, d.keys, y.as.dict.keys) and try matches(vm, d.values, y.as.dict.values),
+        else => return x.eql(y),
+    }
+}
+
+/// `x&y` and `x|y` on atoms: the smaller or larger, kept as it is when both are of one
+/// type and otherwise promoted the way arithmetic promotes (`1&2.5` is `1f`); nulls are
+/// the smallest. Symbols and functions are a type error.
+fn minMaxAtoms(vm: *Vm, x: *Value, y: *Value, comptime want_min: bool) Vm.RunError!*Value {
+    if (x.as == .symbol or y.as == .symbol) return error.type;
+    const a = Comparable.of(x) orelse return error.type;
+    const b = Comparable.of(y) orelse return error.type;
+    const pick_x = switch (order(a, b)) {
+        .lt => want_min,
+        .gt => !want_min,
+        .eq => true,
+    };
+    const chosen = if (pick_x) x else y;
+    if (std.meta.activeTag(x.as) == std.meta.activeTag(y.as)) return chosen.ref();
+    const nx = Numeric.of(x) orelse return error.type;
+    const ny = Numeric.of(y) orelse return error.type;
+    const kind: Numeric.Kind = @fromBackingInt(@max(@backingInt(nx.kind()), @backingInt(ny.kind())));
+    const value = Numeric.of(chosen).?;
+    return switch (kind) {
+        .int => vm.createValue(.int, value.toInt() orelse @backingInt(Value.Int.null)),
+        .long => vm.createValue(.long, value.toLong() orelse @backingInt(Value.Long.null)),
+        .real => vm.createValue(.real, value.toReal()),
+        .float => vm.createValue(.float, value.toFloat()),
+    };
+}
+
+fn minAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return minMaxAtoms(vm, x, y, true);
+}
+fn maxAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return minMaxAtoms(vm, x, y, false);
+}
+
+pub fn @"and"(vm: *Vm, x: *Value, y: *Value) !*Value {
+    return pairwise(vm, x, y, minAtoms);
+}
+
+pub fn @"or"(vm: *Vm, x: *Value, y: *Value) !*Value {
+    return pairwise(vm, x, y, maxAtoms);
+}
+
+/// `x in y`: whether each item of `x` matches an item of `y`. A typed `x` against a
+/// general `y` counts as one item (`"ab" in ("ab";"cd")`), typed lists of different
+/// kinds are a type error (`1.0 in 1 2`), and an atom `y` is its own single item.
+pub fn in(vm: *Vm, x: *Value, y: *Value) !*Value {
+    const y_general = y.as == .list;
+    const x_typed_list = x.isList() and x.as != .list;
+    if (y.isList() and !y_general) {
+        const y_atom: Value.Type = @fromBackingInt(-@backingInt(std.meta.activeTag(y.as)));
+        if (x_typed_list and std.meta.activeTag(x.as) != std.meta.activeTag(y.as)) return error.type;
+        if (!x.isList() and std.meta.activeTag(x.as) != y_atom) return error.type;
+    }
+    if (!x.isList() or (x_typed_list and y_general)) return vm.createValue(.boolean, try member(vm, x, y));
+    const n = x.count();
+    const result = try vm.allocValue(.boolean_list, n);
+    errdefer result.deref(vm.gpa);
+    for (0..n) |i| {
+        const item = try itemAt(vm, x, i);
+        defer item.deref(vm.gpa);
+        result.as.boolean_list[i] = try member(vm, item, y);
+    }
+    return result;
+}
+
+fn member(vm: *Vm, item: *Value, y: *Value) Allocator.Error!bool {
+    if (!y.isList()) return matches(vm, item, y);
+    for (0..y.count()) |j| {
+        const candidate = try itemAt(vm, y, j);
+        defer candidate.deref(vm.gpa);
+        if (try matches(vm, item, candidate)) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------------------
+// Ordering and search: the order grade sorts by, and `?` find, `bin` and `binr`.
+
+/// The class a value sorts in: atoms first, then lists, then dictionaries, then functions.
+fn sortClass(v: *Value) u8 {
+    if (v.isList()) return 1;
+    if (v.as == .dict) return 2;
+    if (Vm.isFunction(v)) return 3;
+    return 0;
+}
+
+/// q's order over any two values, the one grade uses on a general list: atoms come first,
+/// by type in the order of the type numbers (booleans, bytes, shorts, ints, longs, reals,
+/// floats, chars, symbols, then the temporal types) and within a type by value, nulls
+/// lowest, symbols by name and floats to within the comparison tolerance; then lists, by
+/// type number with general lists first and then item by item, a prefix sorting before
+/// the longer list; then dictionaries and functions, which are all equal to each other.
+pub fn compareValues(vm: *Vm, a: *Value, b: *Value) std.math.Order {
+    const class_a = sortClass(a);
+    const class_b = sortClass(b);
+    if (class_a != class_b) return std.math.order(class_a, class_b);
+    const type_a = @abs(@backingInt(std.meta.activeTag(a.as)));
+    const type_b = @abs(@backingInt(std.meta.activeTag(b.as)));
+    if (type_a != type_b) return std.math.order(type_a, type_b);
+    switch (class_a) {
+        0 => {
+            if (a.as == .symbol) return std.mem.order(u8, vm.internedString(a.as.symbol), vm.internedString(b.as.symbol));
+            return order(Comparable.of(a).?, Comparable.of(b).?);
+        },
+        1 => {
+            const n = @min(a.count(), b.count());
+            for (0..n) |i| {
+                const o = compareItems(vm, a, i, b, i);
+                if (o != .eq) return o;
+            }
+            return std.math.order(a.count(), b.count());
+        },
+        else => return .eq,
+    }
+}
+
+/// Item `i` of `a` against item `j` of `b`, two lists of the same type, without making atoms.
+pub fn compareItems(vm: *Vm, a: *Value, i: usize, b: *Value, j: usize) std.math.Order {
+    switch (a.as) {
+        .list => |items| return compareValues(vm, items[i], b.as.list[j]),
+        .symbol_list => |items| return std.mem.order(u8, vm.internedString(items[i]), vm.internedString(b.as.symbol_list[j])),
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| {
+            const atom_tag = comptime counterpart(tag);
+            return order(Comparable.fromScalar(atom_tag, items[i]), Comparable.fromScalar(atom_tag, @field(b.as, @tagName(tag))[j]));
+        },
+        else => unreachable,
+    }
+}
+
+/// Whether item `i` of the typed list `x` is exactly the atom `y` of its type, the way `?`
+/// find matches: no float tolerance, but a null finds a null.
+fn itemIs(x: *Value, i: usize, y: *Value) bool {
+    switch (x.as) {
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| {
+            const item = items[i];
+            const needle = @field(y.as, @tagName(counterpart(tag)));
+            return switch (@TypeOf(item)) {
+                f32, f64 => item == needle or (std.math.isNan(item) and std.math.isNan(needle)),
+                else => item == needle,
+            };
+        },
+        else => unreachable,
+    }
+}
+
+/// Applies a search to every item of `y`, unifying the results.
+fn searchEach(vm: *Vm, x: *Value, y: *Value, comptime f: fn (*Vm, *Value, *Value) Vm.RunError!*Value) Vm.RunError!*Value {
+    const n = y.count();
+    if (n == 0) return vm.allocValue(.long_list, 0);
+    const results = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(results);
+    var done: usize = 0;
+    defer for (results[0..done]) |r| r.deref(vm.gpa);
+    for (0..n) |i| {
+        const item = try itemAt(vm, y, i);
+        defer item.deref(vm.gpa);
+        results[done] = try f(vm, x, item);
+        done += 1;
+    }
+    return vm.enlist(results);
+}
+
+const SearchMode = enum { one, each, enlisted };
+
+/// How `?` and `bin` read the right side against a general list `x`, which q decides by
+/// the first item of `x`: after an atom, an atom is one key and any list is searched item
+/// by item (`(1;2)?1 2` is `0 1`); after a list, a typed list is one key (`(1 2;3 4)?3 4`
+/// is 1), a general list is searched item by item only when its own first item has the
+/// type of `x`'s (`(1 2;3)?(1 2;3)` is `0 1` but `(1 2;3)?(3;1 2)` is 2), and an atom
+/// given at the top level is enlisted first, so `(1 2;3)?3` is 2 and `(1 2;3 4) bin 3` is
+/// 0. Within an item-by-item search an atom is one key.
+fn searchMode(x: *Value, y: *Value, top: bool) SearchMode {
+    const items = x.as.list;
+    const head_is_list = items.len > 0 and items[0].isList();
+    if (!head_is_list) return if (y.isList()) .each else .one;
+    if (!y.isList()) return if (top) .enlisted else .one;
+    if (y.as != .list) return .one;
+    const same = y.as.list.len > 0 and std.meta.activeTag(y.as.list[0].as) == std.meta.activeTag(items[0].as);
+    return if (same) .each else .one;
+}
+
+/// `x?y` finds the first position of `y` in `x`, or the count when it is missing: exact
+/// matches (`1.0 2?1+1e-14` is 2), a null finding a null, an atom against a typed list
+/// needing the list's own type, items of a general list by `~`. A list `y` is searched item
+/// by item, except against a general list of lists, where `searchMode` decides. On a
+/// dictionary the search runs over the values and returns the key (a null key when
+/// missing). Roll and deal, `n?x` with an atom `x`, are not done.
+pub fn find(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return findImpl(vm, x, y, true);
+}
+
+fn findItem(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return findImpl(vm, x, y, false);
+}
+
+fn findAtom(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (y.isList()) return error.type;
+    return findImpl(vm, x, y, false);
+}
+
+/// Whether a general list on the right of a search against a typed list is flat, which q
+/// decides by its first item: after an atom every item must be an atom (`1 2 3?(2;1 3)` is
+/// a type error), after a list each item is searched on its own (`1 2?(1 2;3)` is
+/// `(0 1;2)`).
+fn flatSearch(y: *Value) bool {
+    const items = y.as.list;
+    return items.len > 0 and !items[0].isList();
+}
+
+fn findImpl(vm: *Vm, x: *Value, y: *Value, top: bool) Vm.RunError!*Value {
+    switch (x.as) {
+        .dict => |d| {
+            const index = try findImpl(vm, d.values, y, top);
+            defer index.deref(vm.gpa);
+            var args = [_]*Value{index};
+            return vm.applyImpl(d.keys, &args);
+        },
+        .list => |items| {
+            const key = switch (searchMode(x, y, top)) {
+                .each => return searchEach(vm, x, y, findItem),
+                .one => y.ref(),
+                .enlisted => try q.unary_primitives.enlist(vm, y),
+            };
+            defer key.deref(vm.gpa);
+            for (items, 0..) |item, i| if (try matches(vm, item, key)) return vm.createValue(.long, @intCast(i));
+            return vm.createValue(.long, @intCast(items.len));
+        },
+        .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => {
+            if (y.isList()) {
+                if (y.as != .list and std.meta.activeTag(y.as) != std.meta.activeTag(x.as)) return error.type;
+                if (y.as == .list and flatSearch(y)) return searchEach(vm, x, y, findAtom);
+                return searchEach(vm, x, y, findItem);
+            }
+            if (@backingInt(std.meta.activeTag(y.as)) != -@backingInt(std.meta.activeTag(x.as))) return error.type;
+            const n = x.count();
+            for (0..n) |i| if (itemIs(x, i, y)) return vm.createValue(.long, @intCast(i));
+            return vm.createValue(.long, @intCast(n));
+        },
+        else => return error.nyi,
+    }
+}
+
+/// `x bin y`: the position of the last item of the sorted list `x` at or below `y`, -1 when
+/// there is none; `x binr y` the position of the first item at or above `y`, the count when
+/// there is none. Nulls sit below everything, so `1 3 5 bin 0N` is -1 and `1 3 5 binr 0N`
+/// is 0. The types follow `?` find: an atom against a typed list needs its type, a list `y`
+/// is searched item by item or as one key by `searchMode`, and a dictionary is searched by
+/// value and answers with the key.
+pub fn bin(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return binarySearch(vm, x, y, false, true);
+}
+
+pub fn binr(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return binarySearch(vm, x, y, true, true);
+}
+
+fn binItem(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return binarySearch(vm, x, y, false, false);
+}
+
+fn binrItem(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return binarySearch(vm, x, y, true, false);
+}
+
+fn binarySearch(vm: *Vm, x: *Value, y: *Value, comptime right: bool, top: bool) Vm.RunError!*Value {
+    const each = if (right) binrItem else binItem;
+    var key = y.ref();
+    defer key.deref(vm.gpa);
+    switch (x.as) {
+        .dict => |d| {
+            const index = try binarySearch(vm, d.values, y, right, top);
+            defer index.deref(vm.gpa);
+            var args = [_]*Value{index};
+            return vm.applyImpl(d.keys, &args);
+        },
+        .list => switch (searchMode(x, y, top)) {
+            .each => return searchEach(vm, x, y, each),
+            .one => {},
+            .enlisted => {
+                key.deref(vm.gpa);
+                key = try q.unary_primitives.enlist(vm, y);
+            },
+        },
+        .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .symbol_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => {
+            if (y.isList()) {
+                if (y.as != .list and std.meta.activeTag(y.as) != std.meta.activeTag(x.as)) return error.type;
+                if (y.as == .list and flatSearch(y)) for (y.as.list) |item| if (item.isList()) return error.type;
+                return searchEach(vm, x, y, each);
+            }
+            if (@backingInt(std.meta.activeTag(y.as)) != -@backingInt(std.meta.activeTag(x.as))) return error.type;
+        },
+        else => return error.type,
+    }
+    // The count of items below the key (binr) or at or below it (bin), by bisection.
+    var low: usize = 0;
+    var high: usize = x.count();
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const o = if (x.as == .list) compareValues(vm, x.as.list[mid], key) else compareAtomToItem(vm, x, mid, key);
+        const below = if (right) o == .lt else o != .gt;
+        if (below) low = mid + 1 else high = mid;
+    }
+    const position: i64 = if (right) @intCast(low) else @as(i64, @intCast(low)) - 1;
+    return vm.createValue(.long, position);
+}
+
+/// Item `i` of the typed list `x` against the atom `y` of its type.
+fn compareAtomToItem(vm: *Vm, x: *Value, i: usize, y: *Value) std.math.Order {
+    switch (x.as) {
+        .symbol_list => |items| return std.mem.order(u8, vm.internedString(items[i]), vm.internedString(y.as.symbol)),
+        inline .boolean_list,
+        .byte_list,
+        .short_list,
+        .int_list,
+        .long_list,
+        .real_list,
+        .float_list,
+        .char_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .datetime_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |items, tag| return order(Comparable.fromScalar(comptime counterpart(tag), items[i]), Comparable.of(y).?),
+        else => unreachable,
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// `sv` and `vs`: data on the left of `/:` and `\:`.
+
+/// A string value holding `bytes`.
+fn textValue(vm: *Vm, bytes: []const u8) Allocator.Error!*Value {
+    const v = try vm.allocValue(.char_list, bytes.len);
+    errdefer comptime unreachable;
+    @memcpy(v.as.char_list, bytes);
+    return v;
+}
+
+/// The digits `0x40\:` and `0x24\:` write: base 64 in 10 bytes and base 36 in 12, the
+/// most a long holds below 2^63; other bytes are `nyi` in q too.
+fn digitWidth(base: u8) ?usize {
+    return switch (base) {
+        0x40 => 10,
+        0x24 => 12,
+        else => null,
+    };
+}
+
+/// `x/:y`, `sv`: a string or char `x` joins a list of strings with it (`" "/:("ab";"cd")`
+/// is `"ab cd"`, `()` gives `""`); `` ` `` joins symbols with dots (`` `/:`a`b `` is
+/// `` `a.b ``) or strings as lines, each ending in a newline; `0x00` reads 8, 4 or 2 bytes
+/// as a big-endian long, int or short, and `0x40` or `0x24` reads the digits `vs` wrote; a
+/// number or a list of numbers is a base or mixed radix (`10/:1 2 3` is 123, `0 24 60 60/:1
+/// 1 1 1` is 90061), applied down the columns of a list of lists.
+pub fn sv(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .char, .char_list => {
+            const separator: []const u8 = if (x.as == .char) &.{x.as.char} else x.as.char_list;
+            if (y.as != .list) return error.type;
+            const items = y.as.list;
+            var total: usize = 0;
+            for (items, 0..) |item, i| {
+                if (item.as != .char_list) return error.type;
+                total += item.as.char_list.len + (if (i > 0) separator.len else 0);
+            }
+            const result = try vm.allocValue(.char_list, total);
+            errdefer comptime unreachable;
+            var filled: usize = 0;
+            for (items, 0..) |item, i| {
+                if (i > 0) {
+                    @memcpy(result.as.char_list[filled .. filled + separator.len], separator);
+                    filled += separator.len;
+                }
+                @memcpy(result.as.char_list[filled .. filled + item.as.char_list.len], item.as.char_list);
+                filled += item.as.char_list.len;
+            }
+            return result;
+        },
+        .symbol => |s| {
+            if (s != .empty) return error.nyi;
+            switch (y.as) {
+                .symbol_list => |names| {
+                    if (names.len == 0) return error.type;
+                    var buffer: std.ArrayList(u8) = .empty;
+                    defer buffer.deinit(vm.gpa);
+                    for (names, 0..) |name, i| {
+                        if (i > 0) try buffer.append(vm.gpa, '.');
+                        try buffer.appendSlice(vm.gpa, vm.internedString(name));
+                    }
+                    return vm.createValue(.symbol, try vm.intern(buffer.items));
+                },
+                .list => |items| {
+                    var total: usize = 0;
+                    for (items) |item| {
+                        if (item.as != .char_list) return error.type;
+                        total += item.as.char_list.len + 1;
+                    }
+                    const result = try vm.allocValue(.char_list, total);
+                    errdefer comptime unreachable;
+                    var filled: usize = 0;
+                    for (items) |item| {
+                        @memcpy(result.as.char_list[filled .. filled + item.as.char_list.len], item.as.char_list);
+                        filled += item.as.char_list.len;
+                        result.as.char_list[filled] = '\n';
+                        filled += 1;
+                    }
+                    return result;
+                },
+                else => return error.type,
+            }
+        },
+        .byte => |base| {
+            if (y.as != .byte_list) return error.type;
+            const bytes = y.as.byte_list;
+            if (base == 0) {
+                return switch (bytes.len) {
+                    8 => vm.createValue(.long, std.mem.readInt(i64, bytes[0..8], .big)),
+                    4 => vm.createValue(.int, std.mem.readInt(i32, bytes[0..4], .big)),
+                    2 => vm.createValue(.short, std.mem.readInt(i16, bytes[0..2], .big)),
+                    else => error.length,
+                };
+            }
+            const width = digitWidth(base) orelse return error.nyi;
+            if (bytes.len != width) return error.length;
+            var acc: u64 = 0;
+            for (bytes) |digit| acc = acc *% base +% digit;
+            return vm.createValue(.long, @bitCast(acc));
+        },
+        .short, .int, .long, .short_list, .int_list, .long_list => return radixJoin(vm, x, y),
+        else => return error.type,
+    }
+}
+
+/// The bases of a radix, from an atom (repeated) or a list.
+fn baseAt(x: *Value, i: usize) i64 {
+    return switch (x.as) {
+        .short => |v| v,
+        .int => |v| v,
+        .long => |v| v,
+        .short_list => |v| v[i],
+        .int_list => |v| v[i],
+        .long_list => |v| v[i],
+        else => unreachable,
+    };
+}
+
+/// `x/:y` for a numeric base: digits fold from the most significant, `acc*base+digit`, the
+/// base at each position coming from a radix list. Integer digits give a long and float
+/// digits a float; a list of lists is folded column by column.
+fn radixJoin(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    switch (y.as) {
+        .list => |rows| {
+            if (rows.len == 0) return error.nyi;
+            var width: usize = 0;
+            for (rows) |row| if (row.isList()) {
+                width = @max(width, row.count());
+            };
+            const results = try vm.gpa.alloc(*Value, width);
+            defer vm.gpa.free(results);
+            var done: usize = 0;
+            defer for (results[0..done]) |r| r.deref(vm.gpa);
+            for (0..width) |j| {
+                const column = try vm.gpa.alloc(*Value, rows.len);
+                defer vm.gpa.free(column);
+                var got: usize = 0;
+                defer for (column[0..got]) |c| c.deref(vm.gpa);
+                for (rows) |row| {
+                    column[got] = if (row.isList()) try itemAt(vm, row, j) else row.ref();
+                    got += 1;
+                }
+                const digits = try vm.enlist(column);
+                defer digits.deref(vm.gpa);
+                results[done] = try radixJoin(vm, x, digits);
+                done += 1;
+            }
+            return vm.enlist(results);
+        },
+        .boolean_list, .short_list, .int_list, .long_list, .real_list, .float_list => {},
+        else => return error.type,
+    }
+    const n = y.count();
+    if (x.isList() and x.count() != n) return error.length;
+    const is_float = y.as == .real_list or y.as == .float_list;
+    if (is_float) {
+        var acc: f64 = 0;
+        for (0..n) |i| {
+            const digit: f64 = switch (y.as) {
+                .real_list => |v| v[i],
+                .float_list => |v| v[i],
+                else => unreachable,
+            };
+            acc = acc * @as(f64, @floatFromInt(baseAt(x, i))) + digit;
+        }
+        return vm.createValue(.float, acc);
+    }
+    var acc: i64 = 0;
+    for (0..n) |i| {
+        const digit: i64 = switch (y.as) {
+            .boolean_list => |v| @intFromBool(v[i]),
+            .short_list => |v| v[i],
+            .int_list => |v| v[i],
+            .long_list => |v| v[i],
+            else => unreachable,
+        };
+        acc = acc *% baseAt(x, i) +% digit;
+    }
+    return vm.createValue(.long, acc);
+}
+
+/// `x\:y`, `vs`: a string or char `x` splits a string at it (`" "\:"a b"` is `(,"a";,"b")`,
+/// empty pieces kept); `` ` `` splits a symbol at its dots (`` `\:`a.b `` is `` `a`b ``) or
+/// a string into lines, dropping `\r` and a final empty line; `0x00` gives the big-endian
+/// bytes of a number and `0x40` or `0x24` its ten base-64 or twelve base-36 digits; a
+/// number or a list of numbers is a base or mixed radix giving the digits of an integer,
+/// most significant first (`10\:123` is `1 2 3`, `2 4\:10` is `0 2`), or of each item of a
+/// list as rows of digits (`10\:12 345` is `(0 3;1 4;2 5)`).
+pub fn vs(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .char, .char_list => {
+            const separator: []const u8 = if (x.as == .char) &.{x.as.char} else x.as.char_list;
+            if (separator.len == 0) return error.length;
+            if (y.as != .char_list) return error.type;
+            return splitText(vm, y.as.char_list, separator);
+        },
+        .symbol => |s| {
+            if (s != .empty) return error.nyi;
+            switch (y.as) {
+                .symbol => |name| {
+                    const text = vm.internedString(name);
+                    var count: usize = 1;
+                    for (text) |c| count += @intFromBool(c == '.');
+                    const result = try vm.allocValue(.symbol_list, count);
+                    errdefer result.deref(vm.gpa);
+                    var it = std.mem.splitScalar(u8, text, '.');
+                    var i: usize = 0;
+                    while (it.next()) |part| : (i += 1) result.as.symbol_list[i] = try vm.intern(part);
+                    return result;
+                },
+                .char_list => |text| {
+                    var lines: std.ArrayList(*Value) = .empty;
+                    defer lines.deinit(vm.gpa);
+                    defer for (lines.items) |line| line.deref(vm.gpa);
+                    var it = std.mem.splitScalar(u8, text, '\n');
+                    while (it.next()) |line| {
+                        if (it.peek() == null and line.len == 0) break;
+                        const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+                        try lines.append(vm.gpa, try textValue(vm, trimmed));
+                    }
+                    if (lines.items.len == 0) return vm.allocValue(.list, 0);
+                    return vm.enlist(lines.items);
+                },
+                else => return error.type,
+            }
+        },
+        .byte => |base| {
+            if (base == 0) {
+                var buffer: [8]u8 = undefined;
+                const len: usize = switch (y.as) {
+                    .short => |v| blk: {
+                        std.mem.writeInt(i16, buffer[0..2], v, .big);
+                        break :blk 2;
+                    },
+                    .int => |v| blk: {
+                        std.mem.writeInt(i32, buffer[0..4], v, .big);
+                        break :blk 4;
+                    },
+                    .long => |v| blk: {
+                        std.mem.writeInt(i64, buffer[0..8], v, .big);
+                        break :blk 8;
+                    },
+                    .real => |v| blk: {
+                        std.mem.writeInt(u32, buffer[0..4], @bitCast(v), .big);
+                        break :blk 4;
+                    },
+                    .float => |v| blk: {
+                        std.mem.writeInt(u64, buffer[0..8], @bitCast(v), .big);
+                        break :blk 8;
+                    },
+                    .char => |c| blk: {
+                        buffer[0] = c;
+                        break :blk 1;
+                    },
+                    else => return error.type,
+                };
+                const bytes = buffer[0..len];
+                const result = try vm.allocValue(.byte_list, bytes.len);
+                errdefer comptime unreachable;
+                @memcpy(result.as.byte_list, bytes);
+                return result;
+            }
+            const width = digitWidth(base) orelse return error.nyi;
+            if (y.as != .long) return error.nyi;
+            if (y.as.long == @backingInt(Value.Long.null)) return vm.allocValue(.byte_list, 0);
+            const result = try vm.allocValue(.byte_list, width);
+            errdefer comptime unreachable;
+            var v: u64 = @bitCast(y.as.long);
+            var i: usize = width;
+            while (i > 0) {
+                i -= 1;
+                result.as.byte_list[i] = @intCast(v % base);
+                v /= base;
+            }
+            return result;
+        },
+        .short, .int, .long, .short_list, .int_list, .long_list => return radixSplit(vm, x, y),
+        else => return error.type,
+    }
+}
+
+/// `text` cut at every `separator`, empty pieces kept, as a list of strings.
+fn splitText(vm: *Vm, text: []const u8, separator: []const u8) Vm.RunError!*Value {
+    var pieces: std.ArrayList(*Value) = .empty;
+    defer pieces.deinit(vm.gpa);
+    defer for (pieces.items) |piece| piece.deref(vm.gpa);
+    var it = std.mem.splitSequence(u8, text, separator);
+    while (it.next()) |piece| try pieces.append(vm.gpa, try textValue(vm, piece));
+    return vm.enlist(pieces.items);
+}
+
+/// The value of an integer atom for a radix, null for a null.
+fn integerOf(y: *Value) error{type}!?i64 {
+    return switch (y.as) {
+        .boolean => |b| @intFromBool(b),
+        .short => |v| if (v == @backingInt(Value.Short.null)) null else v,
+        .int => |v| if (v == @backingInt(Value.Int.null)) null else v,
+        .long => |v| if (v == @backingInt(Value.Long.null)) null else v,
+        else => error.type,
+    };
+}
+
+/// The digits of `value` in the radix `x`, least significant first, into `digits`: a
+/// single base gives as many digits as a positive value needs (none for zero, a null or a
+/// negative), a radix list one per base from the last, a base of zero or a null taking
+/// a null digit.
+fn radixDigits(vm: *Vm, x: *Value, value: ?i64, digits: *std.ArrayList(i64)) Allocator.Error!void {
+    if (x.isList()) {
+        var v = value;
+        var i = x.count();
+        while (i > 0) {
+            i -= 1;
+            const base = baseAt(x, i);
+            if (base <= 0 or v == null) {
+                try digits.append(vm.gpa, @backingInt(Value.Long.null));
+                continue;
+            }
+            try digits.append(vm.gpa, @mod(v.?, base));
+            v = @divFloor(v.?, base);
+        }
+        return;
+    }
+    const base = baseAt(x, 0);
+    if (base <= 0) return;
+    var v = value orelse return;
+    while (v > 0) : (v = @divTrunc(v, base)) try digits.append(vm.gpa, @mod(v, base));
+}
+
+/// Digit `place` (0 for the units) of `value` in a single base, a null for a null and the
+/// modulo digit for a negative, which is how the rows of `10\:-1 5` come out as `,9 5`.
+fn digitAt(base: i64, value: ?i64, place: usize) i64 {
+    var v = value orelse return @backingInt(Value.Long.null);
+    for (0..place) |_| v = @divFloor(v, base);
+    return @mod(v, base);
+}
+
+/// `x\:y` for a numeric radix: the digits of an integer, or the rows of digits of a list
+/// of integers padded to the widest with zeros.
+fn radixSplit(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    var digits: std.ArrayList(i64) = .empty;
+    defer digits.deinit(vm.gpa);
+    if (!y.isList()) {
+        try radixDigits(vm, x, try integerOf(y), &digits);
+        const result = try vm.allocValue(.long_list, digits.items.len);
+        errdefer comptime unreachable;
+        for (result.as.long_list, 0..) |*r, i| r.* = digits.items[digits.items.len - 1 - i];
+        return result;
+    }
+    switch (y.as) {
+        .boolean_list, .short_list, .int_list, .long_list => {},
+        else => return error.type,
+    }
+    const n = y.count();
+    const values = try vm.gpa.alloc(?i64, n);
+    defer vm.gpa.free(values);
+    const columns = try vm.gpa.alloc([]i64, n);
+    defer vm.gpa.free(columns);
+    var made: usize = 0;
+    defer for (columns[0..made]) |c| vm.gpa.free(c);
+    // The rows are as many as the widest item needs, at least one; with a single base a
+    // negative or null item fills its column with modulo or null digits.
+    var width: usize = 1;
+    for (0..n) |i| {
+        const item = try itemAt(vm, y, i);
+        defer item.deref(vm.gpa);
+        values[i] = try integerOf(item);
+        digits.clearRetainingCapacity();
+        try radixDigits(vm, x, values[i], &digits);
+        columns[made] = try vm.gpa.dupe(i64, digits.items);
+        made += 1;
+        width = @max(width, digits.items.len);
+    }
+    const rows = try vm.allocValue(.list, width);
+    var filled: usize = 0;
+    errdefer {
+        for (rows.as.list[0..filled]) |r| r.deref(vm.gpa);
+        vm.gpa.free(rows.as.list);
+        vm.gpa.destroy(rows);
+    }
+    for (0..width) |r| {
+        const row = try vm.allocValue(.long_list, n);
+        const place = width - 1 - r;
+        for (row.as.long_list, columns, values) |*cell, column, value| {
+            cell.* = if (x.isList())
+                (if (place < column.len) column[place] else 0)
+            else
+                digitAt(baseAt(x, 0), value, place);
+        }
+        rows.as.list[filled] = row;
+        filled += 1;
+    }
+    return rows;
 }
