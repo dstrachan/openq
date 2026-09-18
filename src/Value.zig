@@ -574,7 +574,9 @@ pub fn rank(value: *Value) usize {
         .each => |d| d.value.rank(),
         .over => |d| @max(2, d.value.rank()),
         .scan => |d| @max(2, d.value.rank()),
-        .each_prior, .each_right, .each_left => 2,
+        .each_prior => 2,
+        // With data on the left (`" "\:`) the derived function takes one argument.
+        inline .each_right, .each_left => |d| if (Vm.isFunction(d.value)) 2 else 1,
         // The right function takes the arguments.
         .composition => |c| c.g.rank(),
     };

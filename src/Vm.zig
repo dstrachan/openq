@@ -519,8 +519,22 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             return vm.applyImpl(projection.callee, new_args.items);
         },
         .each, .over, .scan, .each_prior, .each_right, .each_left => {
-            // A hole projects the derived function, as `f/[;x]` does in q.
+            // A hole projects the derived function, as `f/[;x]` does in q, and so do too
+            // few arguments for an each (`(+')[1]` is `+'[1]`), an each-right or an
+            // each-left, while over, scan and each-prior take one.
             for (args) |a| if (a.isEmpty()) return vm.project(func, args);
+            const short = switch (func.as) {
+                .each => |d| args.len < d.value.rank(),
+                // With data on the left (`" "\:x`) one argument is the whole application.
+                inline .each_right, .each_left => |d| isFunction(d.value) and args.len < 2 and d.value.rank() >= 2,
+                else => false,
+            };
+            if (short) return vm.project(func, args);
+            // A monadic function under each-right or each-left given one argument is `type`.
+            switch (func.as) {
+                inline .each_right, .each_left => |d| if (isFunction(d.value) and args.len < 2) return error.type,
+                else => {},
+            }
             return switch (func.as) {
                 .each => |d| q.iterators.each(vm, d.value, args),
                 .over => |d| q.iterators.over(vm, d.value, args),
@@ -874,7 +888,28 @@ pub fn createCharList(vm: *Vm, comptime fmt: []const u8, args: anytype) !*Value 
 pub fn evalSource(vm: *Vm, source: [:0]const u8, mode: Ast.Mode, path: []const u8) RunError!*Value {
     const value = try vm.parseSource(source, mode, path);
     defer value.deref(vm.gpa);
-    return vm.eval(value);
+    return vm.evalStatement(value);
+}
+
+/// Evaluates a statement: as `eval`, except that an assignment, plain or amend, gives
+/// `::` as q does (`value "a:1"` is `::`), while nested in an expression it keeps its
+/// value (`b:a+:2` sets `b` to the new `a`).
+pub fn evalStatement(vm: *Vm, x: *Value) RunError!*Value {
+    const v = try vm.eval(x);
+    if (!isAssignmentTree(x)) return v;
+    v.deref(vm.gpa);
+    return vm.getUnaryPrimitive(.identity);
+}
+
+/// Whether a parse tree is an assignment at its top: `x:v`, `x+:v`, `x[i]:v` or `x::v`.
+fn isAssignmentTree(x: *Value) bool {
+    if (x.as != .list or x.as.list.len != 3) return false;
+    const value = x.as.list;
+    const target = value[1];
+    const indexed = target.as == .list and target.as.list.len > 1 and target.as.list[0].as == .symbol;
+    if (value[0].as == .operator and value[0].as.operator == .assign) return target.as == .symbol or indexed;
+    if (amendOperatorOf(value[0])) |_| return target.as == .symbol or indexed;
+    return false;
 }
 
 pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
@@ -886,10 +921,10 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
 
             if (value[0].as == .char and value[0].as.char == ';') {
                 for (value[1 .. value.len - 1]) |val| {
-                    const v = try vm.eval(val);
+                    const v = try vm.evalStatement(val);
                     defer v.deref(vm.gpa);
                 }
-                return vm.eval(value[value.len - 1]);
+                return vm.evalStatement(value[value.len - 1]);
             }
 
             // Compound and indexed assignment as q parses them at the top level: `x+:v` is
@@ -989,18 +1024,36 @@ fn evalAmend(vm: *Vm, target: *Value, operator: Operator, rhs: *Value) RunError!
     const v = try vm.eval(rhs);
     defer v.deref(vm.gpa);
     const name = if (target.as == .symbol) target else target.as.list[0];
-    const new_value = if (target.as == .symbol and operator == .assign) v.ref() else amended: {
+    const index = if (target.as == .symbol) try vm.allocValue(.list, 0) else try vm.evalIndex(target.as.list[1..]);
+    defer index.deref(vm.gpa);
+    const plain = target.as == .symbol and operator == .assign;
+    const new_value = if (plain) v.ref() else amended: {
         const old = try vm.readGlobal(name.as.symbol);
         defer old.deref(vm.gpa);
-        const index = if (target.as == .symbol) try vm.allocValue(.list, 0) else try vm.evalIndex(target.as.list[1..]);
-        defer index.deref(vm.gpa);
         const function = vm.getOperator(operator);
         defer function.deref(vm.gpa);
         break :amended try vm.amendValue(old, index, function, v);
     };
     defer new_value.deref(vm.gpa);
     _ = try q.operators.assignGlobal(vm, name, new_value);
-    return vm.getUnaryPrimitive(.identity);
+    return vm.amendedItems(new_value, index, plain, v);
+}
+
+/// What an amend evaluates to: the assigned value for `x:v`, the whole new value for
+/// `x+:v`, and the new items at the index for `x[i]:v` and `x[i]+:v`.
+fn amendedItems(vm: *Vm, new_value: *Value, index: *Value, plain: bool, value: *Value) RunError!*Value {
+    if (plain) return value.ref();
+    const n = index.count();
+    if (n == 0) return new_value.ref();
+    const items = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(items);
+    var made: usize = 0;
+    defer for (items[0..made]) |i| i.deref(vm.gpa);
+    for (0..n) |i| {
+        items[made] = try q.operators.itemAt(vm, index, i);
+        made += 1;
+    }
+    return vm.applyImpl(new_value, items);
 }
 
 /// The index list of `x[i;j]`, one item per dimension; an elided index is `::`.
@@ -1734,8 +1787,17 @@ pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
 /// The value of a global name: a clock variable, the root for `` ` ``, or the entry found
 /// through `identifierHome`, so a bare name reads from the current namespace.
 pub fn readGlobal(vm: *Vm, identifier: Symbol) RunError!*Value {
+    return vm.readGlobalIn(identifier, vm.namespace);
+}
+
+/// A global read with bare names taken from `scope`: a lambda reads its bare globals in
+/// the namespace it was defined in, while a symbol names a global in the `\d` namespace.
+pub fn readGlobalIn(vm: *Vm, identifier: Symbol, scope: Symbol) RunError!*Value {
     if (identifier == .empty) return vm.state.ref();
     if (try vm.clockVariable(identifier)) |clock| return clock;
+    const saved = vm.namespace;
+    vm.namespace = scope;
+    defer vm.namespace = saved;
     const home = (try vm.identifierHome(identifier, false)) orelse return error.identifier;
     const dict = home.namespace.as.dict;
     const index = std.mem.findScalar(Symbol, dict.keys.as.symbol_list, home.name) orelse return error.identifier;
@@ -1765,10 +1827,6 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     @memset(slots, null);
     for (slots[0..given.len], given) |*slot, a| slot.* = a.ref();
 
-    const saved_namespace = vm.namespace;
-    vm.namespace = lambda.namespace;
-    defer vm.namespace = saved_namespace;
-
     var stack: std.ArrayList(*Value) = .empty;
     defer {
         for (stack.items) |v| v.deref(vm.gpa);
@@ -1792,7 +1850,7 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             continue;
         }
         if (byte >= @backingInt(Compiler.ByteCode.global)) {
-            try stack.append(vm.gpa, try vm.readGlobal(lambda.globals[byte - @backingInt(Compiler.ByteCode.global)]));
+            try stack.append(vm.gpa, try vm.readGlobalIn(lambda.globals[byte - @backingInt(Compiler.ByteCode.global)], lambda.namespace));
             after_amend = false;
             continue;
         }
@@ -1824,7 +1882,8 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             .amend => {
                 // `.[target;index;op;value]` with the value pushed first, then the index:
                 // `x::v` has index `()` and `:`, `x+:v` index `()` and `+`, `x[i]:v` the
-                // index list `,i`. The value stays on the stack as the expression's value.
+                // index list `,i`. The amended items are the expression's value, as q has
+                // `b:a+:2` set `b` to the new `a` and `b:a[0]+:5` to the new item.
                 const target = code[pc];
                 const operator: Operator = @fromBackingInt(@as(@typeInfo(Operator).@"enum".tag_type, @intCast(code[pc + 1])));
                 pc += 2;
@@ -1835,7 +1894,7 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 const plain = operator == .assign and index.isList() and index.count() == 0;
                 const new_value = if (plain) value.ref() else amended: {
                     const old = if (is_global)
-                        try vm.readGlobal(lambda.globals[target - @backingInt(Compiler.ByteCode.global)])
+                        try vm.readGlobalIn(lambda.globals[target - @backingInt(Compiler.ByteCode.global)], lambda.namespace)
                     else
                         (slots[slotIndex(lambda, target)] orelse return error.identifier).ref();
                     defer old.deref(vm.gpa);
@@ -1847,12 +1906,18 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 if (is_global) {
                     const symbol = try vm.createValue(.symbol, lambda.globals[target - @backingInt(Compiler.ByteCode.global)]);
                     defer symbol.deref(vm.gpa);
+                    const saved = vm.namespace;
+                    vm.namespace = lambda.namespace;
+                    defer vm.namespace = saved;
                     _ = try q.operators.assignGlobal(vm, symbol, new_value);
                 } else {
                     const slot = slotIndex(lambda, target);
                     if (slots[slot]) |old| old.deref(vm.gpa);
                     slots[slot] = new_value.ref();
                 }
+                const result = try vm.amendedItems(new_value, index, plain, value);
+                stack.items[stack.items.len - 1] = result;
+                value.deref(vm.gpa);
             },
             .signal => {
                 const v = stack.pop().?;
@@ -2564,7 +2629,7 @@ test "\\d sets the namespace for bare names" {
     try expectEval(vm, "\\d", "`.");
     try expectEval(vm, "\\d .Q", "::");
     try expectEval(vm, "\\d", "`.Q");
-    try expectEval(vm, "qt:1", "1");
+    try expectEval(vm, "qt:1", "::");
     try expectEval(vm, "qt", "1");
     try expectEval(vm, ".Q.qt", "1");
     try expectEval(vm, "\\d .", "::");
@@ -2573,7 +2638,7 @@ test "\\d sets the namespace for bare names" {
     try testing.expectError(error.identifier, vm.evalSource("qt", .q, "<test>"));
 
     // Root names are not visible from inside a namespace.
-    try expectEval(vm, "x:2", "2");
+    try expectEval(vm, "x:2", "::");
     try expectEval(vm, "\\d .Q", "::");
     try testing.expectError(error.identifier, vm.evalSource("x", .q, "<test>"));
     try expectEval(vm, "\\d .", "::");
@@ -2595,11 +2660,11 @@ test "\\d creates a namespace only on assignment" {
     try testing.expectError(error.identifier, vm.evalSource(".bar", .q, "<test>"));
 
     try expectEval(vm, "\\d .bar", "::");
-    try expectEval(vm, "y:3", "3");
+    try expectEval(vm, "y:3", "::");
     try expectEval(vm, "\\d .", "::");
     try expectEval(vm, ".bar.y", "3");
     try expectEval(vm, ".bar", "``y!(::;3)");
-    try expectEval(vm, ".a.b.c:4", "4");
+    try expectEval(vm, ".a.b.c:4", "::");
     try expectEval(vm, ".a.b", "``c!(::;4)");
 }
 
@@ -2608,9 +2673,9 @@ test ".x is a root directory entry, not the global x" {
     const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
     defer vm.deinit();
 
-    try expectEval(vm, ".x:1", "1");
+    try expectEval(vm, ".x:1", "::");
     try testing.expectError(error.identifier, vm.evalSource("x", .q, "<test>"));
-    try expectEval(vm, "x:2", "2");
+    try expectEval(vm, "x:2", "::");
     try expectEval(vm, ".x", "1");
     try expectEval(vm, "x", "2");
     try expectEval(vm, ".x~x", "0b");
@@ -2619,10 +2684,10 @@ test ".x is a root directory entry, not the global x" {
     try expectEval(vm, "\\d .foo", "::");
     try testing.expectError(error.identifier, vm.evalSource("x", .q, "<test>"));
     try expectEval(vm, ".x", "1");
-    try expectEval(vm, "x:3", "3");
+    try expectEval(vm, "x:3", "::");
     try expectEval(vm, ".x", "1");
     try expectEval(vm, ".foo.x", "3");
-    try expectEval(vm, ".z:5", "5");
+    try expectEval(vm, ".z:5", "::");
     try expectEval(vm, "\\d .", "::");
     try expectEval(vm, "x", "2");
     try expectEval(vm, ".z", "5");
@@ -2662,7 +2727,7 @@ test "keywords are .q entries resolved while parsing q" {
     try expectEvalMode(vm, .k, "-:1", "-1");
 
     // A valence-2 function placed in .q is infix from the next statement on, not in the same one.
-    try expectEval(vm, ".q.p:+", "+");
+    try expectEval(vm, ".q.p:+", "::");
     try expectEval(vm, "1 p 2", "3");
     try expectEval(vm, "1 p", "+[1]");
     try expectEval(vm, "p", "+");
@@ -2671,7 +2736,7 @@ test "keywords are .q entries resolved while parsing q" {
     try testing.expectError(error.identifier, vm.evalSource(".q.p2:+;1 p2 2", .q, "<test>"));
 
     // Entries of other valence are inlined as nouns.
-    try expectEval(vm, ".q.v:5", "5");
+    try expectEval(vm, ".q.v:5", "::");
     try expectEval(vm, "v", "5");
     try expectEval(vm, "v+1", "6");
 
@@ -2681,7 +2746,7 @@ test "keywords are .q entries resolved while parsing q" {
     try testing.expectError(error.assign, vm.evalSource("p:1", .q, "<test>"));
     try expectEval(vm, "\\d .", "::");
     try expectEvalMode(vm, .k, "\\d .q", "::");
-    try expectEvalMode(vm, .k, "neg:-:", "-:");
+    try expectEvalMode(vm, .k, "neg:-:", "::");
     try expectEvalMode(vm, .k, "\\d .", "::");
     try expectEval(vm, "neg 1", "-1");
 }
@@ -2696,8 +2761,8 @@ test "natives from .Q.res work in both modes" {
     try expectEval(vm, "enlist", "enlist");
     try expectEvalMode(vm, .k, ",:", ",:");
     try expectEval(vm, "abs", "abs");
-    try testing.expectError(error.nyi, vm.evalSource("abs[-1]", .q, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("abs[-1]", .k, "<test>"));
+    try expectEval(vm, "abs[-1]", "1");
+    try expectEvalMode(vm, .k, "abs[-1]", "1");
     try testing.expectError(error.identifier, vm.evalSource("count[1 2]", .k, "<test>"));
 
     try expectEval(vm, "in", "in");
@@ -2757,12 +2822,12 @@ test "assignment replaces an existing global" {
     const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
     defer vm.deinit();
 
-    try expectEval(vm, "z:1", "1");
-    try expectEval(vm, "z:5", "5");
+    try expectEval(vm, "z:1", "::");
+    try expectEval(vm, "z:5", "::");
     try expectEval(vm, "z", "5");
     try expectEval(vm, "\\d .Q", "::");
-    try expectEval(vm, "z:`a", "`a");
-    try expectEval(vm, "z:`b", "`b");
+    try expectEval(vm, "z:`a", "::");
+    try expectEval(vm, "z:`b", "::");
     try expectEval(vm, ".Q.z", "`b");
 }
 
@@ -3558,9 +3623,9 @@ test ".z clock variables read the clock in local time and UTC" {
     try testing.expect(shift.as.timespan >= expected_shift and shift.as.timespan - expected_shift < q.literal.ns_per_second);
 
     // `.z` is a namespace that accepts other entries; the clock names cannot be replaced.
-    try expectEval(vm, ".z.foo:1", "1");
+    try expectEval(vm, ".z.foo:1", "::");
     try expectEval(vm, ".z.foo", "1");
-    try expectEval(vm, ".z.D:1", "1");
+    try expectEval(vm, ".z.D:1", "::");
     try expectEval(vm, "type .z.D", "-14h");
 }
 
@@ -3875,14 +3940,14 @@ test "lambdas resolve bare globals in their defining namespace and inline keywor
     // A keyword is inlined when the lambda is parsed, so a later change to `.q` is not seen.
     try expectEval(vm, "f:{neg x};.q.neg:{x*10};f 1", "-1");
     try expectEval(vm, "neg 1", "10");
-    try expectEvalMode(vm, .k, ".q.neg:-:", "-:");
+    try expectEvalMode(vm, .k, ".q.neg:-:", "::");
     try expectEval(vm, "neg 1", "-1");
 
     for ([_][:0]const u8{ "value \"\\\\d .foo\"", "t0:{x+1}", "f:{t0 x}", "g:{neg x}", "h:{x+y}", "a:5", "k:{a}", "k2:{.foo.a}", "s:{b::x}", "later:{t1 x}", "value \"\\\\d .\"" }) |source| {
         const value = try vm.evalSource(source, .q, "<test>");
         value.deref(vm.gpa);
     }
-    try expectEval(vm, "t1:{x+100};a:7", "7");
+    try expectEval(vm, "t1:{x+100};a:7", "::");
 
     try expectEval(vm, ".foo.f 1", "2");
     try expectEval(vm, ".foo.g 1", "-1");
@@ -3945,7 +4010,7 @@ test "a symbol-valued .q entry reads as an alias and cannot be assigned" {
     defer vm.deinit();
 
     // Verified against q 5.0; q 4.0 differs only in allowing the assignments.
-    try expectEval(vm, ".q.a:`alias", "`alias");
+    try expectEval(vm, ".q.a:`alias", "::");
     try testing.expectError(error.identifier, vm.evalSource("a", .q, "<test>"));
     try testing.expectError(error.identifier, vm.evalSource("{a}[]", .q, "<test>"));
     try expectEval(vm, "parse \"a 1\"", "(`alias;1)");
@@ -3954,7 +4019,7 @@ test "a symbol-valued .q entry reads as an alias and cannot be assigned" {
     try expectEval(vm, "{[alias]a}[3]", "3");
     try expectEval(vm, "(value {a})[3]", "``alias");
     // The entry must exist before the line using it is parsed, in q as well.
-    try expectEval(vm, ".q.b:`x", "`x");
+    try expectEval(vm, ".q.b:`x", "::");
     try expectEval(vm, "{b}[7]", "7");
     try expectEval(vm, "(value {b})[1]", ",`x");
     try testing.expectError(error.assign, vm.evalSource("a:5", .q, "<test>"));
@@ -3962,7 +4027,7 @@ test "a symbol-valued .q entry reads as an alias and cannot be assigned" {
     try testing.expectError(error.assign, vm.evalSource("parse \"a:5\"", .q, "<test>"));
     try testing.expectError(error.assign, vm.evalSource("f:{a:5;a}", .q, "<test>"));
     try testing.expectError(error.assign, vm.evalSource("{a::5;alias}", .q, "<test>"));
-    try expectEval(vm, ".q.d:5", "5");
+    try expectEval(vm, ".q.d:5", "::");
     try testing.expectError(error.assign, vm.evalSource("{d:1}", .q, "<test>"));
     try testing.expectError(error.assign, vm.evalSource("d:1", .q, "<test>"));
     try expectEval(vm, "alias", "42");
@@ -3974,7 +4039,7 @@ test "a symbol-valued .q entry reads as an alias and cannot be assigned" {
     }
     try testing.expectError(error.identifier, vm.evalSource(".foo.f[]", .q, "<test>"));
     try expectEval(vm, ".foo.alias:9;.foo.f[]", "9");
-    try expectEval(vm, ".q.c:`neg", "`neg");
+    try expectEval(vm, ".q.c:`neg", "::");
     try testing.expectError(error.identifier, vm.evalSource("c 1", .q, "<test>"));
     try testing.expectError(error.identifier, vm.evalSource("{c x}[1]", .q, "<test>"));
 }
@@ -4249,7 +4314,8 @@ test "iterators follow q" {
     try expectEval(vm, "{(x;y)}\\:[1 2;3 4]", "((1;3 4);(2;3 4))");
     try expectEval(vm, "1 2+/:3 4", "(4 5;5 6)");
     try expectEval(vm, "1 2+\\:3 4", "(4 5;5 6)");
-    try testing.expectError(error.rank, vm.evalSource("{x}/:[1 2 3]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("{x}/:[1 2 3]", .q, "<test>"));
+    try expectEval(vm, "{x+y}/:[1 2 3]", "{x+y}/:[1 2 3]");
 
     // Derived functions are values.
     try expectEval(vm, "-3!(+/)", "\"+/\"");
@@ -4468,10 +4534,10 @@ test "keywords bound to derived functions parse as q parses them" {
     const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
     defer vm.deinit();
 
-    try expectEvalMode(vm, .k, ".q.prev: :':", ":':");
-    try expectEvalMode(vm, .k, ".q.sums:+\\", "+\\");
-    try expectEvalMode(vm, .k, ".q.deltas:-':", "-':");
-    try expectEvalMode(vm, .k, ".q.f7:{x+y}'", "k){x+y}'");
+    try expectEvalMode(vm, .k, ".q.prev: :':", "::");
+    try expectEvalMode(vm, .k, ".q.sums:+\\", "::");
+    try expectEvalMode(vm, .k, ".q.deltas:-':", "::");
+    try expectEvalMode(vm, .k, ".q.f7:{x+y}'", "::");
     try expectEval(vm, "prev til 10", "0N 0 1 2 3 4 5 6 7 8");
     try expectEval(vm, "prev prev til 10", "0N 0N 0 1 2 3 4 5 6 7");
     try expectEval(vm, "parse \"prev prev 3\"", "(:':;(:':;3))");
@@ -4612,7 +4678,7 @@ test "comparisons, match, min, max, in and the aggregates follow q" {
     try expectEval(vm, "1~1 2", "0b");
     try expectEval(vm, "(`a`b!1 2)~`a`b!1 2", "1b");
     // The keyword must exist before the line using it is parsed, in q as well.
-    try expectEval(vm, ".q.f:{x+y}", "{x+y}");
+    try expectEval(vm, ".q.f:{x+y}", "::");
     try expectEval(vm, "3~1 f 2", "1b");
 
     try expectEval(vm, "1&2", "1");
@@ -5916,7 +5982,7 @@ test "the internal functions hcount, host, addr, gc, JSON, ts, gzip and ld follo
     try expectEval(vm, "-29!\"[{\\\"a\\\":1},{\\\"b\\\":2}]\"", "((,`a)!,1f;(,`b)!,2f)");
 
     // JSON out.
-    try expectEval(vm, "o9:(0#`)!()", "(`symbol$())!()");
+    try expectEval(vm, "o9:(0#`)!()", "::");
     try expectEval(vm, "-31!(1;o9)", ",\"1\"");
     try expectEval(vm, "-31!(1.5;o9)", "\"1.5\"");
     try expectEval(vm, "-31!(1.0;o9)", ",\"1\"");
@@ -6125,4 +6191,198 @@ test "every operator projects on one argument as q does" {
     try testing.expectError(error.identifier, vm.evalSource("@[1 2 3;0;`a;4]", .q, "<test>"));
     try testing.expectError(error.domain, vm.evalSource("@[;;3][1 2 3;0]", .q, "<test>"));
     try expectEval(vm, "@[1 2 3;0;1 2]", "2 2 3");
+}
+
+test "audit of q.k's definitions: what calling them uncovered" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // In k mode `x_j` is three tokens whatever the name lookup re-lexes.
+    try expectEvalMode(vm, .k, "j:1;{x_j}[2 3 4]", "2 4");
+    try expectEvalMode(vm, .k, "f8:{$[^y;\"\";y<0;\"-\",f8[x;-y];y<1;1_f8[x;10+y];9e15>j:\"j\"$y*prd x#10f;(x_j),\".\",(x:-x)#j:$j;$y]}", "::");
+    try expectEval(vm, "f8[2;3.14159]", "\"3.14\"");
+    try expectEval(vm, "f8[2;3.0]", "\"3.00\"");
+    try expectEval(vm, "f8[0;3.0]", "\"3.\"");
+    // A `k)` prefix holds for the whole line.
+    try expectEval(vm, "k)x:`a`b;`/:x", "`a.b");
+    try expectEval(vm, "k)a1:1;b1:2", "::");
+    try expectEval(vm, "b1", "2");
+    // A symbol literal under an iterator compiles as the atom.
+    try expectEvalMode(vm, .k, "{`/:x}[`a`b]", "`a.b");
+    try expectEvalMode(vm, .k, "{`\\:x}[`a.b]", "`a`b");
+    try expectEvalMode(vm, .k, "{`/:x,`$$y}[`a;1]", "`a.1");
+
+    // An assignment is `::` as a statement and its value inside an expression: an amend
+    // gives the new items.
+    try expectEval(vm, "{a:1;b:a+:2;b}[]", "3");
+    try expectEval(vm, "{a:1;b:a-:2;b}[]", "-1");
+    try expectEval(vm, "{a:1 2;b:a,:3;b}[]", "1 2 3");
+    try expectEval(vm, "{a:1 2;b:a[0]+:5;b}[]", "6");
+    try expectEval(vm, "{a:1 2;b:a[0 1]+:5 6;b}[]", "6 8");
+    try expectEval(vm, "{a:1 2;b:a[0]:5;b}[]", "5");
+    try expectEval(vm, "{a:(1 2;3);b:a[0;1]:9;b}[]", "9");
+    try expectEval(vm, "{a:1;a+:2}[]", "::");
+    try expectEval(vm, "{a:1;a:2}[]", "2");
+    try expectEval(vm, "a9:1;b9:a9+:2;b9", "3");
+    try expectEval(vm, "a9:1 2;b9:a9[0]:7;b9", "7");
+    try expectEval(vm, "a9:1 2;b9:a9,:3;b9", "1 2 3");
+    try expectEval(vm, "value \"c8:1;c8+:1\"", "::");
+    try expectEval(vm, "value \"(c8+:1)\"", "::");
+    try expectEval(vm, "value \"c8:8\"", "::");
+    try expectEval(vm, "value \"c8\"", "8");
+
+    // Bare names in a lambda read its defining namespace; a symbol names a global in the
+    // `\\d` namespace, so `set` from `.q` writes the root.
+    try expectEval(vm, ".q.f9:{.[x;();:;y]}", "::");
+    try expectEval(vm, "f9[`zz9;5]", "`zz9");
+    try expectEval(vm, "zz9", "5");
+    try expectEval(vm, ".q.g9:{get `zz9}", "::");
+    try expectEval(vm, "g9[]", "5");
+    try expectEval(vm, ".q.j9:{zz9}", "::");
+    try expectEval(vm, "j9[]", "5");
+    try expectEval(vm, ".q.zz9:7", "::");
+    try expectEval(vm, "j9[]", "5");
+    try expectEval(vm, ".q.l9:{.[`zz9;();:;6];zz9}", "::");
+    try expectEval(vm, "l9[]", "7");
+    try expectEval(vm, "zz9", "7");
+    try expectEval(vm, ".q.zz9", "7");
+    try expectEval(vm, ".q.n9:{value `zz9}", "::");
+    try expectEval(vm, "n9[]", "6");
+    try expectEval(vm, "\\d .foo9", "::");
+    try expectEval(vm, "t0:{y0 x}", "::");
+    try expectEval(vm, "\\d .", "::");
+    try expectEval(vm, ".foo9.y0:{x*10}", "::");
+    try expectEval(vm, ".foo9.t0 4", "40");
+
+    // Over, scan and each-prior derived functions are monadic for repeat; each-prior of
+    // a monadic function is each; a float on the left of scan is the weighted scan.
+    try expectEval(vm, "1 (+':)/1 2 3", "1 3 5");
+    try expectEval(vm, "1 (+/)/1 2 3", "6");
+    try expectEval(vm, "2 (+\\)/1 2 3", "1 4 10");
+    try expectEval(vm, "1 (+/:)/1 2 3", "7");
+    try expectEvalMode(vm, .k, "x:2;y:3 1 2;(x-1)&':/y", "3 1 1");
+    try expectEval(vm, "{x*2}':[1 2 3]", "2 4 6");
+    try testing.expectError(error.rank, vm.evalSource("{x*2}':[1;1 2 3]", .q, "<test>"));
+    try expectEval(vm, "0.5\\[1;1 2 3]", "1.5 2.75 4.375");
+    try expectEval(vm, "1 (0.5)\\0.5 1 1.5", "1 1.5 2.25");
+    try expectEvalMode(vm, .k, "ema9:{(*y)(1f-x)\\x*y};ema9[0.5;1 2 3]", "1 1.5 2.25");
+    try testing.expectError(error.type, vm.evalSource("2\\[1;1 2 3]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("0.5\\[1 2;1 2 3]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0.5/[1;1 2 3]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("0.5\\[1 2 3]", .q, "<test>"));
+
+    // Derived functions project on too few arguments.
+    try expectEval(vm, "(+')[1]", "+'[1]");
+    try expectEval(vm, "(+')[1] 2", "3");
+    try expectEval(vm, "value (+')[1]", "(+';1)");
+    try expectEval(vm, "(!')[-1]", "!'[-1]");
+    try expectEvalMode(vm, .k, "(-1!')`a`b", "`:a`:b");
+    try expectEvalMode(vm, .k, "(\"s\"$-1!')`a`b", "`:a`:b");
+    try expectEvalMode(vm, .k, "-3!\"s\"$-1!'", "![-3]$[\"s\"]!'[-1]");
+    try expectEval(vm, "(+/:)[1]", "+/:[1]");
+    try expectEval(vm, "(+/:)[1] 2 3", "3 4");
+    try expectEval(vm, "(+':)[1]", "1");
+    try expectEval(vm, "({x+y}')[1]", "{x+y}'[1]");
+    try expectEvalMode(vm, .k, "+\" \"\\:'(\"htm text/html\";\"csv text/csv\")", "((\"htm\";\"csv\");(\"text/html\";\"text/csv\"))");
+
+    // Min and max keep the wider type by type number.
+    try expectEval(vm, "1b|1h", "1h");
+    try expectEval(vm, "1b&2h", "1h");
+    try expectEval(vm, "0x01|1h", "1h");
+    try expectEval(vm, "1b|0x02", "0x02");
+    try expectEval(vm, "1h|1i", "1i");
+    try expectEval(vm, "1b|1", "1");
+    try expectEval(vm, "1e|1", "1e");
+    try expectEval(vm, "1h|1f", "1f");
+
+    // The mathematical natives.
+    try expectEval(vm, "abs -1", "1");
+    try expectEval(vm, "abs -1h", "1h");
+    try expectEval(vm, "abs -1.5e", "1.5e");
+    try expectEval(vm, "abs 0N", "0N");
+    try expectEval(vm, "abs -0W", "0W");
+    try expectEval(vm, "abs 1b", "1i");
+    try expectEval(vm, "abs \"a\"", "97i");
+    try expectEval(vm, "abs -1 2", "1 2");
+    try expectEval(vm, "abs (1;-2.5)", "(1;2.5)");
+    try expectEval(vm, "abs `a`b!-1 2", "`a`b!1 2");
+    try expectEval(vm, "abs -0D01", "0D01:00:00.000000000");
+    try testing.expectError(error.type, vm.evalSource("abs `a", .q, "<test>"));
+    try expectEval(vm, "sqrt 4", "2f");
+    try expectEval(vm, "sqrt 4h", "2f");
+    try expectEval(vm, "sqrt -1", "0n");
+    try expectEval(vm, "sqrt 0N", "0n");
+    try expectEval(vm, "sqrt 1 4", "1 2f");
+    try expectEval(vm, "sqrt \"a\"", "9.848858");
+    try expectEval(vm, "sqrt 1b", "1f");
+    try expectEval(vm, "sqrt 2023.01.01", "91.65697");
+    try testing.expectError(error.type, vm.evalSource("sqrt `a", .q, "<test>"));
+    try expectEval(vm, "log 1", "0f");
+    try expectEval(vm, "log 0", "-0w");
+    try expectEval(vm, "log -1", "0n");
+    try expectEval(vm, "exp 1", "2.718282");
+    try expectEval(vm, "exp 0N", "0n");
+    try expectEval(vm, "sin 0", "0f");
+    try expectEval(vm, "cos 0", "1f");
+    try expectEval(vm, "tan 0", "0f");
+    try expectEval(vm, "asin 1", "1.570796");
+    try expectEval(vm, "acos 1", "0f");
+    try expectEval(vm, "atan 1", "0.7853982");
+    try expectEval(vm, "atan 0N", "0n");
+    try expectEval(vm, "var 1 2 3", "0.6666667");
+    try expectEval(vm, "var 1 2 3h", "0.6666667");
+    try expectEval(vm, "var 1", "0f");
+    try expectEval(vm, "var 1 0N 3", "1f");
+    try expectEval(vm, "var ()", "()");
+    try testing.expectError(error.type, vm.evalSource("var `a", .q, "<test>"));
+    try expectEval(vm, "dev 1 2 3", "0.8164966");
+    try expectEval(vm, "cov[1 2 3;1 2 3]", "0.6666667");
+    try expectEval(vm, "cov[1 2 3;3 2 1]", "-0.6666667");
+    try expectEval(vm, "cor[1 2 3;1 2 3]", "1f");
+    try expectEval(vm, "cor[1 2 3;3 2 1]", "-1f");
+    try expectEval(vm, "cor[1 1 1;1 2 3]", "0n");
+    try testing.expectError(error.length, vm.evalSource("cov[1 2;1 2 3]", .q, "<test>"));
+    try expectEval(vm, "wsum[1 2;3 4]", "11f");
+    try expectEval(vm, "wsum[1;3 4]", "7");
+    try expectEval(vm, "wsum[1 2;3]", "9");
+    try expectEval(vm, "wsum[1 2h;3 4h]", "11f");
+    try expectEval(vm, "wsum[1 2.5;3 4]", "13f");
+    try expectEval(vm, "wsum[1 0N;3 4]", "3f");
+    try expectEval(vm, "wavg[1 2;3 4]", "3.666667");
+    try expectEval(vm, "wavg[1 1;3 4]", "3.5");
+    try expectEval(vm, "wavg[1 2;3]", "3f");
+    try expectEval(vm, "7 div 2", "3");
+    try expectEval(vm, "-7 div 2", "-4");
+    try expectEval(vm, "7 div -2", "-4");
+    try expectEval(vm, "7 div 0", "0W");
+    try expectEval(vm, "7.5 div 2", "3f");
+    try expectEval(vm, "7 div 2.5", "2");
+    try expectEval(vm, "7h div 2", "3i");
+    try expectEval(vm, "7i div 2", "3i");
+    try expectEval(vm, "7 div 2h", "3");
+    try expectEval(vm, "0N div 2", "0N");
+    try expectEval(vm, "7 div 0N", "0N");
+    try expectEval(vm, "1b div 2", "0i");
+    try expectEval(vm, "0x07 div 2", "3i");
+    try expectEval(vm, "2023.01.05 div 2", "2011.07.04");
+    try expectEval(vm, "\"a\" div 2", "48i");
+    try expectEval(vm, "1 2 3 div 2", "0 1 1");
+    try expectEvalMode(vm, .k, "mod9:{x-y*x div y};mod9[7;3]", "1");
+    try expectEvalMode(vm, .k, "xbar9:{x*y div x:$[16h=abs[@x];\"j\"$x;x]};xbar9[5;12 17]", "10 15");
+    try testing.expectError(error.type, vm.evalSource("7 div `a", .q, "<test>"));
+    try expectEval(vm, "2 xexp 3", "8f");
+    try expectEval(vm, "2 xexp 0.5", "1.414214");
+    try expectEval(vm, "0 xexp 0", "1f");
+    try expectEval(vm, "2 xexp -1", "0.5");
+    try expectEval(vm, "2 xexp 0N", "0n");
+    try expectEval(vm, "0N xexp 2", "0n");
+    try expectEval(vm, "2h xexp 3", "8f");
+    try expectEval(vm, "2 xexp 1 2", "2 4f");
+    try expectEval(vm, "-8 xexp 1%3", "0n");
+    try expectEval(vm, "1b xexp 2", "1f");
+    try expectEvalMode(vm, .k, "xlog9:{log[y]%log x};xlog9[2;8]", "3f");
+    try testing.expectError(error.type, vm.evalSource("2 xexp `a", .q, "<test>"));
+    try expectEval(vm, "-35!(::)", "1b");
+    try expectEval(vm, "(-35!)[]", "1b");
 }

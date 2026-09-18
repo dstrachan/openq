@@ -28,6 +28,9 @@ nodes: Ast.NodeList,
 extra_data: std.ArrayList(u32),
 scratch: std.ArrayList(Node.Index),
 mode: Mode,
+/// The mode the source was opened in, restored at each new line after a `k)` or `q)`
+/// prefix.
+base_mode: Mode,
 resolver: ?Ast.Resolver,
 ends_expression: std.ArrayList(Token.Tag),
 
@@ -258,6 +261,11 @@ fn parseStatements(p: *Parse) !Statements {
 
 fn parseStatement(p: *Parse) !Node.OptionalIndex {
     assert(p.tok_i == 0 or p.tokenTag(p.tok_i - 1) == .eos or p.tokenTag(p.tok_i - 1) == .semicolon);
+    // A new line ends a `k)` or `q)` prefix's reach.
+    if (p.tok_i == 0 or p.tokenTag(p.tok_i - 1) == .eos) {
+        p.mode = p.base_mode;
+        p.tokenizer.mode = p.base_mode;
+    }
 
     // Handle DSLs
     if (p.tokenTag(p.tok_i) == .identifier and p.source[p.tokenizer.index] == ')') {
@@ -267,12 +275,8 @@ fn parseStatement(p: *Parse) !Node.OptionalIndex {
             _ = try p.assertToken(.r_paren);
 
             assert(p.mode == p.tokenizer.mode);
-            const prev_mode = p.mode;
-            defer {
-                p.mode = prev_mode;
-                p.tokenizer.mode = prev_mode;
-            }
-
+            // The mode holds for the rest of the line, as `k)a:1;b:2` reads both in k;
+            // `parseStatement` restores the file's mode at the next line.
             const mode: Mode = switch (slice[0]) {
                 'k' => .k,
                 'q' => .q,

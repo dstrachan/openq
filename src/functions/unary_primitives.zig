@@ -360,51 +360,9 @@ pub fn enlist(vm: *Vm, x: *Value) !*Value {
     }
 }
 
-pub fn abs(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn acos(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn asin(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn atan(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
 // avg is defined with the aggregates below.
 
-pub fn cos(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn dev(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
 pub fn exit(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn exp(vm: *Vm, x: *Value) !*Value {
     _ = vm; // autofix
     _ = x; // autofix
     return error.nyi;
@@ -440,43 +398,13 @@ pub fn hopen(vm: *Vm, x: *Value) !*Value {
 
 // last is defined with the aggregates below.
 
-pub fn log(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
 // max is defined with the aggregates below.
 
 // min is defined with the aggregates below.
 
 // prd is defined with the aggregates below.
 
-pub fn sin(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn sqrt(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
 // sum is defined with the aggregates below.
-
-pub fn tan(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
-
-pub fn @"var"(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
-}
 
 // ---------------------------------------------------------------------------------------
 // Aggregates.
@@ -1439,4 +1367,152 @@ pub fn value(vm: *Vm, x: *Value) Vm.RunError!*Value {
         inline .each, .over, .scan, .each_prior, .each_right, .each_left => |d| return d.value.ref(),
         else => return error.type,
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// The mathematical natives.
+
+/// `abs x`: the magnitude in the value's own type, booleans, bytes and chars as ints,
+/// nulls kept and `-0W` made `0W`; symbols are a type error.
+pub fn abs(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .list => |items| return mapItems(vm, items, abs),
+        .dict => return mapValues(vm, x, abs),
+        .boolean => |b| return vm.createValue(.int, @intFromBool(b)),
+        .byte => |b| return vm.createValue(.int, b),
+        .char => |c| return vm.createValue(.int, c),
+        inline .short, .int, .long, .timestamp, .month, .date, .timespan, .minute, .second, .time => |v, tag| {
+            return vm.createValue(tag, if (v == std.math.minInt(@TypeOf(v))) v else if (v < 0) -v else v);
+        },
+        inline .real, .float, .datetime => |v, tag| return vm.createValue(tag, @abs(v)),
+        .boolean_list => |items| {
+            const result = try vm.allocValue(.int_list, items.len);
+            for (result.as.int_list, items) |*r, b| r.* = @intFromBool(b);
+            return result;
+        },
+        inline .byte_list, .char_list => |items| {
+            const result = try vm.allocValue(.int_list, items.len);
+            for (result.as.int_list, items) |*r, b| r.* = b;
+            return result;
+        },
+        inline .short_list, .int_list, .long_list, .timestamp_list, .month_list, .date_list, .timespan_list, .minute_list, .second_list, .time_list => |items, tag| {
+            const result = try vm.allocValue(tag, items.len);
+            for (@field(result.as, @tagName(tag)), items) |*r, v| r.* = if (v == std.math.minInt(@TypeOf(v))) v else if (v < 0) -v else v;
+            return result;
+        },
+        inline .real_list, .float_list, .datetime_list => |items, tag| {
+            const result = try vm.allocValue(tag, items.len);
+            for (@field(result.as, @tagName(tag)), items) |*r, v| r.* = @abs(v);
+            return result;
+        },
+        else => return error.type,
+    }
+}
+
+/// A float function of a number: nulls give `0n`, booleans, bytes, chars and temporal
+/// values count by their number, lists go item by item and symbols are a type error.
+fn floatFunction(vm: *Vm, x: *Value, comptime f: fn (f64) f64) Vm.RunError!*Value {
+    switch (x.as) {
+        .list => |items| {
+            if (items.len == 0) return vm.allocValue(.list, 0);
+            const results = try vm.gpa.alloc(*Value, items.len);
+            defer vm.gpa.free(results);
+            var done: usize = 0;
+            defer for (results[0..done]) |r| r.deref(vm.gpa);
+            for (items) |item| {
+                results[done] = try floatFunction(vm, item, f);
+                done += 1;
+            }
+            return vm.enlist(results);
+        },
+        .dict => |d| {
+            const values = try floatFunction(vm, d.values, f);
+            errdefer values.deref(vm.gpa);
+            return vm.createValue(.dict, .{ .keys = d.keys.ref(), .values = values });
+        },
+        .symbol, .symbol_list => return error.type,
+        else => {},
+    }
+    if (x.isList()) {
+        const n = x.count();
+        const result = try vm.allocValue(.float_list, n);
+        errdefer result.deref(vm.gpa);
+        for (result.as.float_list, 0..) |*r, i| {
+            const item = try q.operators.itemAt(vm, x, i);
+            defer item.deref(vm.gpa);
+            r.* = f(try q.operators.floatOf(item));
+        }
+        return result;
+    }
+    return vm.createValue(.float, f(try q.operators.floatOf(x)));
+}
+
+fn sqrtOf(v: f64) f64 {
+    return @sqrt(v);
+}
+fn logOf(v: f64) f64 {
+    return @log(v);
+}
+fn expOf(v: f64) f64 {
+    return @exp(v);
+}
+fn sinOf(v: f64) f64 {
+    return @sin(v);
+}
+fn cosOf(v: f64) f64 {
+    return @cos(v);
+}
+fn tanOf(v: f64) f64 {
+    return @tan(v);
+}
+fn asinOf(v: f64) f64 {
+    return std.math.asin(v);
+}
+fn acosOf(v: f64) f64 {
+    return std.math.acos(v);
+}
+fn atanOf(v: f64) f64 {
+    return std.math.atan(v);
+}
+
+pub fn sqrt(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, sqrtOf);
+}
+pub fn log(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, logOf);
+}
+pub fn exp(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, expOf);
+}
+pub fn sin(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, sinOf);
+}
+pub fn cos(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, cosOf);
+}
+pub fn tan(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, tanOf);
+}
+pub fn asin(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, asinOf);
+}
+pub fn acos(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, acosOf);
+}
+pub fn atan(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    return floatFunction(vm, x, atanOf);
+}
+
+/// `var x`: the population variance as a float with nulls left out, an atom giving `0f`
+/// and `()` staying `()`; `dev` is its square root.
+pub fn @"var"(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    if (x.as == .list and x.as.list.len == 0) return x.ref();
+    return q.operators.cov(vm, x, x);
+}
+
+pub fn dev(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    const variance = try @"var"(vm, x);
+    if (variance.as != .float) return variance;
+    defer variance.deref(vm.gpa);
+    return vm.createValue(.float, @sqrt(variance.as.float));
 }

@@ -461,6 +461,8 @@ fn compileOperand(c: *Compiler, node: Node.Index) Error!void {
         .slash_colon,
         .backslash,
         .backslash_colon,
+        .symbol_literal,
+        .symbol_list_literal,
         => try c.compileNode(node),
         else => try c.compileConstantNode(node),
     }

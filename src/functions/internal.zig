@@ -231,6 +231,8 @@ pub fn ld(vm: *Vm, y: *Value) RunError!*Value {
 /// writes stored blocks, and the other levels use Zig's deflate, whose output can differ
 /// from zlib's for the same input. Decompressing anything but gzip data is `length`.
 pub fn gzip(vm: *Vm, y: *Value) RunError!*Value {
+    // `-35!(::)` asks whether gzip is available.
+    if (y.as == .unary_primitive and y.as.unary_primitive == .identity) return vm.createValue(.boolean, true);
     if (y.as == .list) {
         if (y.as.list.len != 2) return error.type;
         const level: i64 = switch (y.as.list[0].as) {

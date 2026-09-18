@@ -62,7 +62,19 @@ pub fn scan(vm: *Vm, f: *Value, args: []*Value) RunError!*Value {
 /// `scan` keeps every intermediate value, the initial one included for a monadic `f`.
 fn fold(vm: *Vm, f: *Value, args: []*Value, comptime keep: bool) RunError!*Value {
     if (args.len == 0) return error.rank;
-    if (f.rank() == 1) {
+    // A float on the left of `\` is q's weighted scan: `0.5\[1;1 2 3]` is `1.5 2.75 4.375`,
+    // each item `n` times the one before plus itself, from the seed.
+    if (f.as == .float or f.as == .real) {
+        if (!keep or args.len != 2) return error.type;
+        return weightedScan(vm, if (f.as == .float) f.as.float else f.as.real, args[0], args[1]);
+    }
+    // An over, scan or each-prior derived function is applied to one argument, so with a
+    // count it repeats: `1 (+':)/1 2 3` is `1 3 5`.
+    const monadic = f.rank() == 1 or switch (f.as) {
+        .over, .scan, .each_prior => true,
+        else => false,
+    };
+    if (monadic) {
         if (args.len == 1) return converge(vm, f, args[0], keep);
         if (args.len != 2) return error.rank;
         return repeat(vm, f, args[0], args[1], keep);
@@ -116,6 +128,36 @@ fn fold(vm: *Vm, f: *Value, args: []*Value, comptime keep: bool) RunError!*Value
     }
     if (!keep) return acc.ref();
     return if (results.items.len == 0) vm.allocValue(.list, 0) else vm.enlist(results.items);
+}
+
+fn weightedScan(vm: *Vm, weight: f64, seed: *Value, x: *Value) RunError!*Value {
+    if (seed.isList()) return error.rank;
+    const start = numberOf(seed) orelse return error.type;
+    if (!x.isList()) return error.type;
+    const n = x.count();
+    const result = try vm.allocValue(.float_list, n);
+    errdefer result.deref(vm.gpa);
+    var acc = start;
+    for (result.as.float_list, 0..) |*r, i| {
+        const item = try itemAt(vm, x, i);
+        defer item.deref(vm.gpa);
+        acc = weight * acc + (numberOf(item) orelse return error.type);
+        r.* = acc;
+    }
+    return result;
+}
+
+fn numberOf(v: *Value) ?f64 {
+    return switch (v.as) {
+        .boolean => |b| @floatFromInt(@intFromBool(b)),
+        .byte => |b| @floatFromInt(b),
+        .short => |s| @floatFromInt(s),
+        .int => |i| @floatFromInt(i),
+        .long => |l| @floatFromInt(l),
+        .real => |r| r,
+        .float => |f| f,
+        else => null,
+    };
 }
 
 /// What a fold of an empty list gives: the identity of `+`, `*`, `&` and `|` (`0`, `1`,
@@ -211,6 +253,8 @@ fn repeat(vm: *Vm, f: *Value, control: *Value, x: *Value, comptime keep: bool) R
 /// is the seed when one is given, and otherwise the identity of `+ - * % & |` typed like
 /// the item, or a typed null, as q does.
 pub fn prior(vm: *Vm, f: *Value, args: []*Value) RunError!*Value {
+    // Each-prior of a monadic function is each: `{x*2}':[1 2 3]` is `2 4 6`.
+    if (f.rank() == 1 and args.len == 1) return each(vm, f, args);
     const x, const seed: ?*Value = switch (args.len) {
         1 => .{ args[0], null },
         2 => .{ args[1], args[0] },

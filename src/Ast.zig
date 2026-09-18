@@ -148,6 +148,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, options: ParseOptions) Alloca
         .extra_data = .empty,
         .scratch = .empty,
         .mode = options.mode,
+        .base_mode = options.mode,
         .resolver = options.resolver,
         .ends_expression = .empty,
     };
@@ -259,7 +260,11 @@ pub fn tokenSliceMode(tree: Ast, token_index: TokenIndex, mode: Mode) []const u8
         break :token if (synthesized) tokenizer.next() else token;
     };
     assert(token.tag == token_tag);
-    return tree.source[token.loc.start..token.loc.end];
+    // The mode may not be the one the token was made in (a `k)` line has `x_j` as three
+    // tokens where q reads one name), so the slice ends where the next token starts.
+    var end = token.loc.end;
+    if (token_index + 1 < tree.tokens.len) end = @min(end, tree.tokenStart(token_index + 1));
+    return tree.source[token.loc.start..@max(end, token.loc.start)];
 }
 
 pub fn nodeSlice(tree: Ast, node: Node.Index) []const u8 {

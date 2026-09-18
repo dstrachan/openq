@@ -1758,46 +1758,146 @@ pub fn insert(vm: *Vm, x: *Value, y: *Value) !*Value {
     return error.nyi;
 }
 
-pub fn wsum(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x wsum y`: two lists give the float sum of the products with nulls left out
+/// (`wsum[1 2;3 4]` is `11f`), and an atom on either side is `sum x*y` in its own type
+/// (`wsum[1;3 4]` is 7).
+pub fn wsum(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.isList() and y.isList()) {
+        if (x.count() != y.count()) return error.length;
+        var total: f64 = 0;
+        for (0..x.count()) |i| {
+            const a = try itemAt(vm, x, i);
+            defer a.deref(vm.gpa);
+            const b = try itemAt(vm, y, i);
+            defer b.deref(vm.gpa);
+            const fa = try floatOf(a);
+            const fb = try floatOf(b);
+            if (std.math.isNan(fa) or std.math.isNan(fb)) continue;
+            total += fa * fb;
+        }
+        return vm.createValue(.float, total);
+    }
+    const products = try multiply(vm, x, y);
+    defer products.deref(vm.gpa);
+    return q.unary_primitives.sum(vm, products);
 }
 
-pub fn wavg(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x wavg y`: `wsum[x;y]` over `sum x`, as a float.
+pub fn wavg(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    const weighted = try wsum(vm, x, y);
+    defer weighted.deref(vm.gpa);
+    const weights = try q.unary_primitives.sum(vm, x);
+    defer weights.deref(vm.gpa);
+    return divide(vm, weighted, weights);
 }
 
-pub fn div(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// A numeric atom as a float for the statistics, nulls as `0n`; symbols and the rest are
+/// a type error.
+pub fn floatOf(v: *Value) error{type}!f64 {
+    return switch (v.as) {
+        .boolean => |b| @floatFromInt(@intFromBool(b)),
+        .byte => |b| @floatFromInt(b),
+        .char => |c| @floatFromInt(c),
+        .short => |s| if (s == @backingInt(Value.Short.null)) std.math.nan(f64) else @floatFromInt(s),
+        .int, .month, .date, .minute, .second, .time => |i| if (i == @backingInt(Value.Int.null)) std.math.nan(f64) else @floatFromInt(i),
+        .long, .timestamp, .timespan => |l| if (l == @backingInt(Value.Long.null)) std.math.nan(f64) else @floatFromInt(l),
+        .real => |r| r,
+        .float, .datetime => |f| f,
+        else => error.type,
+    };
 }
 
-pub fn xexp(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x div y`: floor division in `x`'s type (booleans, bytes, chars and shorts as ints),
+/// so `-7 div 2` is -4 and `7 div 2.5` is 2; division by zero gives the infinity of the
+/// sign, nulls stay null.
+pub fn div(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return pairwise(vm, x, y, divAtoms);
 }
 
-pub fn cor(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+fn divAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.isList() or y.isList()) return div(vm, x, y);
+    const a = try floatOf(x);
+    const b = try floatOf(y);
+    if (x.as == .symbol or y.as == .symbol) return error.type;
+    const quotient = if (std.math.isNan(a) or std.math.isNan(b)) std.math.nan(f64) else if (b == 0) (if (a > 0) std.math.inf(f64) else if (a < 0) -std.math.inf(f64) else std.math.nan(f64)) else @floor(a / b);
+    const target: Value.Type = switch (x.as) {
+        .boolean, .byte, .char, .short, .int => .int,
+        .long => .long,
+        .real => .real,
+        .float => .float,
+        inline else => |_, tag| tag,
+    };
+    // Integer operands divide exactly, floats through the floored quotient.
+    if (target == .long and x.as == .long and (y.as == .long or y.as == .int or y.as == .short or y.as == .boolean or y.as == .byte)) {
+        const l = x.as.long;
+        const r: i64 = switch (y.as) {
+            .long => |v| v,
+            .int => |v| v,
+            .short => |v| v,
+            .boolean => |v| @intFromBool(v),
+            .byte => |v| v,
+            else => unreachable,
+        };
+        if (l == @backingInt(Value.Long.null) or (y.as != .boolean and y.as != .byte and std.math.isNan(b))) return vm.createValue(.long, @backingInt(Value.Long.null));
+        if (r == 0) return vm.createValue(.long, if (l > 0) @backingInt(Value.Long.inf) else if (l < 0) @backingInt(Value.Long.neg_inf) else @backingInt(Value.Long.null));
+        return vm.createValue(.long, @divFloor(l, r));
+    }
+    const value = try vm.createValue(.float, quotient);
+    defer value.deref(vm.gpa);
+    return castAtom(vm, target, value);
 }
 
-pub fn cov(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x xexp y`: `x` to the power `y` as a float, nulls giving `0n`.
+pub fn xexp(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return pairwise(vm, x, y, xexpAtoms);
+}
+
+fn xexpAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.isList() or y.isList()) return xexp(vm, x, y);
+    if (x.as == .symbol or y.as == .symbol) return error.type;
+    const a = try floatOf(x);
+    const b = try floatOf(y);
+    return vm.createValue(.float, if (std.math.isNan(a) or std.math.isNan(b)) std.math.nan(f64) else std.math.pow(f64, a, b));
+}
+
+/// The population covariance of two lists as a float, nulls left out; `cor` is it over
+/// the two deviations, `0n` when one is zero.
+pub fn cov(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    return vm.createValue(.float, try covariance(vm, x, y));
+}
+
+pub fn cor(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    const c = try covariance(vm, x, y);
+    const sx = @sqrt(try covariance(vm, x, x));
+    const sy = @sqrt(try covariance(vm, y, y));
+    return vm.createValue(.float, c / (sx * sy));
+}
+
+fn covariance(vm: *Vm, x: *Value, y: *Value) Vm.RunError!f64 {
+    if (x.as == .symbol or y.as == .symbol or x.as == .symbol_list or y.as == .symbol_list) return error.type;
+    const nx: ?usize = if (x.isList()) x.count() else null;
+    const ny: ?usize = if (y.isList()) y.count() else null;
+    if (nx != null and ny != null and nx.? != ny.?) return error.length;
+    const n = nx orelse ny orelse 1;
+    var sum_x: f64 = 0;
+    var sum_y: f64 = 0;
+    var sum_xy: f64 = 0;
+    var count: f64 = 0;
+    for (0..n) |i| {
+        const a = if (nx != null) try itemAt(vm, x, i) else x.ref();
+        defer a.deref(vm.gpa);
+        const b = if (ny != null) try itemAt(vm, y, i) else y.ref();
+        defer b.deref(vm.gpa);
+        const fa = try floatOf(a);
+        const fb = try floatOf(b);
+        if (std.math.isNan(fa) or std.math.isNan(fb)) continue;
+        sum_x += fa;
+        sum_y += fb;
+        sum_xy += fa * fb;
+        count += 1;
+    }
+    if (count == 0) return std.math.nan(f64);
+    return sum_xy / count - (sum_x / count) * (sum_y / count);
 }
 
 /// `setenv[x;y]` sets the environment variable named by the symbol `x` to the string `y`
@@ -1987,16 +2087,11 @@ fn minMaxAtoms(vm: *Vm, x: *Value, y: *Value, comptime want_min: bool) Vm.RunErr
     };
     const chosen = if (pick_x) x else y;
     if (std.meta.activeTag(x.as) == std.meta.activeTag(y.as)) return chosen.ref();
-    const nx = Numeric.of(x) orelse return error.type;
-    const ny = Numeric.of(y) orelse return error.type;
-    const kind: Numeric.Kind = @fromBackingInt(@max(@backingInt(nx.kind()), @backingInt(ny.kind())));
-    const value = Numeric.of(chosen).?;
-    return switch (kind) {
-        .int => vm.createValue(.int, value.toInt() orelse @backingInt(Value.Int.null)),
-        .long => vm.createValue(.long, value.toLong() orelse @backingInt(Value.Long.null)),
-        .real => vm.createValue(.real, value.toReal()),
-        .float => vm.createValue(.float, value.toFloat()),
-    };
+    // Unlike arithmetic, min and max keep the wider of the two types by type number, so
+    // `1b|1h` is `1h` and `1b|0x02` is `0x02`.
+    if (Numeric.of(x) == null or Numeric.of(y) == null) return error.type;
+    const target = try fillType(std.meta.activeTag(x.as), std.meta.activeTag(y.as));
+    return castAtom(vm, target, chosen);
 }
 
 fn minAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
