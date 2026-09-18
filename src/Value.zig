@@ -9,7 +9,12 @@ const Vm = q.Vm;
 const Value = @This();
 
 ref_count: u32 = 0,
+/// The attribute `` `s#x `` and its kin set: sorted, unique, parted or grouped, shown as a
+/// prefix (`` `s#1 2 3 ``) and read back by `-2!`. Fresh values have none.
+attr: Attr = .none,
 as: Union,
+
+pub const Attr = enum(u8) { none, s, u, p, g };
 
 pub fn ref(value: *Value) *Value {
     value.ref_count += 1;
@@ -210,6 +215,7 @@ pub fn fmtOptions(value: *Value, vm: *Vm, options: FmtOptions) std.fmt.Alt(Data,
 
 fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
     if (data.options.skip_empty and data.value.isEmpty()) return;
+    if (data.value.attr != .none) try w.print("`{t}#", .{data.value.attr});
 
     switch (data.value.as) {
         .list => |value| switch (value.len) {

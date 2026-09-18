@@ -59,6 +59,10 @@ precision: u8 = 7,
 local_zone: q.clock.LocalZone = .utc,
 /// The text of the last `'x` signal, which `error.signal` reports.
 signal_message: ?[]u8 = null,
+/// The seed `\S` shows and sets, and the generator roll and deal draw from. q's own
+/// generator is not reproduced, so the numbers differ from q's for the same seed.
+seed: i32 = -314159,
+random: std.Random.Xoshiro256 = .init(@bitCast(@as(i64, -314159))),
 /// The environment `getenv` reads and `setenv` writes: the process's own, copied in by
 /// `main`, and empty in tests.
 environ: std.process.Environ.Map,
@@ -380,6 +384,10 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         },
         .operator => |operator| {
             if (args.len > 2) {
+                // `?[c;a;b]` is the vector conditional; the functional qSQL forms of `?` and
+                // `!` with four arguments are not done yet.
+                if (operator == .find) return if (args.len == 3) q.operators.vectorConditional(vm, args[0], args[1], args[2]) else error.nyi;
+                if (operator == .dict) return error.nyi;
                 // Only `.` and `@` take more: their amend and trap forms.
                 if (operator != .apply and operator != .apply_at) return error.rank;
                 if (args.len > 4) return error.rank;
@@ -565,7 +573,7 @@ fn applyForm(vm: *Vm, operator: Operator, args: []*Value) RunError!*Value {
 
 /// The text a trap handler receives: the signalled message, or the error's name, which
 /// matches q's for `rank`, `type`, `length` and `domain`.
-fn errorText(vm: *Vm, err: RunError) Allocator.Error!*Value {
+pub fn errorText(vm: *Vm, err: RunError) Allocator.Error!*Value {
     const text = if (err == error.signal) (vm.signal_message orelse "") else @errorName(err);
     const value = try vm.allocValue(.char_list, text.len);
     @memcpy(value.as.char_list, text);
@@ -1072,6 +1080,14 @@ fn loopCount(value: *Value) error{type}!i64 {
 
 /// `'x`: records the message and fails with `error.signal`. A symbol or string names the
 /// error; anything else is q's `stype`.
+/// Fails with a signal carrying `text`, for q's named errors such as `s-fail`.
+pub fn failWith(vm: *Vm, text: []const u8) RunError {
+    const message = try vm.gpa.dupe(u8, text);
+    if (vm.signal_message) |old| vm.gpa.free(old);
+    vm.signal_message = message;
+    return error.signal;
+}
+
 pub fn raiseSignal(vm: *Vm, value: *Value) RunError {
     const text: []const u8 = switch (value.as) {
         .symbol => |s| vm.internedString(s),
@@ -1615,6 +1631,12 @@ pub fn system(vm: *Vm, command: []const u8) !*Value {
         vm.precision = @min(precision, q.decimal.max_precision);
         return vm.getUnaryPrimitive(.identity);
     }
+    if (std.mem.eql(u8, name, "S")) {
+        if (args.len == 0) return vm.createValue(.int, vm.seed);
+        vm.seed = std.fmt.parseInt(i32, args, 10) catch return error.domain;
+        vm.random = .init(@bitCast(@as(i64, vm.seed)));
+        return vm.getUnaryPrimitive(.identity);
+    }
     return vm.shell(command);
 }
 
@@ -1934,6 +1956,7 @@ fn applyAmend(vm: *Vm, function: *Value, x: *Value, y: ?*Value) RunError!*Value 
 }
 
 fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, value: ?*Value) RunError!*Value {
+    if (old.as == .dict) return vm.amendDictAt(old, index, dim, function, value);
     if (!old.isList()) return error.type;
     const at = try q.operators.itemAt(vm, index, dim);
     defer at.deref(vm.gpa);
@@ -1972,6 +1995,79 @@ fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, va
         result.deref(vm.gpa);
         result = next;
     }
+    return result;
+}
+
+/// Amending a dictionary by key: an existing key's value is amended in place, a missing
+/// key is appended with the value itself (the function is not applied, so
+/// `` @[`a`b!1 2;`c;+;5] `` is `` `a`b`c!1 2 5 ``) or, deeper, with the amended null
+/// shaped like the values; a list of keys amends each in turn. Typed keys and values
+/// only take atoms of their type, as `withItem` and `join` insist.
+fn amendDictAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, value: ?*Value) RunError!*Value {
+    const at = try q.operators.itemAt(vm, index, dim);
+    defer at.deref(vm.gpa);
+    if (at.isEmpty() or (at.as == .unary_primitive and at.as.unary_primitive == .identity)) return error.nyi;
+    if (at.isList()) {
+        const count = at.count();
+        const spread = value != null and value.?.isList() and value.?.count() == count;
+        var result = old.ref();
+        errdefer result.deref(vm.gpa);
+        for (0..count) |k| {
+            const key = try q.operators.itemAt(vm, at, k);
+            defer key.deref(vm.gpa);
+            const v: ?*Value = if (value) |whole| (if (spread) try q.operators.itemAt(vm, whole, k) else whole.ref()) else null;
+            defer if (v) |each| each.deref(vm.gpa);
+            const next = try vm.amendDictKey(result, key, index, dim, function, v);
+            result.deref(vm.gpa);
+            result = next;
+        }
+        return result;
+    }
+    return vm.amendDictKey(old, at, index, dim, function, value);
+}
+
+fn amendDictKey(vm: *Vm, old: *Value, key: *Value, index: *Value, dim: usize, function: *Value, value: ?*Value) RunError!*Value {
+    const dict = old.as.dict;
+    const last = dim + 1 == index.count();
+    if (try vm.keyPosition(dict.keys, key)) |i| {
+        const item = try q.operators.itemAt(vm, dict.values, i);
+        defer item.deref(vm.gpa);
+        const new_item = if (last) try vm.applyAmend(function, item, value) else try vm.amendAt(item, index, dim + 1, function, value);
+        defer new_item.deref(vm.gpa);
+        const values = try vm.withItem(dict.values, i, new_item);
+        errdefer values.deref(vm.gpa);
+        return vm.createValue(.dict, .{ .keys = dict.keys.ref(), .values = values });
+    }
+    const new_item = if (last)
+        (if (value) |v| v.ref() else blk: {
+            const missing = try q.operators.nullLike(vm, dict.values);
+            defer missing.deref(vm.gpa);
+            break :blk try vm.applyAmend(function, missing, null);
+        })
+    else blk: {
+        const missing = try q.operators.nullLike(vm, dict.values);
+        defer missing.deref(vm.gpa);
+        break :blk try vm.amendAt(missing, index, dim + 1, function, value);
+    };
+    defer new_item.deref(vm.gpa);
+    // A typed value list only grows by an atom of its own type.
+    if (dict.values.as != .list and @backingInt(std.meta.activeTag(new_item.as)) != -@backingInt(std.meta.activeTag(dict.values.as))) return error.type;
+    const keys = try vm.appendItem(dict.keys, key);
+    errdefer keys.deref(vm.gpa);
+    const values = try vm.appendItem(dict.values, new_item);
+    errdefer values.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = keys, .values = values });
+}
+
+/// `list` with `item` added as one more item: joined onto a typed list, appended whole to
+/// a general one (so a list value stays one entry).
+fn appendItem(vm: *Vm, list: *Value, item: *Value) RunError!*Value {
+    if (list.as != .list) return q.operators.join(vm, list, item);
+    const items = list.as.list;
+    const result = try vm.allocValue(.list, items.len + 1);
+    errdefer comptime unreachable;
+    for (result.as.list[0..items.len], items) |*r, v| r.* = v.ref();
+    result.as.list[items.len] = item.ref();
     return result;
 }
 
@@ -2122,7 +2218,7 @@ pub fn keyPosition(vm: *Vm, keys: *Value, key: *Value) RunError!?usize {
 /// the first item when it is out of range (`1 2 3[-1]` is `0N`, `"abc" 5` is `" "`), a list
 /// of indices picks each, `::` or a hole keeps everything, and further indices apply to what
 /// was picked, item by item after a list or a hole (`(1 2;3 4)[;0]` is `1 3`).
-fn indexList(vm: *Vm, list: *Value, args: []*Value) RunError!*Value {
+pub fn indexList(vm: *Vm, list: *Value, args: []*Value) RunError!*Value {
     const first = args[0];
     const rest = args[1..];
     const all = first.isEmpty() or (first.as == .unary_primitive and first.as.unary_primitive == .identity);
@@ -2149,7 +2245,14 @@ fn indexList(vm: *Vm, list: *Value, args: []*Value) RunError!*Value {
     // Everything, or each of a list of indices, then the remaining indices item by item.
     const selected = if (all) list.ref() else selected: {
         const len = first.count();
-        if (len == 0) break :selected try vm.allocValue(.list, 0);
+        // A typed empty index selects the typed empty of the list (`1 2 3[0#0]` is
+        // `` `long$() ``) while `()` selects `()`.
+        if (len == 0) {
+            if (first.as == .list) break :selected try vm.allocValue(.list, 0);
+            const zero = vm.getConstant(.zero);
+            defer zero.deref(vm.gpa);
+            break :selected try q.operators.take(vm, zero, list);
+        }
         const items = try vm.gpa.alloc(*Value, len);
         defer vm.gpa.free(items);
         var done: usize = 0;
@@ -3760,6 +3863,8 @@ test "indexing and the apply operators follow q" {
     try expectEval(vm, "1 2 3[1h]", "2");
     try expectEval(vm, "1 2 3[1b]", "2");
     try expectEval(vm, "1 2 3[()]", "()");
+    try expectEval(vm, "1 2 3[0#0]", "`long$()");
+    try expectEval(vm, "\"abc\"[0#0]", "\"\"");
     try expectEval(vm, "1 2 3[(0;1)]", "1 2");
     try expectEval(vm, "(1;`a)[0 1]", "(1;`a)");
     try expectEval(vm, "(1;`a) 5", "0N");
@@ -4303,7 +4408,7 @@ test "review fixes: precedence, k newlines, scans, equality, stubs and long list
 
     // Stubs fail with nyi instead of crashing.
     try testing.expectError(error.nyi, vm.evalSource("flip `a`b!(1 2;3 4)", .q, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("1?5", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("1 2 3 like \"a\"", .q, "<test>"));
 
     // A long list literal that fails part way is cleaned up (it used to move the stack).
     try testing.expectError(error.type, vm.evalSource("(\"a\";\"b\";\"c\";\"d\";\"e\";\"f\";\"g\";\"h\";\"i\";\"j\";\"k\";\"l\";\"m\";\"n\";\"o\";\"p\";\"q\";\"r\";\"s\";\"t\";\"u\";\"v\" \"w\";\"x\")", .q, "<test>"));
@@ -5410,4 +5515,254 @@ test "fill, drop and cut follow q" {
     try testing.expectError(error.type, vm.evalSource("`a _ (`a`b;1 2)", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("`a _ 1 2 3", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("`a _ `a`b", .q, "<test>"));
+}
+
+test "attributes, the vector conditional, roll and deal, internals and dictionary amend follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Attributes.
+    try expectEval(vm, "`s#1 2 3", "`s#1 2 3");
+    try expectEval(vm, "`s#1 1 2", "`s#1 1 2");
+    try expectEval(vm, "`u#1 2 3", "`u#1 2 3");
+    try expectEval(vm, "`p#1 1 2 2", "`p#1 1 2 2");
+    try expectEval(vm, "`g#1 2 1", "`g#1 2 1");
+    try expectEval(vm, "`s#\"abc\"", "`s#\"abc\"");
+    try expectEval(vm, "`s#`a`b", "`s#`a`b");
+    try expectEval(vm, "`s#()", "`s#()");
+    try expectEval(vm, "`s#`long$()", "`s#`long$()");
+    try expectEval(vm, "`s#01b", "`s#01b");
+    try expectEval(vm, "`s#0x0102", "`s#0x0102");
+    try expectEval(vm, "`s#(1;2)", "`s#1 2");
+    try expectEval(vm, "`s#(1;2.5)", "`s#(1;2.5)");
+    try expectEval(vm, "`s#(1;`a)", "`s#(1;`a)");
+    try expectEval(vm, "`s#(1 2;3 4)", "`s#(1 2;3 4)");
+    try expectEval(vm, "`s#enlist 1", "`s#,1");
+    try expectEval(vm, "`#1 2 3", "1 2 3");
+    try expectEval(vm, "`s#`a`b!1 2", "`s#`s#`a`b!1 2");
+    try expectEval(vm, "`s#`s#1 2 3", "`s#1 2 3");
+    try expectEval(vm, "`u#`s#1 2 3", "`u#1 2 3");
+    try expectEval(vm, "attr 1 2 3", "`");
+    try expectEval(vm, "attr `s#1 2 3", "`s");
+    try expectEval(vm, "attr `u#1 2 3", "`u");
+    try expectEval(vm, "attr `p#1 1 2", "`p");
+    try expectEval(vm, "attr `g#1 2 1", "`g");
+    try expectEval(vm, "attr 1", "`");
+    try expectEval(vm, "attr ()", "`");
+    try expectEval(vm, "attr `a`b!1 2", "`");
+    try expectEval(vm, "attr {x}", "`");
+    try expectEval(vm, "attr \"abc\"", "`");
+    try expectEval(vm, "attr `s#`a`b!1 2", "`s");
+    try expectEval(vm, "attr key `s#`a`b!1 2", "`s");
+    try expectEval(vm, "attr value `s#`a`b!1 2", "`");
+    try expectEval(vm, "attr `s#0N 1 2", "`s");
+    try expectEval(vm, "attr `s#0n 1 2", "`s");
+    try expectEval(vm, "attr `u#(1;`a;1 2)", "`u");
+    try expectEval(vm, "attr `s#`u#1 2 3", "`s");
+    try expectEval(vm, "attr `u#`s#1 2 3", "`u");
+    try expectEval(vm, "attr `s#2023.01.01 2023.01.02", "`s");
+    // Sorted, parted and grouped are set on the value itself; unique makes a copy.
+    try expectEval(vm, "x:1 2 3;y:`s#x;attr x", "`s");
+    try expectEval(vm, "x:1 2 3;y:`u#x;attr x", "`");
+    try expectEval(vm, "a:b:1 2 3;c:`s#a;attr a", "`s");
+    try expectEval(vm, "f:{`s#x};z:1 2 3;f z;attr z", "`s");
+    try expectEval(vm, "g:{`s#1 2 3};attr g[]", "`s");
+    try expectEval(vm, "attr 1_`s#1 2 3", "`");
+    try expectEval(vm, "attr -1_`s#1 2 3", "`");
+    try expectEval(vm, "attr 2#`s#1 2 3", "`");
+    try expectEval(vm, "attr (`s#1 2 3)+1", "`");
+    try expectEval(vm, "attr (`s#1 2 3),4", "`");
+    try expectEval(vm, "attr (`s#1 2 3)[0 1]", "`");
+    try expectEval(vm, "attr reverse `s#1 2 3", "`");
+    try expectEval(vm, "attr @[`s#1 2 3;0;:;5]", "`");
+    try expectEval(vm, "attr 0#`s#1 2 3", "`");
+    try expectEval(vm, "attr (`s#1 2 3)=1 2 3", "`");
+    try expectEval(vm, "attr {x} each `s#1 2 3", "`");
+    try expectEval(vm, "attr enlist `s#1 2", "`");
+    try expectEval(vm, "attr 1 2 3,`s#1 2 3", "`");
+    try expectEval(vm, "attr $[1b;`s#1 2 3;0]", "`s");
+    try expectEval(vm, "attr {x}`s#1 2 3", "`s");
+    try expectEval(vm, "attr (::)`s#1 2 3", "`s");
+    try expectEval(vm, "attr `s#1 2 3 4 5", "`s");
+    try expectEval(vm, "attr distinct `s#1 2 3", "`s");
+    try expectEvalMode(vm, .k, "asc9:{$[99h=@x;(!x)[i]!`s#r i:<r:. x;`s=-2!x;x;0h>@x;'`rank;`s#x@<x]};asc9 3 1 2", "`s#1 2 3");
+    try expectEvalMode(vm, .k, "asc9 `a`b!3 1", "`b`a!`s#1 3");
+    try expectEval(vm, "(`s#1 2 3) bin 2", "1");
+    try expectEval(vm, "(`s#1 2 3)~1 2 3", "1b");
+    try expectEval(vm, "1 2 3~`s#1 2 3", "1b");
+    try expectEval(vm, "(`s#1 2 3)=1 2 3", "111b");
+    try expectEval(vm, "-3!`s#1 2 3", "\"`s#1 2 3\"");
+    try expectEval(vm, "-3!enlist `s#1 2", "\",`s#1 2\"");
+    try expectEval(vm, "-3!(`s#1 2;3)", "\"(`s#1 2;3)\"");
+    try expectEval(vm, "-3!`s#`a`b!1 2", "\"`s#`s#`a`b!1 2\"");
+    try expectEval(vm, "string `s#1 2 3", "(,\"1\";,\"2\";,\"3\")");
+    try expectEval(vm, "@[{`s#x};3 2 1;{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};1 0N 2;{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};101b;{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};\"ba\";{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};`b`a;{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};(2.5;1);{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};(3 4;1 2);{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`s#x};`b`a!1 2;{x}]", "\"s-fail\"");
+    try expectEval(vm, "@[{`u#x};1 1 2;{x}]", "\"u-fail\"");
+    try expectEval(vm, "@[{`p#x};1 2 1;{x}]", "\"u-fail\"");
+    try expectEval(vm, "@[{`u#x};(1;`a;1);{x}]", "\"u-fail\"");
+    try testing.expectError(error.type, vm.evalSource("`s#1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`z#1 2 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`s`u#1 2 3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`g#`a`b!1 2", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`u#`a`b!1 2", .q, "<test>"));
+
+    // The vector conditional.
+    try expectEval(vm, "?[101b;1 2 3;4 5 6]", "1 5 3");
+    try expectEval(vm, "?[101b;1;4 5 6]", "1 5 1");
+    try expectEval(vm, "?[101b;1 2 3;0]", "1 0 3");
+    try expectEval(vm, "?[101b;1;0]", "1 0 1");
+    try expectEval(vm, "?[1b;1;2]", "1");
+    try expectEval(vm, "?[0b;1;2]", "2");
+    try expectEval(vm, "?[101b;1 2 3;4 5 6f]", "1 5 3f");
+    try expectEval(vm, "?[101b;1 2 3h;4 5 6]", "1 5 3");
+    try expectEval(vm, "?[101b;\"abc\";\"xyz\"]", "\"ayc\"");
+    try expectEval(vm, "?[101b;(1;`a;3);(4;5;`c)]", "1 5 3");
+    try expectEval(vm, "?[`boolean$();();()]", "()");
+    try expectEval(vm, "?[101b;(1 2;3 4;5 6);(7 8;9 10;11 12)]", "(1 2;9 10;5 6)");
+    try expectEval(vm, "?[10b;1 2;3 4]", "1 4");
+    try expectEval(vm, "type ?[101b;1 2 3;4 5 6]", "7h");
+    try testing.expectError(error.type, vm.evalSource("?[1 0 1;1 2 3;4 5 6]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[101b;`a`b`c;4 5 6]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[101b;1 2 3;`a`b`c]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[1;1 2 3;4 5 6]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[(1;0;1);1 2 3;4 5 6]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("?[101b;1 2;4 5 6]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("?[`boolean$();1 2 3;4 5 6]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("?[101b;();()]", .q, "<test>"));
+
+    // Roll and deal: types, counts and ranges, as the generator is not q's.
+    try expectEval(vm, "type 0?10", "7h");
+    try expectEval(vm, "type 0?1.0", "9h");
+    try expectEval(vm, "type 0?`a`b", "11h");
+    try expectEval(vm, "type 0?0b", "1h");
+    try expectEval(vm, "type 5?10", "7h");
+    try expectEval(vm, "type 5?1.0", "9h");
+    try expectEval(vm, "type 5?`a`b", "11h");
+    try expectEval(vm, "type 5?0b", "1h");
+    try expectEval(vm, "type 5?\"ab\"", "10h");
+    try expectEval(vm, "type 5?1h", "5h");
+    try expectEval(vm, "type 5?1i", "6h");
+    try expectEval(vm, "type 5?2023.01.01", "14h");
+    try expectEval(vm, "type 5?1e", "8h");
+    try expectEval(vm, "type 5?0x10", "4h");
+    try expectEval(vm, "type 5?12:00", "17h");
+    try expectEval(vm, "type 5?0D01", "16h");
+    try expectEval(vm, "type 5?0x0102", "4h");
+    try expectEval(vm, "type 5?0", "7h");
+    try expectEval(vm, "type 2?1b", "1h");
+    try expectEval(vm, "count 5?10", "5");
+    try expectEval(vm, "count -5?10", "5");
+    try expectEval(vm, "count -5?`a`b`c`d`e`f", "5");
+    try expectEval(vm, "count 5h?10", "5");
+    try expectEval(vm, "count 5i?10", "5");
+    try expectEval(vm, "count 1?10", "1");
+    try expectEval(vm, "sum -3?3", "3");
+    try expectEval(vm, "count distinct -5?10", "5");
+    try expectEval(vm, "count distinct -5?`a`b`c`d`e", "5");
+    try expectEval(vm, "-1<min 5?10", "1b");
+    try expectEval(vm, "10>max 5?10", "1b");
+    try expectEval(vm, "1>max 5?1.0", "1b");
+    try expectEval(vm, "min (5?1 2) in 1 2", "1b");
+    try expectEval(vm, "5?()", "(();();();();())");
+    try expectEval(vm, "count 5?`3", "5");
+    try expectEval(vm, "count string first 5?`3", "3");
+    try expectEval(vm, "count string first 5?`8", "8");
+    try expectEval(vm, "sum 0N?10", "45");
+    try expectEval(vm, "count 0N?10", "10");
+    try expectEval(vm, "value \"\\\\S\"", "-314159i");
+    try expectEval(vm, "value \"\\\\S 42\"", "::");
+    try expectEval(vm, "value \"\\\\S\"", "42i");
+    try expectEval(vm, "value \"\\\\S 1\";r1:5?100;value \"\\\\S 1\";r1~5?100", "1b");
+    try expectEval(vm, "@[{5?x};`a;{x}]", ",\"a\"");
+    try expectEval(vm, "@[{5?x};`9;{x}]", ",\"9\"");
+    try testing.expectError(error.length, vm.evalSource("-5?4", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("-6?`a`b`c`d`e", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("5?-1", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("5?0N", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("5?`0", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("5.0?10", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-3?1.0", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[3;1;2]", .q, "<test>"));
+
+    // Internals.
+    try expectEval(vm, "-1!`a", "`:a");
+    try expectEval(vm, "-1!`:a", "`:a");
+    try expectEval(vm, "-1!`", "`");
+    try expectEval(vm, "-1!`:", "`:");
+    try expectEval(vm, "-1!`a.b", "`:a.b");
+    try expectEval(vm, "type -1!`a", "-11h");
+    try expectEval(vm, "-15!\"abc\"", "0x900150983cd24fb0d6963f7d28e17f72");
+    try expectEval(vm, "-15!\"\"", "0xd41d8cd98f00b204e9800998ecf8427e");
+    try expectEval(vm, "md5 \"abc\"", "0x900150983cd24fb0d6963f7d28e17f72");
+    try expectEval(vm, "-33!\"abc\"", "0xa9993e364706816aba3e25717850c26c9cd0d89d");
+    try expectEval(vm, "-33!\"\"", "0xda39a3ee5e6b4b0d3255bfef95601890afd80709");
+    try expectEval(vm, "-32!\"abc\"", "\"YWJj\"");
+    try expectEval(vm, "-32!\"ab\"", "\"YWI=\"");
+    try expectEval(vm, "-32!\"\"", "\"\"");
+    try expectEval(vm, "-32!0x616263", "\"YWJj\"");
+    try expectEval(vm, "-24!\"1+1\"", "\"1+1\"");
+    try expectEval(vm, "-24!(+;1;2)", "3");
+    try expectEval(vm, "-24!1", "1");
+    try expectEval(vm, "-6!\"1+1\"", "\"1+1\"");
+    try expectEval(vm, "-6!1", "1");
+    try expectEval(vm, "-6!(::;1)", "1");
+    try expectEval(vm, "-6!(1;2)", "1 2");
+    try expectEval(vm, "-6!()", "()");
+    try expectEval(vm, "-6!(\"neg\";1)", "\"e\"");
+    try expectEval(vm, "-105!({x+y};(1;2);{x})", "3");
+    try expectEval(vm, "-105!({x};enlist 1;{x})", "1");
+    try expectEval(vm, "-105!({'`oops};enlist 1;{[m;b]m})", "\"oops\"");
+    try expectEval(vm, "-105!({'x};enlist 1;{[m;b]m})", "\"stype\"");
+    try testing.expectError(error.rank, vm.evalSource("-105!({'`oops};enlist 1;{x})", .q, "<test>"));
+    try expectEval(vm, "-105!({'x};enlist 1;{y})", "()");
+    try testing.expectError(error.type, vm.evalSource("-1!`a`b", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-1!\"a\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-1!1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-15!`a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-15!1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-15!0x616263", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-32!\"a\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-32!`a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-105!(1;2;3)", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("-6!(`neg;1)", .q, "<test>"));
+
+    // Amend by key.
+    try expectEval(vm, "@[`a`b!1 2;`a;:;5]", "`a`b!5 2");
+    try expectEval(vm, "@[`a`b!1 2;`c;:;5]", "`a`b`c!1 2 5");
+    try expectEval(vm, "@[`a`b!1 2;`a`c;:;5 6]", "`a`b`c!5 2 6");
+    try expectEval(vm, "@[`a`b!1 2;`a;+;5]", "`a`b!6 2");
+    try expectEval(vm, "@[`a`b!1 2;`c;+;5]", "`a`b`c!1 2 5");
+    try expectEval(vm, "@[`a`b!1 2;`a;neg]", "`a`b!-1 2");
+    try expectEval(vm, ".[`a`b!(1 2;3 4);(`a;1);:;9]", "`a`b!(1 9;3 4)");
+    try expectEval(vm, ".[`a`b!1 2;();:;3]", "3");
+    try expectEval(vm, ".[`a`b!1 2;enlist `a;:;9]", "`a`b!9 2");
+    try expectEval(vm, "d:`a`b!1 2;d[`a]:5;d", "`a`b!5 2");
+    try expectEval(vm, "d[`c]:7;d", "`a`b`c!5 2 7");
+    try expectEval(vm, "d[`b]+:10;d", "`a`b`c!5 12 7");
+    try expectEval(vm, "d[`x]+:1;d", "`a`b`c`x!5 12 7 1");
+    try expectEval(vm, "@[`a`b!(1 2;3 4);`a;:;9]", "`a`b!(9;3 4)");
+    try expectEval(vm, "@[`a`b!(1 2;3 4);`a;:;9 8]", "`a`b!(9 8;3 4)");
+    try expectEval(vm, "@[`a`b!(1 2;3 4);`c;:;9 8]", "`a`b`c!(1 2;3 4;9 8)");
+    try expectEval(vm, "@[`a`b!(1 2;3 4);`c;:;9]", "`a`b`c!(1 2;3 4;9)");
+    try expectEval(vm, "@[`a`b!(1;`c);`d;:;9]", "`a`b`d!(1;`c;9)");
+    try expectEval(vm, "@[1 2!3 4;1;:;5]", "1 2!5 4");
+    try expectEval(vm, "@[1 2!3 4;5;:;5]", "1 2 5!3 4 5");
+    try expectEval(vm, "@[`a`b!1 2;`a`a;+;1 1]", "`a`b!3 2");
+    try expectEval(vm, "@[`a`b!1 2;`a`b`c;:;5 6 7]", "`a`b`c!5 6 7");
+    try expectEval(vm, "@[`a`b!1 2;`;:;5]", "`a`b`!1 2 5");
+    try expectEval(vm, "@[`a`b!1 2;(`a;`b);:;(5;6)]", "`a`b!5 6");
+    try testing.expectError(error.length, vm.evalSource(".[`a`b!(1 2;3 4);(`c;1);:;9]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource(".[`a`b!1 2;(`a;`b);:;9]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;0;:;5]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;`a;:;`x]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;`c;:;`x]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;`c;:;1.5]", .q, "<test>"));
 }

@@ -1127,6 +1127,8 @@ pub fn distinct(vm: *Vm, x: *Value) Vm.RunError!*Value {
     const ids = try vm.gpa.alloc(usize, n);
     defer vm.gpa.free(ids);
     try groupPositions(vm, x, &firsts, ids);
+    // Nothing removed gives the list itself, attribute and all, as in q.
+    if (firsts.items.len == n) return x.ref();
     return gather(vm, x, firsts.items);
 }
 

@@ -643,15 +643,10 @@ fn joinDicts(vm: *Vm, x: *Value, y: *Value) !*Value {
     return vm.createValue(.dict, .{ .keys = key_list, .values = value_list });
 }
 
-/// `n#y` takes `n` items of `y`, cycling through a list (`3#1 2` is `1 2 1`), repeating an
-/// atom (`2#1` is `1 1`), from the end for negative `n` (`-2#1 2 3` is `2 3`), and filling an
-/// empty list with nulls (`2#""` is `"  "`). `0#y` is the empty list of `y`'s type, which is
-/// how q spells typed empties: `0#0` is `` `long$() ``.
-const TakeError = Allocator.Error || error{ type, length, domain, nyi };
-
 /// `x#y`: `n#y` takes `n` items of `y`, a list of counts reshapes, and a count or a list of
 /// keys applied to a dictionary takes its entries.
-pub fn take(vm: *Vm, x: *Value, y: *Value) TakeError!*Value {
+pub fn take(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.as == .symbol) return setAttribute(vm, x.as.symbol, y);
     if (y.as == .dict) return takeDict(vm, x, y);
     const n: i64 = switch (x.as) {
         .short => |v| if (v == @backingInt(Value.Short.null)) return error.type else v,
@@ -665,7 +660,7 @@ pub fn take(vm: *Vm, x: *Value, y: *Value) TakeError!*Value {
 
 /// `n` items of `y` from `start` items in: a list is cycled through and an atom repeated,
 /// a negative `n` takes from the end, and an empty list gives nulls (`2#""` is `"  "`).
-fn takeItems(vm: *Vm, y: *Value, n: i64, start: usize) TakeError!*Value {
+fn takeItems(vm: *Vm, y: *Value, n: i64, start: usize) Vm.RunError!*Value {
     const len: usize = @intCast(@abs(n));
     switch (y.as) {
         inline .list,
@@ -750,7 +745,7 @@ fn takeItems(vm: *Vm, y: *Value, n: i64, start: usize) TakeError!*Value {
 /// `2 3#y` reshapes `y` into rows, `(0 1 2;3 4 5)`, cycling through `y` as take does and
 /// nesting for further dimensions. One of two dimensions may be `0N`: `0N 3#til 7` cuts rows
 /// of 3 with a short last row and `3 0N#til 7` spreads the items over 3 rows.
-fn reshape(vm: *Vm, dims: []const i64, y: *Value) TakeError!*Value {
+fn reshape(vm: *Vm, dims: []const i64, y: *Value) Vm.RunError!*Value {
     if (dims.len == 0) return error.length;
     var nulls: usize = 0;
     for (dims) |d| {
@@ -790,7 +785,7 @@ fn reshape(vm: *Vm, dims: []const i64, y: *Value) TakeError!*Value {
     return vm.enlist(rows.items);
 }
 
-fn reshapeFrom(vm: *Vm, dims: []const i64, y: *Value, offset: *usize) TakeError!*Value {
+fn reshapeFrom(vm: *Vm, dims: []const i64, y: *Value, offset: *usize) Vm.RunError!*Value {
     const count: usize = @intCast(dims[0]);
     if (dims.len == 1) {
         const result = try takeItems(vm, y, dims[0], offset.*);
@@ -811,7 +806,7 @@ fn reshapeFrom(vm: *Vm, dims: []const i64, y: *Value, offset: *usize) TakeError!
 /// `n#d` takes the first (or last) `n` entries of a dictionary, and `keys#d` the entries for
 /// `keys`, with a null like the dictionary's first value in place of a missing key:
 /// `` `a`x#`a`b`c!1 2 3 `` is `` `a`x!1 0N ``.
-fn takeDict(vm: *Vm, x: *Value, y: *Value) TakeError!*Value {
+fn takeDict(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
     const entries = y.as.dict;
     switch (x.as) {
         .short, .int, .long => {
@@ -1643,9 +1638,16 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
                 return y.ref();
             },
             else => switch (val) {
+                -1 => return hsym(vm, y),
+                -2 => return vm.createValue(.symbol, if (y.attr == .none) .empty else try vm.intern(@tagName(y.attr))),
                 -3 => return vm.createCharList("{f}", .{y.fmt(vm)}),
                 -5 => return vm.parse(y),
                 -6 => return vm.eval(y),
+                -15 => return digest(vm, std.crypto.hash.Md5, y),
+                -24 => return vm.eval(y),
+                -32 => return btoa(vm, y),
+                -33 => return digest(vm, std.crypto.hash.Sha1, y),
+                -105 => return trap(vm, y),
                 else => return error.nyi,
             },
         },
@@ -2246,7 +2248,7 @@ fn findImpl(vm: *Vm, x: *Value, y: *Value, top: bool) Vm.RunError!*Value {
             for (0..n) |i| if (itemIs(x, i, y)) return vm.createValue(.long, @intCast(i));
             return vm.createValue(.long, @intCast(n));
         },
-        else => return error.nyi,
+        else => return roll(vm, x, y),
     }
 }
 
@@ -2749,4 +2751,278 @@ fn radixSplit(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
         filled += 1;
     }
     return rows;
+}
+
+// ---------------------------------------------------------------------------------------
+// Attributes, the vector conditional, roll and deal, and the internal functions.
+
+/// `` `s#y ``, `` `u#y ``, `` `p#y `` and `` `g#y `` set an attribute on a list, and
+/// `` `#y `` clears it. Sorted needs the items non-decreasing in q's order (nulls first),
+/// else `s-fail`; unique needs them distinct and parted needs equal items contiguous,
+/// else `u-fail`; grouped checks nothing. As in q, sorted, parted and grouped are set on
+/// the value itself, so a variable holding it sees the attribute, while unique makes a
+/// copy. A dictionary takes only `s`, on itself and its keys; an atom is a type error.
+fn setAttribute(vm: *Vm, name: Symbol, y: *Value) Vm.RunError!*Value {
+    const text = vm.internedString(name);
+    const attr: Value.Attr = if (text.len == 0) .none else if (text.len == 1) switch (text[0]) {
+        's' => .s,
+        'u' => .u,
+        'p' => .p,
+        'g' => .g,
+        else => return error.type,
+    } else return error.type;
+    if (y.as == .dict) {
+        if (attr != .s and attr != .none) return error.type;
+        const keys = y.as.dict.keys;
+        if (attr == .s and !try isSorted(vm, keys)) return vm.failWith("s-fail");
+        keys.attr = attr;
+        y.attr = attr;
+        return y.ref();
+    }
+    if (!y.isList()) return error.type;
+    switch (attr) {
+        .none, .g => {},
+        .s => if (!try isSorted(vm, y)) return vm.failWith("s-fail"),
+        .u, .p => {
+            const n = y.count();
+            for (0..n) |i| {
+                // Parted allows a repeat only right after itself; unique allows none.
+                if (attr == .p and i > 0 and try sameItemOf(vm, y, i, i - 1)) continue;
+                for (0..i) |j| if (try sameItemOf(vm, y, i, j)) return vm.failWith("u-fail");
+            }
+        },
+    }
+    // Unique makes a copy, and so does an empty list, which is a shared constant here.
+    if (attr == .u or y.count() == 0) {
+        const copy = try takeItems(vm, y, @intCast(y.count()), 0);
+        copy.attr = attr;
+        return copy;
+    }
+    y.attr = attr;
+    return y.ref();
+}
+
+fn isSorted(vm: *Vm, list: *Value) Allocator.Error!bool {
+    const n = list.count();
+    if (n < 2) return true;
+    for (0..n - 1) |i| if (compareItems(vm, list, i, list, i + 1) == .gt) return false;
+    return true;
+}
+
+fn sameItemOf(vm: *Vm, x: *Value, i: usize, j: usize) Allocator.Error!bool {
+    if (x.as == .list) return matches(vm, x.as.list[i], x.as.list[j]);
+    return compareItems(vm, x, i, x, j) == .eq;
+}
+
+/// `?[c;a;b]`: for a boolean list `c`, the items of `a` where it is true and of `b`
+/// elsewhere, atoms spread and lists of `c`'s length (else `length`), the picks unified
+/// with numbers promoted (`?[101b;1 2 3;4 5 6f]` is `1 5 3f`) and a symbol among numbers
+/// a type error; a boolean atom picks `a` or `b` whole.
+pub fn vectorConditional(vm: *Vm, c: *Value, a: *Value, b: *Value) Vm.RunError!*Value {
+    switch (c.as) {
+        .boolean => |pick| return (if (pick) a else b).ref(),
+        .boolean_list => {},
+        else => return error.type,
+    }
+    const n = c.count();
+    for ([_]*Value{ a, b }) |side| if (side.isList() and side.count() != n) return error.length;
+    if (n == 0) return vm.allocValue(.list, 0);
+    const picks = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(picks);
+    var done: usize = 0;
+    defer for (picks[0..done]) |p| p.deref(vm.gpa);
+    for (c.as.boolean_list, 0..) |pick, i| {
+        const side = if (pick) a else b;
+        picks[done] = if (side.isList()) try itemAt(vm, side, i) else side.ref();
+        done += 1;
+    }
+    const result = try vm.enlist(picks);
+    if (result.as != .list) return result;
+    // Atoms of different numeric types promote to one type.
+    for (picks) |p| if (p.isList() or p.as == .dict or Vm.isFunction(p)) return result;
+    errdefer result.deref(vm.gpa);
+    var target = std.meta.activeTag(picks[0].as);
+    for (picks[1..]) |p| target = try fillType(target, std.meta.activeTag(p.as));
+    const promoted = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(promoted);
+    var made: usize = 0;
+    defer for (promoted[0..made]) |p| p.deref(vm.gpa);
+    for (picks) |p| {
+        promoted[made] = try castAtom(vm, target, p);
+        made += 1;
+    }
+    result.deref(vm.gpa);
+    return vm.enlist(promoted);
+}
+
+/// `n?x` roll and `-n?x` deal. An integer `n` draws `n` items: from a list, positions
+/// with replacement, or without for a negative `n` (`length` past the count); from an
+/// integer, float or temporal atom, values below it of its type (`0` draws from the whole
+/// long range, a negative or null is `domain`); from a boolean, booleans; from a byte,
+/// bytes; from a symbol `` `k ``, symbols of `k` lower-case letters. A null `n` with an
+/// integer `x` is a permutation of `til x`. The generator is seeded by `\\S` but is not
+/// q's, so the values differ from q's for the same seed.
+fn roll(vm: *Vm, n_value: *Value, x: *Value) Vm.RunError!*Value {
+    const n_raw: ?i64 = switch (n_value.as) {
+        .short => |v| if (v == @backingInt(Value.Short.null)) null else v,
+        .int => |v| if (v == @backingInt(Value.Int.null)) null else v,
+        .long => |v| if (v == @backingInt(Value.Long.null)) null else v,
+        else => return error.type,
+    };
+    const random = vm.random.random();
+    if (n_raw == null) {
+        const count: i64 = switch (x.as) {
+            .short => |v| v,
+            .int => |v| v,
+            .long => |v| v,
+            else => return error.type,
+        };
+        if (count < 0) return error.domain;
+        return permutation(vm, random, @intCast(count), @intCast(count));
+    }
+    const deal = n_raw.? < 0;
+    const n: usize = @intCast(@abs(n_raw.?));
+    if (x.isList()) {
+        const count = x.count();
+        if (x.as == .list and count == 0) {
+            const empties = try vm.allocValue(.list, n);
+            errdefer comptime unreachable;
+            for (empties.as.list) |*e| e.* = vm.getConstant(.empty_list);
+            return empties;
+        }
+        if (count == 0) return error.length;
+        if (deal and n > count) return error.length;
+        const positions = if (deal) try permutation(vm, random, count, n) else blk: {
+            const p = try vm.allocValue(.long_list, n);
+            for (p.as.long_list) |*i| i.* = @intCast(random.uintLessThan(usize, count));
+            break :blk p;
+        };
+        defer positions.deref(vm.gpa);
+        var args = [_]*Value{positions};
+        return vm.indexList(x, &args);
+    }
+    switch (x.as) {
+        .symbol => |s| {
+            const text = vm.internedString(s);
+            const letters: usize = if (text.len == 1 and text[0] >= '1' and text[0] <= '8') text[0] - '0' else if (text.len == 1 and text[0] == '0') return error.domain else return vm.failWith(text);
+            const result = try vm.allocValue(.symbol_list, n);
+            errdefer result.deref(vm.gpa);
+            var buffer: [8]u8 = undefined;
+            for (result.as.symbol_list) |*item| {
+                for (buffer[0..letters]) |*c| c.* = 'a' + random.uintLessThan(u8, 26);
+                item.* = try vm.intern(buffer[0..letters]);
+            }
+            return result;
+        },
+        .boolean => {
+            const result = try vm.allocValue(.boolean_list, n);
+            for (result.as.boolean_list) |*b| b.* = random.boolean();
+            return result;
+        },
+        .byte => |limit| {
+            const result = try vm.allocValue(.byte_list, n);
+            for (result.as.byte_list) |*b| b.* = if (limit == 0) random.int(u8) else random.uintLessThan(u8, limit);
+            return result;
+        },
+        inline .real, .float => |limit, tag| {
+            if (deal) return error.type;
+            if (!(limit > 0)) return error.domain;
+            const list_tag = comptime counterpart(tag);
+            const result = try vm.allocValue(list_tag, n);
+            for (@field(result.as, @tagName(list_tag))) |*f| f.* = random.float(@TypeOf(limit)) * limit;
+            return result;
+        },
+        inline .short, .int, .long, .timestamp, .month, .date, .timespan, .minute, .second, .time => |limit, tag| {
+            const T = @TypeOf(limit);
+            if (limit == std.math.minInt(T) or limit < 0) return error.domain;
+            if (deal) {
+                if (n > limit) return error.length;
+                const p = try permutation(vm, random, @intCast(limit), n);
+                defer p.deref(vm.gpa);
+                const list_tag = comptime counterpart(tag);
+                const result = try vm.allocValue(list_tag, n);
+                for (@field(result.as, @tagName(list_tag)), p.as.long_list) |*item, i| item.* = @intCast(i);
+                return result;
+            }
+            const list_tag = comptime counterpart(tag);
+            const result = try vm.allocValue(list_tag, n);
+            for (@field(result.as, @tagName(list_tag))) |*item| {
+                item.* = if (limit == 0) random.int(T) else @intCast(random.uintLessThan(u64, @intCast(limit)));
+            }
+            return result;
+        },
+        .datetime => |limit| {
+            if (deal) return error.type;
+            if (!(limit > 0)) return error.domain;
+            const result = try vm.allocValue(.datetime_list, n);
+            for (result.as.datetime_list) |*f| f.* = random.float(f64) * limit;
+            return result;
+        },
+        else => return error.type,
+    }
+}
+
+/// The first `n` positions of a random permutation of `til count`.
+fn permutation(vm: *Vm, random: std.Random, count: usize, n: usize) Allocator.Error!*Value {
+    const all = try vm.gpa.alloc(i64, count);
+    defer vm.gpa.free(all);
+    for (all, 0..) |*v, i| v.* = @intCast(i);
+    random.shuffle(i64, all);
+    const result = try vm.allocValue(.long_list, n);
+    errdefer comptime unreachable;
+    @memcpy(result.as.long_list, all[0..n]);
+    return result;
+}
+
+/// `-1!x` hsym: a symbol made a file symbol by a leading colon, unless it has one already
+/// or is empty.
+fn hsym(vm: *Vm, y: *Value) Vm.RunError!*Value {
+    if (y.as != .symbol) return error.type;
+    const text = vm.internedString(y.as.symbol);
+    if (text.len == 0 or text[0] == ':') return y.ref();
+    const name = try std.mem.concat(vm.gpa, u8, &.{ ":", text });
+    defer vm.gpa.free(name);
+    return vm.createValue(.symbol, try vm.intern(name));
+}
+
+/// `-15!x` md5 and `-33!x` sha1 of a string, as bytes.
+fn digest(vm: *Vm, comptime Hash: type, y: *Value) Vm.RunError!*Value {
+    if (y.as != .char_list) return error.type;
+    const result = try vm.allocValue(.byte_list, Hash.digest_length);
+    errdefer comptime unreachable;
+    Hash.hash(y.as.char_list, result.as.byte_list[0..Hash.digest_length], .{});
+    return result;
+}
+
+/// `-32!x` btoa: the base64 text of a string or byte list.
+fn btoa(vm: *Vm, y: *Value) Vm.RunError!*Value {
+    const bytes: []const u8 = switch (y.as) {
+        .char_list => |s| s,
+        .byte_list => |b| b,
+        else => return error.type,
+    };
+    const encoder = std.base64.standard.Encoder;
+    const result = try vm.allocValue(.char_list, encoder.calcSize(bytes.len));
+    errdefer comptime unreachable;
+    _ = encoder.encode(result.as.char_list, bytes);
+    return result;
+}
+
+/// `-105!(f;args;handler)`, `.Q.trp`: `f . args`, or on failure the handler applied to the
+/// error text and a backtrace, which is `()` here as the debugger's frames are not kept.
+fn trap(vm: *Vm, y: *Value) Vm.RunError!*Value {
+    if (y.as != .list or y.as.list.len != 3) return error.type;
+    const f = y.as.list[0];
+    const handler = y.as.list[2];
+    return apply(vm, f, y.as.list[1]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            if (!Vm.isFunction(handler)) return handler.ref();
+            const text = try vm.errorText(err);
+            defer text.deref(vm.gpa);
+            var args = [_]*Value{ text, vm.getConstant(.empty_list) };
+            defer args[1].deref(vm.gpa);
+            return vm.applyImpl(handler, &args);
+        },
+    };
 }
