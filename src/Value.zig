@@ -69,7 +69,7 @@ pub fn deref(value: *Value, gpa: Allocator) void {
             .second_list,
             .time_list,
             => |list| gpa.free(list),
-            .dict => |val| {
+            .dict, .table => |val| {
                 val.keys.deref(gpa);
                 val.values.deref(gpa);
             },
@@ -178,6 +178,7 @@ pub fn eql(a: *Value, b: *Value) bool {
         .time_list => |a_val| return std.mem.eql(i32, a_val, b.as.time_list),
 
         .dict => |a_val| return a_val.keys.eql(b.as.dict.keys) and a_val.values.eql(b.as.dict.values),
+        .table => |a_val| return a_val.keys.eql(b.as.table.keys) and a_val.values.eql(b.as.table.values),
         .lambda => |a_val| return std.mem.eql(u8, a_val.source, b.as.lambda.source),
         .unary_primitive => |a_val| return a_val == b.as.unary_primitive,
         .operator => |a_val| return a_val == b.as.operator,
@@ -312,6 +313,8 @@ fn format(data: Data, w: *Io.Writer) Io.Writer.Error!void {
         .time => |value| try formatTemporal(.time, w, value, false),
         .time_list => |value| try formatTemporalList(.time, w, value),
         .dict => |value| try w.print("{f}", .{value.fmt(data.vm)}),
+        // A table shows as the flip of its column dictionary: `+`a`b!(1 2;3 4)`.
+        .table => |value| try w.print("+{f}", .{value.fmt(data.vm)}),
         .lambda => |value| try w.print("{s}", .{value.source}),
         .unary_primitive => |value| try w.print("{f}", .{value}),
         .operator => |value| try w.print("{f}", .{value}),
@@ -553,6 +556,7 @@ pub fn rank(value: *Value) usize {
         .time => 1,
         .time_list => 1,
         .dict => 1,
+        .table => 1,
         .lambda => |lambda| lambda.params.len,
         .unary_primitive => 1,
         // `.` and `@` also have their amend and trap forms of three and four arguments.
@@ -580,6 +584,12 @@ pub fn rank(value: *Value) usize {
         // The right function takes the arguments.
         .composition => |c| c.g.rank(),
     };
+}
+
+/// The rows of a table: the count of its first column, none without columns.
+pub fn rows(table: Dictionary) usize {
+    const columns = table.values.as.list;
+    return if (columns.len == 0) 0 else columns[0].count();
 }
 
 pub fn count(value: *Value) usize {
@@ -620,6 +630,7 @@ pub fn count(value: *Value) usize {
         .time => 1,
         .time_list => |v| v.len,
         .dict => |v| v.keys.count(),
+        .table => |v| rows(v),
         .lambda => 1,
         .unary_primitive => 1,
         .operator => 1,
@@ -673,7 +684,7 @@ pub const Type = enum(i8) {
     second_list = 18,
     time = -19,
     time_list = 19,
-    // table = 98,
+    table = 98,
     dict = 99,
     lambda = 100,
     unary_primitive = 101,
@@ -725,6 +736,9 @@ pub const Union = union(Type) {
     second_list: []i32,
     time: i32,
     time_list: []i32,
+    /// Column names (a symbol list) and columns (a general list of lists of one length),
+    /// the flip of a column dictionary.
+    table: Dictionary,
     dict: Dictionary,
     lambda: Lambda,
     unary_primitive: UnaryPrimitive,
@@ -805,7 +819,7 @@ pub const Dictionary = struct {
         // (`` (`symbol$())!`long$() ``) or a typed singleton (`` (,`a)!,1 ``). A general
         // list brings its own parentheses and a singleton general list stays bare.
         const keys = data.dict.keys;
-        const wrap = keys.isList() and keys.as != .list and keys.count() < 2;
+        const wrap = keys.as == .table or (keys.isList() and keys.as != .list and keys.count() < 2);
         if (wrap) try w.writeByte('(');
         try w.print("{f}", .{keys.fmt(data.vm)});
         if (wrap) try w.writeByte(')');

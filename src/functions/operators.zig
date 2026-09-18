@@ -55,11 +55,17 @@ pub fn divide(vm: *Vm, x: *Value, y: *Value) ArithmeticError!*Value {
 
 const Arithmetic = enum { add, subtract, multiply, divide };
 
-const ArithmeticError = Allocator.Error || error{ type, length, nyi };
+const ArithmeticError = Vm.RunError;
 
 /// Atom arithmetic with q's promotion: booleans, bytes and shorts compute as ints, a null
 /// operand gives a null result, and the result takes the wider of the two kinds.
-fn arithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) ArithmeticError!*Value {
+fn arithmetic(vm: *Vm, x: *Value, y: *Value, comptime op: Arithmetic) Vm.RunError!*Value {
+    if (try withDicts(vm, x, y, switch (op) {
+        .add => add,
+        .subtract => subtract,
+        .multiply => multiply,
+        .divide => divide,
+    })) |result| return result;
     if (x.isList() or y.isList()) return listArithmetic(vm, x, y, op);
     if (Temporal.of(x) != null or Temporal.of(y) != null) return temporalArithmetic(vm, x, y, op);
     const a = Numeric.of(x) orelse return error.type;
@@ -546,6 +552,7 @@ fn fillAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
 /// side to its type (`` `long$(),1.5 `` is `,2`, `` `long$(),`a `` is a type error), as q
 /// does. Two dictionaries merge with the right side's values winning.
 pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
+    if (x.as == .table or y.as == .table) return joinTables(vm, x, y);
     if (x.as == .dict and y.as == .dict) return joinDicts(vm, x, y);
     if (x.as == .dict or y.as == .dict) return error.type;
 
@@ -646,8 +653,9 @@ fn joinDicts(vm: *Vm, x: *Value, y: *Value) !*Value {
 /// `x#y`: `n#y` takes `n` items of `y`, a list of counts reshapes, and a count or a list of
 /// keys applied to a dictionary takes its entries.
 pub fn take(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
-    if (x.as == .symbol) return setAttribute(vm, x.as.symbol, y);
+    if (x.as == .symbol and y.as != .table) return setAttribute(vm, x.as.symbol, y);
     if (y.as == .dict) return takeDict(vm, x, y);
+    if (y.as == .table) return takeTable(vm, x, y);
     const n: i64 = switch (x.as) {
         .short => |v| if (v == @backingInt(Value.Short.null)) return error.type else v,
         .int => |v| if (v == @backingInt(Value.Int.null)) return error.type else v,
@@ -720,7 +728,7 @@ fn takeItems(vm: *Vm, y: *Value, n: i64, start: usize) Vm.RunError!*Value {
             for (@field(result.as, @tagName(list_tag))) |*item| item.* = atom;
             return result;
         },
-        .dict => unreachable,
+        .dict, .table => unreachable,
         .lambda,
         .unary_primitive,
         .operator,
@@ -1032,7 +1040,7 @@ const Target = union(enum) {
     }
 };
 
-const CastError = Allocator.Error || error{ type, nyi, domain, length };
+const CastError = Vm.RunError;
 
 /// `n$s` pads the string `s` with spaces to `n` chars or cuts it to fit: `5$"ab"` is
 /// `"ab   "`, `-5$"ab"` is `"   ab"` and `-3$"abcdef"` is `"def"`. A list of strings is
@@ -1410,6 +1418,7 @@ fn daysToMonth(days: i64) i64 {
 /// (`1 2 3_1` is `1 3`, out of range changes nothing), and a dictionary `x` with an atom
 /// `y` deletes that key.
 pub fn drop(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (y.as == .table) return dropTable(vm, x, y);
     switch (x.as) {
         .boolean, .byte, .short, .int, .long => {
             const n: i64 = switch (x.as) {
@@ -1542,6 +1551,16 @@ fn cut(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
 // match is defined with the comparisons below.
 
 pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
+    // `n!t` keys a table, `0!kt` unkeys one, and `t1!t2` keys a table by another.
+    if (y.as == .table or (y.as == .dict and y.as.dict.keys.as == .table)) {
+        if (x.as == .long and x.as.long >= 0) return keyTable(vm, x.as.long, y);
+        if (x.as == .table and y.as == .table) {
+            if (x.count() != y.count()) return error.length;
+            return vm.createValue(.dict, .{ .keys = x.ref(), .values = y.ref() });
+        }
+        // A negative count is an internal function, handled below.
+        if (x.as != .long) return error.type;
+    }
     switch (x.as) {
         .list,
         .boolean_list,
@@ -1581,6 +1600,7 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
             .second_list,
             .time_list,
             .dict,
+            .table,
             => {
                 if (x.count() != y.count()) return error.length;
                 const value = try vm.createValue(.dict, .{ .keys = undefined, .values = undefined });
@@ -1667,6 +1687,7 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
         .char => return error.nyi,
         .symbol => return error.nyi,
         .dict => return error.nyi,
+        .table => return error.type,
         .lambda => return error.nyi,
         .unary_primitive => return error.nyi,
         .operator => return error.nyi,
@@ -2003,6 +2024,13 @@ fn compareAtoms(vm: *Vm, x: *Value, y: *Value, comparison: Comparison) Vm.RunErr
 /// Applies an atom function pairwise over lists, an atom pairing with every item, lists
 /// pairing item by item and needing the same length, results unified into a list.
 fn pairwise(vm: *Vm, x: *Value, y: *Value, comptime f: fn (*Vm, *Value, *Value) Vm.RunError!*Value) Vm.RunError!*Value {
+    // The values of a dictionary or the columns of a table are lists, paired in turn.
+    const over_lists = struct {
+        fn g(inner_vm: *Vm, a: *Value, b: *Value) Vm.RunError!*Value {
+            return pairwise(inner_vm, a, b, f);
+        }
+    }.g;
+    if (try withDicts(vm, x, y, over_lists)) |result| return result;
     if (!x.isList() and !y.isList()) return f(vm, x, y);
     const x_len: ?usize = if (x.isList()) x.count() else null;
     const y_len: ?usize = if (y.isList()) y.count() else null;
@@ -3132,4 +3160,281 @@ fn trap(vm: *Vm, y: *Value) Vm.RunError!*Value {
             return vm.applyImpl(handler, &args);
         },
     };
+}
+
+// ---------------------------------------------------------------------------------------
+// Tables: the flip of a column dictionary, and dictionaries and tables as operands.
+
+/// A table from column names and columns, the way `flip` makes one: the names must be
+/// symbols (anything else is `nyi`, as in q), the columns lists of one length with atoms
+/// spread to it (`flip `a`b!(1 2;3)` has a column `3 3`); all atoms is `rank` and
+/// different lengths `length`.
+pub fn makeTable(vm: *Vm, keys: *Value, values: *Value) Vm.RunError!*Value {
+    if (keys.as != .symbol_list) return error.nyi;
+    if (values.as != .list) return error.rank;
+    const columns = values.as.list;
+    if (columns.len != keys.count()) return error.length;
+    var length: ?usize = null;
+    for (columns) |column| if (column.isList()) {
+        if (length) |n| {
+            if (column.count() != n) return error.length;
+        } else length = column.count();
+    };
+    const n = length orelse return error.rank;
+    const spread = try vm.allocValue(.list, columns.len);
+    var filled: usize = 0;
+    errdefer {
+        for (spread.as.list[0..filled]) |c| c.deref(vm.gpa);
+        vm.gpa.free(spread.as.list);
+        vm.gpa.destroy(spread);
+    }
+    for (columns) |column| {
+        if (column.isList()) {
+            spread.as.list[filled] = column.ref();
+        } else {
+            const count = try vm.createValue(.long, @intCast(n));
+            defer count.deref(vm.gpa);
+            spread.as.list[filled] = try take(vm, count, column);
+        }
+        filled += 1;
+    }
+    return vm.createValue(.table, .{ .keys = keys.ref(), .values = spread });
+}
+
+/// Row `i` of a table as a dictionary, a row of nulls past the end.
+pub fn rowAt(vm: *Vm, table: *Value, i: usize) Vm.RunError!*Value {
+    const t = table.as.table;
+    const columns = t.values.as.list;
+    const items = try vm.gpa.alloc(*Value, columns.len);
+    defer vm.gpa.free(items);
+    var done: usize = 0;
+    defer for (items[0..done]) |v| v.deref(vm.gpa);
+    for (columns) |column| {
+        items[done] = if (i < column.count()) try itemAt(vm, column, i) else try nullLike(vm, column);
+        done += 1;
+    }
+    const values = if (columns.len == 0) try vm.allocValue(.list, 0) else try vm.enlist(items);
+    errdefer values.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = t.keys.ref(), .values = values });
+}
+
+/// The columns of a table each indexed by `index`, as a table: `t[0 1]`.
+pub fn tableRows(vm: *Vm, table: *Value, index: *Value) Vm.RunError!*Value {
+    const t = table.as.table;
+    const columns = t.values.as.list;
+    const picked = try vm.allocValue(.list, columns.len);
+    var filled: usize = 0;
+    errdefer {
+        for (picked.as.list[0..filled]) |c| c.deref(vm.gpa);
+        vm.gpa.free(picked.as.list);
+        vm.gpa.destroy(picked);
+    }
+    for (columns) |column| {
+        var args = [_]*Value{index};
+        picked.as.list[filled] = try vm.indexList(column, &args);
+        filled += 1;
+    }
+    defer picked.deref(vm.gpa);
+    return makeTable(vm, t.keys, picked);
+}
+
+/// `f` applied to every column of a table, the results making a table again.
+pub fn mapColumns(vm: *Vm, table: *Value, comptime f: fn (*Vm, *Value) Vm.RunError!*Value) Vm.RunError!*Value {
+    const t = table.as.table;
+    const columns = t.values.as.list;
+    const mapped = try vm.allocValue(.list, columns.len);
+    var filled: usize = 0;
+    errdefer {
+        for (mapped.as.list[0..filled]) |c| c.deref(vm.gpa);
+        vm.gpa.free(mapped.as.list);
+        vm.gpa.destroy(mapped);
+    }
+    for (columns) |column| {
+        mapped.as.list[filled] = try f(vm, column);
+        filled += 1;
+    }
+    defer mapped.deref(vm.gpa);
+    return makeTable(vm, t.keys, mapped);
+}
+
+/// A dyadic function over dictionaries and tables, or null when neither operand is one:
+/// two dictionaries pair values by key, the result holding the keys of both with an
+/// unpaired value kept as it is (`` (`a`b!1 2)+`b`c!10 20 `` is `` `a`b`c!1 12 20 ``); a
+/// dictionary with anything else pairs its values with it; a table works as its column
+/// dictionary and flips back.
+pub fn withDicts(vm: *Vm, x: *Value, y: *Value, comptime f: fn (*Vm, *Value, *Value) Vm.RunError!*Value) Vm.RunError!?*Value {
+    const x_table = x.as == .table;
+    const y_table = y.as == .table;
+    if (x_table or y_table) {
+        const dx = if (x_table) try vm.createValue(.dict, .{ .keys = x.as.table.keys.ref(), .values = x.as.table.values.ref() }) else x.ref();
+        defer dx.deref(vm.gpa);
+        const dy = if (y_table) try vm.createValue(.dict, .{ .keys = y.as.table.keys.ref(), .values = y.as.table.values.ref() }) else y.ref();
+        defer dy.deref(vm.gpa);
+        const result = (try withDicts(vm, dx, dy, f)).?;
+        defer result.deref(vm.gpa);
+        return try makeTable(vm, result.as.dict.keys, result.as.dict.values);
+    }
+    if (x.as != .dict and y.as != .dict) return null;
+    if (x.as == .dict and y.as == .dict) {
+        const xd = x.as.dict;
+        const yd = y.as.dict;
+        var keys = xd.keys.ref();
+        defer keys.deref(vm.gpa);
+        var values: std.ArrayList(*Value) = .empty;
+        defer values.deinit(vm.gpa);
+        defer for (values.items) |v| v.deref(vm.gpa);
+        for (0..xd.keys.count()) |i| {
+            const key = try itemAt(vm, xd.keys, i);
+            defer key.deref(vm.gpa);
+            const xv = try itemAt(vm, xd.values, i);
+            defer xv.deref(vm.gpa);
+            if (try vm.keyPosition(yd.keys, key)) |j| {
+                const yv = try itemAt(vm, yd.values, j);
+                defer yv.deref(vm.gpa);
+                try values.append(vm.gpa, try f(vm, xv, yv));
+            } else try values.append(vm.gpa, xv.ref());
+        }
+        for (0..yd.keys.count()) |j| {
+            const key = try itemAt(vm, yd.keys, j);
+            defer key.deref(vm.gpa);
+            if ((try vm.keyPosition(xd.keys, key)) != null) continue;
+            const extended = try join(vm, keys, key);
+            keys.deref(vm.gpa);
+            keys = extended;
+            try values.append(vm.gpa, try itemAt(vm, yd.values, j));
+        }
+        const value_list = if (values.items.len == 0) try vm.allocValue(.list, 0) else try vm.enlist(values.items);
+        errdefer value_list.deref(vm.gpa);
+        return try vm.createValue(.dict, .{ .keys = keys.ref(), .values = value_list });
+    }
+    const d = if (x.as == .dict) x.as.dict else y.as.dict;
+    const values = if (x.as == .dict) try f(vm, d.values, y) else try f(vm, x, d.values);
+    errdefer values.deref(vm.gpa);
+    return try vm.createValue(.dict, .{ .keys = d.keys.ref(), .values = values });
+}
+
+/// `n!t` keys a table by its first `n` columns; `0!` on a keyed table joins the key and
+/// value columns back into one table.
+pub fn keyTable(vm: *Vm, n: i64, table: *Value) Vm.RunError!*Value {
+    if (n < 0) return error.domain;
+    if (table.as == .dict) {
+        // Unkeying, or rekeying a keyed table.
+        const d = table.as.dict;
+        if (d.keys.as != .table or d.values.as != .table) return error.type;
+        const keys = try join(vm, d.keys.as.table.keys, d.values.as.table.keys);
+        defer keys.deref(vm.gpa);
+        const values = try join(vm, d.keys.as.table.values, d.values.as.table.values);
+        defer values.deref(vm.gpa);
+        const plain = try makeTable(vm, keys, values);
+        if (n == 0) return plain;
+        defer plain.deref(vm.gpa);
+        return keyTable(vm, n, plain);
+    }
+    if (table.as != .table) return error.type;
+    if (n == 0) return table.ref();
+    const t = table.as.table;
+    const columns = t.values.as.list;
+    if (n > columns.len) return error.length;
+    const count: usize = @intCast(n);
+    const key_names = try takeItems(vm, t.keys, @intCast(count), 0);
+    defer key_names.deref(vm.gpa);
+    const key_columns = try takeItems(vm, t.values, @intCast(count), 0);
+    defer key_columns.deref(vm.gpa);
+    const value_names = try takeItems(vm, t.keys, @intCast(columns.len - count), count);
+    defer value_names.deref(vm.gpa);
+    const value_columns = try takeItems(vm, t.values, @intCast(columns.len - count), count);
+    defer value_columns.deref(vm.gpa);
+    const keys = try makeTable(vm, key_names, key_columns);
+    errdefer keys.deref(vm.gpa);
+    const values = try makeTable(vm, value_names, value_columns);
+    errdefer values.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = keys, .values = values });
+}
+
+/// `x,y` with a table: two tables of the same columns append rows, a table and a
+/// dictionary with its columns appends a row, and anything else is q's `mismatch`.
+fn joinTables(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.as == .table and y.as == .table) {
+        const xt = x.as.table;
+        const yt = y.as.table;
+        if (!xt.keys.eql(yt.keys)) return vm.failWith("mismatch");
+        const columns = try vm.allocValue(.list, xt.values.as.list.len);
+        var filled: usize = 0;
+        errdefer {
+            for (columns.as.list[0..filled]) |c| c.deref(vm.gpa);
+            vm.gpa.free(columns.as.list);
+            vm.gpa.destroy(columns);
+        }
+        for (xt.values.as.list, yt.values.as.list) |a, b| {
+            columns.as.list[filled] = try join(vm, a, b);
+            filled += 1;
+        }
+        defer columns.deref(vm.gpa);
+        return makeTable(vm, xt.keys, columns);
+    }
+    if (x.as == .table and y.as == .dict) {
+        const row = try q.unary_primitives.enlist(vm, y);
+        defer row.deref(vm.gpa);
+        return joinTables(vm, x, row);
+    }
+    return error.type;
+}
+
+/// `n#t` takes rows and `` `a`b#t `` takes columns.
+fn takeTable(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .symbol => return error.type,
+        .symbol_list => {
+            const columns = try vm.createValue(.dict, .{ .keys = y.as.table.keys.ref(), .values = y.as.table.values.ref() });
+            defer columns.deref(vm.gpa);
+            const taken = try takeDict(vm, x, columns);
+            defer taken.deref(vm.gpa);
+            return makeTable(vm, taken.as.dict.keys, taken.as.dict.values);
+        },
+        else => {
+            const t = y.as.table;
+            const picked = try vm.allocValue(.list, t.values.as.list.len);
+            var filled: usize = 0;
+            errdefer {
+                for (picked.as.list[0..filled]) |c| c.deref(vm.gpa);
+                vm.gpa.free(picked.as.list);
+                vm.gpa.destroy(picked);
+            }
+            for (t.values.as.list) |column| {
+                picked.as.list[filled] = try take(vm, x, column);
+                filled += 1;
+            }
+            defer picked.deref(vm.gpa);
+            return makeTable(vm, t.keys, picked);
+        },
+    }
+}
+
+/// `n_t` drops rows and `` `a_t `` or `` `a`b_t `` drops columns.
+fn dropTable(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    switch (x.as) {
+        .symbol, .symbol_list => {
+            const columns = try vm.createValue(.dict, .{ .keys = y.as.table.keys.ref(), .values = y.as.table.values.ref() });
+            defer columns.deref(vm.gpa);
+            const kept = try drop(vm, x, columns);
+            defer kept.deref(vm.gpa);
+            return makeTable(vm, kept.as.dict.keys, kept.as.dict.values);
+        },
+        else => {
+            const t = y.as.table;
+            const picked = try vm.allocValue(.list, t.values.as.list.len);
+            var filled: usize = 0;
+            errdefer {
+                for (picked.as.list[0..filled]) |c| c.deref(vm.gpa);
+                vm.gpa.free(picked.as.list);
+                vm.gpa.destroy(picked);
+            }
+            for (t.values.as.list) |column| {
+                picked.as.list[filled] = try drop(vm, x, column);
+                filled += 1;
+            }
+            defer picked.deref(vm.gpa);
+            return makeTable(vm, t.keys, picked);
+        },
+    }
 }

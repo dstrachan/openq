@@ -715,6 +715,14 @@ pub fn next(self: *Tokenizer) Token {
                         result.tag = .l_angle_bracket_colon;
                         self.index += 1;
                     },
+                    '=' => {
+                        result.tag = .l_angle_bracket_equal;
+                        self.index += 1;
+                    },
+                    '>' => {
+                        result.tag = .l_angle_bracket_r_angle_bracket;
+                        self.index += 1;
+                    },
                     else => {},
                 }
             },
@@ -735,6 +743,10 @@ pub fn next(self: *Tokenizer) Token {
                 switch (self.buffer[self.index]) {
                     ':' => {
                         result.tag = .r_angle_bracket_colon;
+                        self.index += 1;
+                    },
+                    '=' => {
+                        result.tag = .r_angle_bracket_equal;
                         self.index += 1;
                     },
                     else => {},
@@ -1506,7 +1518,7 @@ test "tokenize punctuation/operators/iterators" {
         .{ .semicolon, ";" },
     });
 
-    try testTokenize("!#$%&*+,-. :<=>?@^_|~0:1:2:", &.{
+    try testTokenize("!#$%&*+,-. :< = >?@^_|~0:1:2:", &.{
         .{ .bang, "!" },
         .{ .hash, "#" },
         .{ .dollar, "$" },
@@ -1530,6 +1542,14 @@ test "tokenize punctuation/operators/iterators" {
         .{ .zero_colon, "0:" },
         .{ .one_colon, "1:" },
         .{ .two_colon, "2:" },
+    });
+
+    try testTokenize("<=>=<><:>:", &.{
+        .{ .l_angle_bracket_equal, "<=" },
+        .{ .r_angle_bracket_equal, ">=" },
+        .{ .l_angle_bracket_r_angle_bracket, "<>" },
+        .{ .l_angle_bracket_colon, "<:" },
+        .{ .r_angle_bracket_colon, ">:" },
     });
     try testTokenize("!:#:$:%:&:*:+:,:-:.:::<:=:>:?:@:^:_:|:~:0::1::", &.{
         .{ .bang_colon, "!:" },

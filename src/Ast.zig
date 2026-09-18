@@ -1016,6 +1016,8 @@ pub const Node = struct {
     };
 
     pub const Select = struct {
+        /// The items of `select[n;>a]`, before the select items.
+        limit_start: ExtraIndex,
         select_start: ExtraIndex,
         by_start: ExtraIndex,
         from: Index,

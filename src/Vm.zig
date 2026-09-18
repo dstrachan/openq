@@ -7,7 +7,7 @@ const q = @import("root.zig");
 const Ast = q.Ast;
 const Node = Ast.Node;
 const Value = q.Value;
-const Symbol = Value.Symbol;
+pub const Symbol = Value.Symbol;
 const UnaryPrimitive = Value.UnaryPrimitive;
 const Operator = Value.Operator;
 const Iterator = Value.Iterator;
@@ -19,6 +19,7 @@ const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || err
     parse,
     nyi,
     assign,
+    length,
 };
 pub const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     assign,
@@ -63,9 +64,20 @@ signal_message: ?[]u8 = null,
 /// generator is not reproduced, so the numbers differ from q's for the same seed.
 seed: i32 = -314159,
 random: std.Random.Xoshiro256 = .init(@bitCast(@as(i64, -314159))),
+/// The columns a query is evaluating its expressions over, `i` included, which a symbol
+/// in a parse tree reads before any global; null outside a query.
+columns: ?*Value = null,
+/// The lambda a query is running inside, whose parameters and locals its expressions
+/// read before globals, which resolve in the lambda's namespace; null at the top level.
+scope: ?Scope = null,
 /// The environment `getenv` reads and `setenv` writes: the process's own, copied in by
 /// `main`, and empty in tests.
 environ: std.process.Environ.Map,
+
+pub const Scope = struct {
+    lambda: *const Value.Lambda,
+    slots: []?*Value,
+};
 
 const Constant = enum(u8) {
     empty_list,
@@ -168,7 +180,9 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
 
 /// `each`, `over`, `scan` and `prior` are the k lambdas q.k defines them as.
 fn seedIteratorKeywords(vm: *Vm) !void {
-    for ([_][:0]const u8{ ".q.each:{x'y}", ".q.over:{x/y}", ".q.scan:{x\\y}", ".q.prior:{x':y}" }) |source| {
+    // `.Q.a0` and `.Q.a1` are the aggregates qSQL gives one row for; q.k adds `all`,
+    // `any`, `svar`, `sdev`, `scov` and `med` to them when it loads.
+    for ([_][:0]const u8{ ".q.each:{x'y}", ".q.over:{x/y}", ".q.scan:{x\\y}", ".q.prior:{x':y}", ".Q.a0:(#:;*:;last;sum;prd;min;max;?:)", ".Q.a1:(avg;wsum;wavg;var;dev;cov;cor)" }) |source| {
         const value = vm.evalSource(source, .k, "<init>") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => unreachable,
@@ -372,6 +386,7 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .time_list,
         => return vm.indexList(func, args),
         .dict => return vm.indexDict(func, args),
+        .table => return vm.indexTable(func, args),
         .lambda => return vm.callLambda(func, args),
         .unary_primitive => |unary_primitive| {
             if (unary_primitive == .enlist and args.len > 1) return vm.enlist(args);
@@ -390,13 +405,14 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 // qSQL forms of `?` and `!` on a table are not done, and on anything else
                 // are `type`, while `!` with three or five arguments is `rank`, as in q.
                 for (args) |a| if (a.isEmpty()) return vm.project(func, args);
+                const tabular = args[0].as == .table or args[0].as == .symbol or (args[0].as == .dict and args[0].as.dict.keys.as == .table);
                 if (operator == .find) {
                     if (args.len == 3) return q.operators.vectorConditional(vm, args[0], args[1], args[2]);
-                    return if (args[0].as == .dict or args[0].as == .symbol) error.nyi else error.type;
+                    return if (tabular) q.query.select(vm, args) else error.type;
                 }
                 if (operator == .dict) {
                     if (args.len != 4) return error.rank;
-                    return if (args[0].as == .dict or args[0].as == .symbol) error.nyi else error.type;
+                    return if (tabular) q.query.update(vm, args) else error.type;
                 }
                 // Only `.` and `@` take more: their amend and trap forms.
                 if (operator != .apply and operator != .apply_at) return error.rank;
@@ -524,7 +540,8 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             // each-left, while over, scan and each-prior take one.
             for (args) |a| if (a.isEmpty()) return vm.project(func, args);
             const short = switch (func.as) {
-                .each => |d| args.len < d.value.rank(),
+                // `.`, `@`, `?` and `!` apply with two: `(@')[d;`a`b]` is not a projection.
+                .each => |d| args.len < minRank(d.value),
                 // With data on the left (`" "\:x`) one argument is the whole application.
                 inline .each_right, .each_left => |d| isFunction(d.value) and args.len < 2 and d.value.rank() >= 2,
                 else => false,
@@ -602,6 +619,356 @@ pub fn errorText(vm: *Vm, err: RunError) Allocator.Error!*Value {
     const value = try vm.allocValue(.char_list, text.len);
     @memcpy(value.as.char_list, text);
     return value;
+}
+
+/// The parse trees of the qSQL statements as q builds them: `select` is
+/// `(?;t;where;by;aggregates[;n[;sort]])` with `where` a list of trees or `()`, `by` `0b`,
+/// `1b` for `distinct` or a dictionary of names to trees, and the aggregates a dictionary
+/// of names to trees or `()` for all columns; `exec` is `(?;t;where;by;spec)` with `by`
+/// `()` or the enlisted tree and `spec` the enlisted tree or a dictionary; `update` is
+/// `(!;t;where;0b;dictionary)`; `delete` of rows `(!;t;where;0b;`symbol$())` and of columns
+/// `(!;t;();0b;,names)`.
+pub fn queryTree(vm: *Vm, node: Node.Index) Error!*Value {
+    const tree = vm.tree;
+    const tag = tree.nodeTag(node);
+    var items: std.ArrayList(*Value) = .empty;
+    defer items.deinit(vm.gpa);
+    errdefer for (items.items) |v| v.deref(vm.gpa);
+    if (tag == .delete_cols) {
+        const spans = tree.extraData(tree.nodeData(node).extra, Node.DeleteCols);
+        const names = tree.extraDataSlice(.{ .start = spans.select_start, .end = spans.select_end }, Node.Index);
+        try items.append(vm.gpa, vm.getOperator(.dict));
+        try items.append(vm.gpa, try vm.parseNode(spans.from));
+        try items.append(vm.gpa, vm.getConstant(.empty_list));
+        try items.append(vm.gpa, try vm.createValue(.boolean, false));
+        const list = try vm.allocValue(.symbol_list, names.len);
+        errdefer list.deref(vm.gpa);
+        for (list.as.symbol_list, names) |*slot, n| slot.* = try vm.intern(tree.tokenSlice(tree.nodeMainToken(n)));
+        const wrapped = try vm.allocValue(.list, 1);
+        wrapped.as.list[0] = list;
+        try items.append(vm.gpa, wrapped);
+        return vm.createValue(.list, try items.toOwnedSlice(vm.gpa));
+    }
+    if (tag == .delete_rows) {
+        const spans = tree.extraData(tree.nodeData(node).extra, Node.DeleteRows);
+        try items.append(vm.gpa, vm.getOperator(.dict));
+        try items.append(vm.gpa, try vm.parseNode(spans.from));
+        try items.append(vm.gpa, try vm.whereTree(tree.extraDataSlice(.{ .start = spans.where_start, .end = spans.where_end }, Node.Index)));
+        try items.append(vm.gpa, try vm.createValue(.boolean, false));
+        try items.append(vm.gpa, try vm.allocValue(.symbol_list, 0));
+        return vm.createValue(.list, try items.toOwnedSlice(vm.gpa));
+    }
+    const spans: Node.Select = switch (tag) {
+        .select => tree.extraData(tree.nodeData(node).extra, Node.Select),
+        .exec => blk: {
+            const e = tree.extraData(tree.nodeData(node).extra, Node.Exec);
+            break :blk .{ .limit_start = e.select_start, .select_start = e.select_start, .by_start = e.by_start, .from = e.from, .where_start = e.where_start, .where_end = e.where_end };
+        },
+        .update => blk: {
+            const u = tree.extraData(tree.nodeData(node).extra, Node.Update);
+            break :blk .{ .limit_start = u.select_start, .select_start = u.select_start, .by_start = u.by_start, .from = u.from, .where_start = u.where_start, .where_end = u.where_end };
+        },
+        else => unreachable,
+    };
+    const limits = tree.extraDataSlice(.{ .start = spans.limit_start, .end = spans.select_start }, Node.Index);
+    var selected = tree.extraDataSlice(.{ .start = spans.select_start, .end = spans.by_start }, Node.Index);
+    const by = tree.extraDataSlice(.{ .start = spans.by_start, .end = spans.where_start }, Node.Index);
+    const where = tree.extraDataSlice(.{ .start = spans.where_start, .end = spans.where_end }, Node.Index);
+
+    try items.append(vm.gpa, vm.getOperator(if (tag == .update) .dict else .find));
+    try items.append(vm.gpa, try vm.parseNode(spans.from));
+    try items.append(vm.gpa, try vm.whereTree(where));
+
+    // `select distinct a` is a select by `1b`.
+    var distinct = false;
+    if (tag == .select and selected.len > 0 and tree.nodeTag(selected[0]) == .apply_unary) {
+        const f, _ = tree.nodeData(selected[0]).node_and_node;
+        if ((tree.nodeTag(f) == .keyword or tree.nodeTag(f) == .identifier) and std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(f)), "distinct")) distinct = true;
+    }
+    if (tag == .exec) {
+        try items.append(vm.gpa, if (by.len == 0) vm.getConstant(.empty_list) else if (by.len == 1) try vm.enlistTree(by[0]) else try vm.namedTrees(by));
+        try items.append(vm.gpa, if (selected.len == 0) vm.getConstant(.empty_list) else if (selected.len == 1) try vm.enlistTree(selected[0]) else try vm.namedTrees(selected));
+        return vm.createValue(.list, try items.toOwnedSlice(vm.gpa));
+    }
+    try items.append(vm.gpa, if (by.len == 0) try vm.createValue(.boolean, distinct) else try vm.namedTrees(by));
+    if (distinct) {
+        // Replace the first item by the argument of `distinct`.
+        const copy = try vm.gpa.dupe(Node.Index, selected);
+        defer vm.gpa.free(copy);
+        _, const argument = tree.nodeData(selected[0]).node_and_node;
+        copy[0] = argument;
+        try items.append(vm.gpa, try vm.namedTrees(copy));
+        selected = &.{};
+    } else try items.append(vm.gpa, if (selected.len == 0) vm.getConstant(.empty_list) else try vm.namedTrees(selected));
+    // `select[n]`, `select[n;>a]` and `select[>a]`: a count, then the enlisted sort tree.
+    if (limits.len > 0) {
+        const first = try vm.parseNode(limits[0]);
+        if (isSortTree(first)) {
+            errdefer first.deref(vm.gpa);
+            // `select[>a;<b]` is a length error, as in q.
+            if (limits.len > 1) return error.length;
+            try items.append(vm.gpa, try vm.createValue(.long, @backingInt(Value.Long.inf)));
+            try items.append(vm.gpa, try vm.wrapTree(first));
+        } else {
+            try items.append(vm.gpa, first);
+            if (limits.len > 1) {
+                const sort = try vm.parseNode(limits[1]);
+                errdefer sort.deref(vm.gpa);
+                try items.append(vm.gpa, try vm.wrapTree(sort));
+            }
+        }
+    }
+    return vm.createValue(.list, try items.toOwnedSlice(vm.gpa));
+}
+
+/// Every expression node of a qSQL statement: limits, select items, by items, the source
+/// and the where constraints, for a compiler scanning the names they use.
+pub fn queryNodes(vm: *Vm, node: Node.Index, list: *std.ArrayList(Node.Index)) Allocator.Error!void {
+    const tree = vm.tree;
+    switch (tree.nodeTag(node)) {
+        .delete_cols => {
+            const spans = tree.extraData(tree.nodeData(node).extra, Node.DeleteCols);
+            try list.append(vm.gpa, spans.from);
+        },
+        .delete_rows => {
+            const spans = tree.extraData(tree.nodeData(node).extra, Node.DeleteRows);
+            try list.append(vm.gpa, spans.from);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.where_start, .end = spans.where_end }, Node.Index));
+        },
+        .select => {
+            const spans = tree.extraData(tree.nodeData(node).extra, Node.Select);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.limit_start, .end = spans.where_start }, Node.Index));
+            try list.append(vm.gpa, spans.from);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.where_start, .end = spans.where_end }, Node.Index));
+        },
+        .exec => {
+            const spans = tree.extraData(tree.nodeData(node).extra, Node.Exec);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.select_start, .end = spans.where_start }, Node.Index));
+            try list.append(vm.gpa, spans.from);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.where_start, .end = spans.where_end }, Node.Index));
+        },
+        .update => {
+            const spans = tree.extraData(tree.nodeData(node).extra, Node.Update);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.select_start, .end = spans.where_start }, Node.Index));
+            try list.append(vm.gpa, spans.from);
+            try list.appendSlice(vm.gpa, tree.extraDataSlice(.{ .start = spans.where_start, .end = spans.where_end }, Node.Index));
+        },
+        else => unreachable,
+    }
+}
+
+/// The source expression of a qSQL statement, the `t` of `from t`.
+pub fn querySource(vm: *Vm, node: Node.Index) Node.Index {
+    const tree = vm.tree;
+    return switch (tree.nodeTag(node)) {
+        .delete_cols => tree.extraData(tree.nodeData(node).extra, Node.DeleteCols).from,
+        .delete_rows => tree.extraData(tree.nodeData(node).extra, Node.DeleteRows).from,
+        .select => tree.extraData(tree.nodeData(node).extra, Node.Select).from,
+        .exec => tree.extraData(tree.nodeData(node).extra, Node.Exec).from,
+        .update => tree.extraData(tree.nodeData(node).extra, Node.Update).from,
+        else => unreachable,
+    };
+}
+
+/// Whether a tree is `(>:;e)` or `(<:;e)`, the sort of a `select[>a]`.
+fn isSortTree(tree_value: *Value) bool {
+    if (tree_value.as != .list or tree_value.as.list.len != 2) return false;
+    const head = tree_value.as.list[0];
+    return head.as == .unary_primitive and (head.as.unary_primitive == .desc or head.as.unary_primitive == .asc);
+}
+
+/// The tree `(';~:;e)` of `<=`, `>=` and `<>`, which evaluates to the composition of
+/// `not` with the operator; `parse "a<=1"` shows it as `((';~:;>);`a;1)`.
+fn negated(vm: *Vm, operator: Operator) Error!*Value {
+    const list = try vm.allocValue(.list, 3);
+    errdefer comptime unreachable;
+    list.as.list[0] = vm.getIterator(.each);
+    list.as.list[1] = vm.getUnaryPrimitive(.not);
+    list.as.list[2] = vm.getOperator(operator);
+    return list;
+}
+
+/// Whether a node is `<=`, `>=` or `<>`, whose tree is a composition to evaluate when a
+/// lambda wants the value itself.
+pub fn isNegatedComparison(tag: Node.Tag) bool {
+    return tag == .l_angle_bracket_equal or tag == .r_angle_bracket_equal or tag == .l_angle_bracket_r_angle_bracket;
+}
+
+/// A node's value for a lambda's constant: its tree, except that `<=`, `>=` and `<>`
+/// give their composition.
+pub fn constantOf(vm: *Vm, node: Node.Index, unary: bool) Error!*Value {
+    const tree = if (unary) try vm.parseUnaryNode(node) else try vm.parseNode(node);
+    if (!isNegatedComparison(vm.tree.nodeTag(node))) return tree;
+    defer tree.deref(vm.gpa);
+    return vm.eval(tree) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+}
+
+/// The where clause: the list of constraint trees quoted (`,,(>;`a;1)`), or `()`.
+fn whereTree(vm: *Vm, nodes: []const Node.Index) Error!*Value {
+    if (nodes.len == 0) return vm.getConstant(.empty_list);
+    const list = try vm.treeList(nodes);
+    errdefer list.deref(vm.gpa);
+    return vm.wrapTree(list);
+}
+
+/// The trees of `nodes` as a list, `()` for none.
+fn treeList(vm: *Vm, nodes: []const Node.Index) Error!*Value {
+    if (nodes.len == 0) return vm.getConstant(.empty_list);
+    const list = try vm.allocValue(.list, nodes.len);
+    var filled: usize = 0;
+    errdefer {
+        for (list.as.list[0..filled]) |t| t.deref(vm.gpa);
+        vm.gpa.free(list.as.list);
+        vm.gpa.destroy(list);
+    }
+    for (nodes) |n| {
+        list.as.list[filled] = try vm.parseNode(n);
+        filled += 1;
+    }
+    return list;
+}
+
+/// One tree enlisted, as `exec a` holds `,`a` and `exec distinct a` `,(?:;`a)`.
+fn enlistTree(vm: *Vm, node: Node.Index) Error!*Value {
+    const t = try vm.parseNode(node);
+    errdefer t.deref(vm.gpa);
+    return vm.wrapTree(t);
+}
+
+/// A one-item general list holding a tree, taking the reference.
+fn wrapTree(vm: *Vm, t: *Value) Error!*Value {
+    const list = try vm.allocValue(.list, 1);
+    list.as.list[0] = t;
+    return list;
+}
+
+/// A dictionary of column names to trees, named as q names them: `a:e` is `a`, a name
+/// itself, an application whose first operand is a name (but not `i`) that name, and
+/// anything else `x`; repeats take a number (`a`, `a1`).
+fn namedTrees(vm: *Vm, nodes: []const Node.Index) Error!*Value {
+    const tree = vm.tree;
+    const names = try vm.allocValue(.symbol_list, nodes.len);
+    errdefer names.deref(vm.gpa);
+    const trees = try vm.allocValue(.list, nodes.len);
+    var filled: usize = 0;
+    errdefer {
+        for (trees.as.list[0..filled]) |t| t.deref(vm.gpa);
+        vm.gpa.free(trees.as.list);
+        vm.gpa.destroy(trees);
+    }
+    var buffer: [40]u8 = undefined;
+    for (nodes, 0..) |column, k| {
+        var expr_node = column;
+        var name: []const u8 = "";
+        if (tree.nodeTag(column) == .apply_binary) {
+            const lhs, const maybe_rhs = tree.nodeData(column).node_and_opt_node;
+            const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(column)));
+            if (tree.nodeTag(op) == .colon and tree.nodeTag(lhs) == .identifier) if (maybe_rhs.unwrap()) |rhs| {
+                name = tree.tokenSlice(tree.nodeMainToken(lhs));
+                expr_node = rhs;
+            };
+        }
+        const expr = try vm.parseNode(expr_node);
+        errdefer expr.deref(vm.gpa);
+        if (name.len == 0) name = columnName(vm, expr);
+        // Repeated names count up.
+        var candidate = name;
+        var n: usize = 1;
+        while (std.mem.findScalar(Symbol, names.as.symbol_list[0..k], try vm.intern(candidate)) != null) : (n += 1) {
+            candidate = std.fmt.bufPrint(&buffer, "{s}{d}", .{ name, n }) catch name;
+        }
+        names.as.symbol_list[k] = try vm.intern(candidate);
+        trees.as.list[filled] = expr;
+        filled += 1;
+    }
+    // Symbols alone make a symbol list, as `exec a,b` holds `` `a`b!`a`b ``.
+    const values = vm.enlist(trees.as.list) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+    trees.deref(vm.gpa);
+    errdefer values.deref(vm.gpa);
+    return vm.createValue(.dict, .{ .keys = names, .values = values });
+}
+
+fn columnName(vm: *Vm, expr: *Value) []const u8 {
+    const named: ?Symbol = switch (expr.as) {
+        .symbol => |s| s,
+        .list => |l| if (l.len > 1 and l[1].as == .symbol) l[1].as.symbol else null,
+        else => null,
+    };
+    if (named) |s| {
+        const text = vm.internedString(s);
+        if (!std.mem.eql(u8, text, "i") and text.len > 0) return text;
+    }
+    return "x";
+}
+
+/// The parse tree of a table from column nodes: `(+:;(!;,names;(enlist;e1;e2)))`. A column
+/// `a:e` is named `a`, a bare name `a` names itself, and anything else takes the name of
+/// its first operand when that is a name, or `x`.
+fn tableTree(vm: *Vm, nodes: []const Node.Index) Error!*Value {
+    const tree = vm.tree;
+    const gpa = vm.gpa;
+    const names = try vm.allocValue(.symbol_list, nodes.len);
+    errdefer names.deref(gpa);
+    const exprs = try vm.allocValue(.list, nodes.len + 1);
+    var filled: usize = 1;
+    errdefer {
+        for (exprs.as.list[1..filled]) |e| e.deref(gpa);
+        vm.gpa.free(exprs.as.list);
+        vm.gpa.destroy(exprs);
+    }
+    exprs.as.list[0] = vm.getUnaryPrimitive(.enlist);
+    var unnamed: usize = 0;
+    var buffer: [16]u8 = undefined;
+    for (nodes, 0..) |column, k| {
+        var expr_node = column;
+        var name: []const u8 = "";
+        switch (tree.nodeTag(column)) {
+            .identifier => name = tree.tokenSlice(tree.nodeMainToken(column)),
+            .apply_binary => {
+                const lhs, const maybe_rhs = tree.nodeData(column).node_and_opt_node;
+                const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(column)));
+                if (tree.nodeTag(op) == .colon and tree.nodeTag(lhs) == .identifier) {
+                    if (maybe_rhs.unwrap()) |rhs| {
+                        name = tree.tokenSlice(tree.nodeMainToken(lhs));
+                        expr_node = rhs;
+                    }
+                } else if (tree.nodeTag(lhs) == .identifier) name = tree.tokenSlice(tree.nodeMainToken(lhs));
+            },
+            else => {},
+        }
+        if (name.len == 0) {
+            name = if (unnamed == 0) "x" else std.fmt.bufPrint(&buffer, "x{d}", .{unnamed}) catch unreachable;
+            unnamed += 1;
+        }
+        names.as.symbol_list[k] = try vm.intern(name);
+        exprs.as.list[filled] = try vm.parseNode(expr_node);
+        filled += 1;
+    }
+    const flipped = try vm.allocValue(.list, 2);
+    errdefer {
+        vm.gpa.free(flipped.as.list);
+        vm.gpa.destroy(flipped);
+    }
+    const dict_tree = try vm.allocValue(.list, 3);
+    errdefer {
+        vm.gpa.free(dict_tree.as.list);
+        vm.gpa.destroy(dict_tree);
+    }
+    const wrapped = try vm.allocValue(.list, 1);
+    errdefer comptime unreachable;
+    wrapped.as.list[0] = names;
+    dict_tree.as.list[0] = vm.getOperator(.dict);
+    dict_tree.as.list[1] = wrapped;
+    dict_tree.as.list[2] = exprs;
+    flipped.as.list[0] = vm.getUnaryPrimitive(.flip);
+    flipped.as.list[1] = dict_tree;
+    return flipped;
 }
 
 /// The parse tree `(op;lhs)` of a verb projected on its left operand, as `+[1]`.
@@ -744,6 +1111,7 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
             .each_left,
             .composition,
             .dict,
+            .table,
             => break :is_vector false,
             .boolean,
             .byte,
@@ -825,9 +1193,14 @@ pub fn enlist(vm: *Vm, args: []*Value) !*Value {
                 for (@field(value.as, @tagName(list_tag)), args) |*v, a| v.* = @field(a.as, @tagName(tag));
                 return value;
             },
-            .dict => unreachable,
+            .dict, .table => unreachable,
         }
     } else {
+        // A list of dictionaries with one set of symbol keys, in one order, is a table.
+        if (args[0].as == .dict and args[0].as.dict.keys.as == .symbol_list and args[0].as.dict.keys.count() > 0) like: {
+            for (args[1..]) |a| if (a.as != .dict or !a.as.dict.keys.eql(args[0].as.dict.keys)) break :like;
+            return vm.tableOfRows(args);
+        }
         const list = try vm.gpa.alloc(*Value, args.len);
         errdefer {
             for (list) |v| v.deref(vm.gpa);
@@ -917,7 +1290,9 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
     switch (x.as) {
         .list => |value| {
             if (value.len == 0) return vm.getConstant(.empty_list);
-            if (value.len == 1 and value[0].as == .symbol_list) return value[0].ref();
+            // A one-item list quotes its item: `parse "`a"` is `,`a` and a constant list
+            // in a tree is `enlist` applied, so `eval enlist x` is `x` unevaluated.
+            if (value.len == 1) return value[0].ref();
 
             if (value[0].as == .char and value[0].as.char == ';') {
                 for (value[1 .. value.len - 1]) |val| {
@@ -977,10 +1352,19 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
             }
             return vm.applyImpl(items[0], items[1..]);
         },
-        .symbol => return q.unary_primitives.value(vm, x),
+        .symbol => |name| {
+            if (vm.columns) |columns| if (try vm.keyPosition(columns.as.dict.keys, x)) |i| return q.operators.itemAt(vm, columns.as.dict.values, i);
+            if (vm.scope) |scope| {
+                if (std.mem.findScalar(Symbol, scope.lambda.params, name)) |i| return (scope.slots[i] orelse return error.identifier).ref();
+                if (std.mem.findScalar(Symbol, scope.lambda.locals, name)) |i| return (scope.slots[scope.lambda.params.len + i] orelse return error.identifier).ref();
+                return vm.readGlobalIn(name, scope.lambda.namespace);
+            }
+            return q.unary_primitives.value(vm, x);
+        },
         .symbol_list => |value| {
-            assert(value.len == 1);
-            return vm.createValue(.symbol, value[0]);
+            if (value.len == 1) return vm.createValue(.symbol, value[0]);
+            if (value.len == 0) return x.ref();
+            return error.type;
         },
         else => return x.ref(),
     }
@@ -1221,42 +1605,6 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             list.as.list = values.toOwnedSliceAssert();
             return list;
         },
-        .table_literal => {
-            const table = tree.extraData(tree.nodeData(node).extra_and_token[0], Node.Table);
-
-            const table_keys = tree.extraDataSlice(.{
-                .start = table.keys_start,
-                .end = table.columns_start,
-            }, Node.Index);
-            const maybe_key_table = if (table_keys.len == 0) null else try vm.parseTable(table_keys);
-            defer if (maybe_key_table) |key_table| key_table.deref(vm.gpa);
-
-            const table_values = tree.extraDataSlice(.{
-                .start = table.columns_start,
-                .end = table.columns_end,
-            }, Node.Index);
-            assert(table_values.len > 0);
-            const value_table = try vm.parseTable(table_values);
-            defer value_table.deref(vm.gpa);
-
-            if (maybe_key_table) |key_table| {
-                var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 3);
-                defer values.deinit(vm.gpa);
-                errdefer for (values.items) |v| v.deref(vm.gpa);
-
-                values.appendAssumeCapacity(vm.getOperator(.dict));
-                values.appendAssumeCapacity(key_table.ref());
-                values.appendAssumeCapacity(value_table.ref());
-
-                const list = try vm.createValue(.list, &.{});
-                errdefer comptime unreachable;
-                list.as.list = values.toOwnedSliceAssert();
-                return list;
-            } else {
-                return value_table.ref();
-            }
-        },
-
         .lambda => {
             var compiler: Compiler = .init(vm, tree);
             defer compiler.deinit();
@@ -1290,10 +1638,12 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
         .caret => return vm.getOperator(.fill),
         .equal => return vm.getOperator(.equal),
         .l_angle_bracket => return vm.getOperator(.less_than),
-        .l_angle_bracket_equal => @panic("NYI"), // not greater
-        .l_angle_bracket_r_angle_bracket => @panic("NYI"), // not equal
+        // `<=`, `>=` and `<>` are the compositions `'[~:;>]`, `'[~:;<]` and `'[~:;=]`, as
+        // q has them (`value (<=)` is `(~:;>)` and they display as `~>`).
+        .l_angle_bracket_equal => return vm.negated(.greater_than),
+        .l_angle_bracket_r_angle_bracket => return vm.negated(.equal),
         .r_angle_bracket => return vm.getOperator(.greater_than),
-        .r_angle_bracket_equal => @panic("NYI"), // not less
+        .r_angle_bracket_equal => return vm.negated(.less_than),
         .dollar => return vm.getOperator(.cast),
         .comma => return vm.getOperator(.join),
         .hash => return vm.getOperator(.take),
@@ -1474,6 +1824,25 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             symbol_list.as.symbol_list[0] = symbol;
             return symbol_list;
         },
+        // A table literal is the flip of a column dictionary, `(+:;(!;,`a`b;(enlist;e1;e2)))`
+        // as q parses it, and a keyed one `!` of the key and value tables.
+        .table_literal => {
+            const extra_index, _ = tree.nodeData(node).extra_and_token;
+            const spans = tree.extraData(extra_index, Node.Table);
+            const key_nodes = tree.extraDataSlice(.{ .start = spans.keys_start, .end = spans.columns_start }, Node.Index);
+            const column_nodes = tree.extraDataSlice(.{ .start = spans.columns_start, .end = spans.columns_end }, Node.Index);
+            const columns = try vm.tableTree(column_nodes);
+            if (key_nodes.len == 0) return columns;
+            errdefer columns.deref(gpa);
+            const keys = try vm.tableTree(key_nodes);
+            errdefer keys.deref(gpa);
+            const keyed = try vm.allocValue(.list, 3);
+            errdefer comptime unreachable;
+            keyed.as.list[0] = vm.getOperator(.dict);
+            keyed.as.list[1] = keys;
+            keyed.as.list[2] = columns;
+            return keyed;
+        },
         .symbol_list_literal => {
             const first_token = tree.nodeMainToken(node);
             const last_token = tree.nodeData(node).token;
@@ -1523,12 +1892,7 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
             }
         },
 
-        .select,
-        .exec,
-        .update,
-        .delete_rows,
-        .delete_cols,
-        => unreachable,
+        .select, .exec, .update, .delete_rows, .delete_cols => return vm.queryTree(node),
     }
 }
 
@@ -1561,116 +1925,6 @@ pub fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
         .tilde => vm.getUnaryPrimitive(.not),
         else => vm.parseNode(node),
     };
-}
-
-fn parseTable(vm: *Vm, nodes: []const Node.Index) !*Value {
-    assert(nodes.len > 0);
-
-    var keys: std.ArrayList(Symbol) = try .initCapacity(vm.gpa, nodes.len);
-    defer keys.deinit(vm.gpa);
-
-    var values: std.ArrayList(*Value) = try .initCapacity(vm.gpa, nodes.len);
-    defer values.deinit(vm.gpa);
-    errdefer for (values.items) |v| v.deref(vm.gpa);
-
-    var i: usize = 0;
-    for (nodes) |n| {
-        const a = try vm.parseNode(n);
-        defer a.deref(vm.gpa);
-
-        switch (a.as) {
-            .list => |list| if (list.len == 2 and list[1].as == .symbol) {
-                keys.appendAssumeCapacity(list[1].as.symbol);
-                values.appendAssumeCapacity(a.ref());
-            } else if (list.len == 3 and list[1].as == .symbol) {
-                keys.appendAssumeCapacity(list[1].as.symbol);
-                values.appendAssumeCapacity(list[2].ref());
-            } else unreachable,
-            .symbol => {
-                keys.appendAssumeCapacity(a.as.symbol);
-                values.appendAssumeCapacity(a.ref());
-            },
-            else => {
-                var buf: [8]u8 = undefined;
-                const name = if (i > 0)
-                    std.fmt.bufPrint(&buf, "x{d}", .{i}) catch "x"
-                else
-                    "x";
-                i += 1;
-
-                keys.appendAssumeCapacity(try vm.intern(name));
-                values.appendAssumeCapacity(a.ref());
-            },
-        }
-    }
-
-    assert(keys.items.len == values.items.len);
-
-    const keys_value = keys: {
-        const symbol_list = try vm.createValue(.symbol_list, &.{});
-        defer symbol_list.deref(vm.gpa);
-
-        symbol_list.as.symbol_list = keys.toOwnedSliceAssert();
-
-        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 1);
-        defer list.deinit(vm.gpa);
-        errdefer for (list.items) |v| v.deref(vm.gpa);
-
-        list.appendAssumeCapacity(symbol_list.ref());
-
-        const value = try vm.createValue(.list, &.{});
-        errdefer comptime unreachable;
-        value.as.list = list.toOwnedSliceAssert();
-        break :keys value;
-    };
-    defer keys_value.deref(vm.gpa);
-
-    const values_value = values: {
-        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, values.items.len + 1);
-        defer list.deinit(vm.gpa);
-        errdefer for (list.items) |v| v.deref(vm.gpa);
-
-        list.appendAssumeCapacity(vm.getUnaryPrimitive(.enlist));
-        list.appendSliceAssumeCapacity(values.items);
-
-        const value = try vm.createValue(.list, &.{});
-        errdefer comptime unreachable;
-        value.as.list = list.toOwnedSliceAssert();
-        break :values value;
-    };
-    defer values_value.deref(vm.gpa);
-
-    const dict = dict: {
-        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 3);
-        defer list.deinit(vm.gpa);
-        errdefer for (list.items) |v| v.deref(vm.gpa);
-
-        list.appendAssumeCapacity(vm.getOperator(.dict));
-        list.appendAssumeCapacity(keys_value.ref());
-        list.appendAssumeCapacity(values_value.ref());
-
-        const value = try vm.createValue(.list, &.{});
-        errdefer comptime unreachable;
-        value.as.list = list.toOwnedSliceAssert();
-        break :dict value;
-    };
-    defer dict.deref(vm.gpa);
-
-    const flip = flip: {
-        var list: std.ArrayList(*Value) = try .initCapacity(vm.gpa, 2);
-        defer list.deinit(vm.gpa);
-        errdefer for (list.items) |v| v.deref(vm.gpa);
-
-        list.appendAssumeCapacity(vm.getUnaryPrimitive(.flip));
-        list.appendAssumeCapacity(dict.ref());
-
-        const value = try vm.createValue(.list, &.{});
-        errdefer comptime unreachable;
-        value.as.list = list.toOwnedSliceAssert();
-        break :flip value;
-    };
-    errdefer comptime unreachable;
-    return flip;
 }
 
 /// Runs a system command given as the text after its backslash, as `\d .Q` or `value "\\d"` would.
@@ -1946,6 +2200,14 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                     pc = pc + std.mem.readInt(u16, code[pc..][0..2], .little);
                 }
             },
+            .query => {
+                const query = stack.pop().?;
+                defer query.deref(vm.gpa);
+                const saved_scope = vm.scope;
+                vm.scope = .{ .lambda = &lambda, .slots = slots };
+                defer vm.scope = saved_scope;
+                try stack.append(vm.gpa, try vm.eval(query));
+            },
             .call => {
                 const count = code[pc];
                 pc += 1;
@@ -2007,6 +2269,30 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
 }
 
 /// The array index of a q slot: parameters are slots 1 to 8, locals start at 9.
+/// The fewest arguments a function applies with: two for `.`, `@`, `?` and `!`, whose
+/// three- and four-argument forms are the amend, trap, conditional and functional ones.
+fn minRank(value: *Value) usize {
+    const flexible = struct {
+        fn of(v: *Value) bool {
+            return v.as == .operator and switch (v.as.operator) {
+                .apply, .apply_at, .find, .dict => true,
+                else => false,
+            };
+        }
+    }.of;
+    if (flexible(value)) return 2;
+    // A projection of one, `x@`, wants the rest of the two (or its holes, if more).
+    if (value.as == .projection and flexible(value.as.projection.callee)) {
+        var holes: usize = 0;
+        for (value.as.projection.args) |a| {
+            if (a.isEmpty()) holes += 1;
+        }
+        const given = value.as.projection.args.len - holes;
+        return @max(holes, 2 -| given);
+    }
+    return value.rank();
+}
+
 fn slotIndex(lambda: Value.Lambda, slot: u8) usize {
     return if (slot <= 8) slot - 1 else lambda.params.len + slot - 9;
 }
@@ -2038,6 +2324,7 @@ fn applyAmend(vm: *Vm, function: *Value, x: *Value, y: ?*Value) RunError!*Value 
 
 fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, value: ?*Value) RunError!*Value {
     if (old.as == .dict) return vm.amendDictAt(old, index, dim, function, value);
+    if (old.as == .table) return vm.amendTableAt(old, index, dim, function, value);
     if (!old.isList()) return error.type;
     const at = try q.operators.itemAt(vm, index, dim);
     defer at.deref(vm.gpa);
@@ -2077,6 +2364,38 @@ fn amendAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, va
         result = next;
     }
     return result;
+}
+
+/// Amending a table: a column name amends the column dictionary (a new column is added,
+/// an atom spread to the rows), and a row index followed by a column name amends that
+/// cell, as `.[t;(0;`a);:;9]`.
+fn amendTableAt(vm: *Vm, old: *Value, index: *Value, dim: usize, function: *Value, value: ?*Value) RunError!*Value {
+    const at = try q.operators.itemAt(vm, index, dim);
+    defer at.deref(vm.gpa);
+    const columns = try vm.createValue(.dict, .{ .keys = old.as.table.keys.ref(), .values = old.as.table.values.ref() });
+    defer columns.deref(vm.gpa);
+    switch (at.as) {
+        .symbol, .symbol_list => {
+            const amended = try vm.amendDictAt(columns, index, dim, function, value);
+            defer amended.deref(vm.gpa);
+            return q.operators.makeTable(vm, amended.as.dict.keys, amended.as.dict.values);
+        },
+        else => {
+            if (dim + 1 >= index.count()) return error.nyi;
+            const column = try q.operators.itemAt(vm, index, dim + 1);
+            defer column.deref(vm.gpa);
+            if (column.as != .symbol) return error.type;
+            // Swap the indices: the column first, then the row within it.
+            const swapped = try vm.allocValue(.list, index.count() - dim);
+            defer swapped.deref(vm.gpa);
+            swapped.as.list[0] = column.ref();
+            swapped.as.list[1] = at.ref();
+            for (swapped.as.list[2..], 0..) |*slot, k| slot.* = try q.operators.itemAt(vm, index, dim + 2 + k);
+            const amended = try vm.amendDictAt(columns, swapped, 0, function, value);
+            defer amended.deref(vm.gpa);
+            return q.operators.makeTable(vm, amended.as.dict.keys, amended.as.dict.values);
+        },
+    }
 }
 
 /// Amending a dictionary by key: an existing key's value is amended in place, a missing
@@ -2207,6 +2526,98 @@ fn withItem(vm: *Vm, list: *Value, i: usize, item: *Value) RunError!*Value {
     }
 }
 
+/// A table from rows that are dictionaries over one set of symbol keys, each column the
+/// unified values of one key.
+fn tableOfRows(vm: *Vm, rows: []*Value) RunError!*Value {
+    const keys = rows[0].as.dict.keys;
+    const n = keys.count();
+    const columns = try vm.allocValue(.list, n);
+    var filled: usize = 0;
+    errdefer {
+        for (columns.as.list[0..filled]) |c| c.deref(vm.gpa);
+        vm.gpa.free(columns.as.list);
+        vm.gpa.destroy(columns);
+    }
+    const cells = try vm.gpa.alloc(*Value, rows.len);
+    defer vm.gpa.free(cells);
+    for (0..n) |k| {
+        var got: usize = 0;
+        defer for (cells[0..got]) |c| c.deref(vm.gpa);
+        for (rows) |row| {
+            cells[got] = try q.operators.itemAt(vm, row.as.dict.values, k);
+            got += 1;
+        }
+        columns.as.list[filled] = try vm.enlist(cells);
+        filled += 1;
+    }
+    defer columns.deref(vm.gpa);
+    return q.operators.makeTable(vm, keys, columns);
+}
+
+/// Indexing a table, as `t[i]`, `t[i;c]` or `t c`: a symbol reads a column (a missing
+/// one the null shaped like the first column) and a symbol list the columns; an integer
+/// reads a row as a dictionary (a row of nulls past the end) and an integer list the
+/// rows as a table; `::` or a hole keeps the table; further indices apply to what was
+/// read, so `t[0;`a]` is an item and `t[0 1;`a]` a column. A symbol may only come first
+/// on its own: `t[`a;0]` is `type`.
+fn indexTable(vm: *Vm, table: *Value, args: []*Value) RunError!*Value {
+    const t = table.as.table;
+    const first = args[0];
+    const rest = args[1..];
+    if (first.isEmpty() or (first.as == .unary_primitive and first.as.unary_primitive == .identity)) {
+        if (rest.len == 0) return table.ref();
+        // After `::` only a column name may follow: `t[;0]` is `type`.
+        if (rest[0].as != .symbol and rest[0].as != .symbol_list) return error.type;
+        return vm.indexTable(table, rest);
+    }
+    switch (first.as) {
+        .symbol, .symbol_list => {
+            if (rest.len > 0) return error.type;
+            const columns = try vm.createValue(.dict, .{ .keys = t.keys.ref(), .values = t.values.ref() });
+            defer columns.deref(vm.gpa);
+            return vm.indexDict(columns, args);
+        },
+        .boolean, .byte, .short, .int, .long => {
+            const i: ?usize = switch (first.as) {
+                .boolean => |b| @intFromBool(b),
+                .byte => |b| b,
+                .short => |v| if (v == @backingInt(Value.Short.null) or v < 0) null else @intCast(v),
+                .int => |v| if (v == @backingInt(Value.Int.null) or v < 0) null else @intCast(v),
+                .long => |v| if (v == @backingInt(Value.Long.null) or v < 0) null else @intCast(v),
+                else => unreachable,
+            };
+            const row = try q.operators.rowAt(vm, table, i orelse std.math.maxInt(usize));
+            if (rest.len == 0) return row;
+            defer row.deref(vm.gpa);
+            return vm.applyImpl(row, rest);
+        },
+        .list => |items| {
+            if (items.len == 0) return vm.allocValue(.list, 0);
+            return error.type;
+        },
+        .boolean_list, .byte_list, .short_list, .int_list, .long_list => {
+            if (rest.len == 0) return q.operators.tableRows(vm, table, first);
+            // Further indices apply to each row: `t[0 1;`a`b]` is `((1;`x);(2;`y))`.
+            const n = first.count();
+            const results = try vm.gpa.alloc(*Value, n);
+            defer vm.gpa.free(results);
+            var done: usize = 0;
+            defer for (results[0..done]) |r| r.deref(vm.gpa);
+            for (0..n) |k| {
+                const which = try q.operators.itemAt(vm, first, k);
+                defer which.deref(vm.gpa);
+                var one = [_]*Value{which};
+                const row = try vm.indexTable(table, &one);
+                defer row.deref(vm.gpa);
+                results[done] = try vm.applyImpl(row, rest);
+                done += 1;
+            }
+            return if (n == 0) vm.allocValue(.list, 0) else vm.enlist(results);
+        },
+        else => return error.type,
+    }
+}
+
 /// Indexing a dictionary, as `d[k]` or `d k`: a key reads its value and a missing key the
 /// null shaped like the values (`` (`a`b!1 2)`c `` is `0N`, `` (`a`b!(1 2;3))`c `` is
 /// `` `long$() ``), a key of another type than a typed key list is a type error, a list of
@@ -2224,6 +2635,9 @@ fn indexDict(vm: *Vm, dict_value: *Value, args: []*Value) RunError!*Value {
         return vm.createValue(.dict, .{ .keys = dict.keys.ref(), .values = values });
     }
     if (!first.isList()) return vm.lookupKey(dict_value, first, rest);
+    // A keyed table takes a list as one key row (`kt[1 2]` against one key column is
+    // `length`), not as keys to look up one by one.
+    if (dict.keys.as == .table and first.as != .table) return vm.lookupKey(dict_value, first, rest);
     const n = first.count();
     const items = try vm.gpa.alloc(*Value, n);
     defer vm.gpa.free(items);
@@ -2245,6 +2659,29 @@ fn indexDict(vm: *Vm, dict_value: *Value, args: []*Value) RunError!*Value {
 /// One key's value, the values' null when it is missing, indexed further by `rest`.
 fn lookupKey(vm: *Vm, dict_value: *Value, key: *Value, rest: []*Value) RunError!*Value {
     const dict = dict_value.as.dict;
+    // A keyed table looks a row up by its key: an atom against a one-column key table, a
+    // dictionary row, or a table of rows giving a table.
+    if (dict.keys.as == .table) {
+        if (key.as == .table) {
+            const n = key.count();
+            const rows = try vm.gpa.alloc(*Value, n);
+            defer vm.gpa.free(rows);
+            var done: usize = 0;
+            defer for (rows[0..done]) |r| r.deref(vm.gpa);
+            for (0..n) |i| {
+                const row = try q.operators.rowAt(vm, key, i);
+                defer row.deref(vm.gpa);
+                rows[done] = try vm.lookupKey(dict_value, row, rest);
+                done += 1;
+            }
+            return if (n == 0) vm.allocValue(.list, 0) else vm.enlist(rows);
+        }
+        const at = try vm.keyedPosition(dict.keys, key);
+        const value = if (at) |i| try q.operators.rowAt(vm, dict.values, i) else try q.operators.rowAt(vm, dict.values, std.math.maxInt(usize));
+        if (rest.len == 0) return value;
+        defer value.deref(vm.gpa);
+        return vm.applyImpl(value, rest);
+    }
     const value = if (try vm.keyPosition(dict.keys, key)) |i|
         try q.operators.itemAt(vm, dict.values, i)
     else
@@ -2252,6 +2689,35 @@ fn lookupKey(vm: *Vm, dict_value: *Value, key: *Value, rest: []*Value) RunError!
     if (rest.len == 0) return value;
     defer value.deref(vm.gpa);
     return vm.applyImpl(value, rest);
+}
+
+/// The row of a key table matching `key`: a dictionary compares as a whole row, an atom
+/// against a one-column key table finds itself in that column, and a list is `length`.
+fn keyedPosition(vm: *Vm, keys: *Value, key: *Value) RunError!?usize {
+    const t = keys.as.table;
+    const columns = t.values.as.list;
+    // A dictionary key is matched on the key columns alone, by name: `kt[`k`a!(2;4)]`
+    // looks `k` up and ignores `a`, and a key column the dictionary lacks matches nothing.
+    if (key.as == .dict) {
+        const d = key.as.dict;
+        rows: for (0..Value.rows(t)) |i| {
+            for (t.keys.as.symbol_list, columns) |name, column| {
+                const name_value = try vm.createValue(.symbol, name);
+                defer name_value.deref(vm.gpa);
+                const at = (try vm.keyPosition(d.keys, name_value)) orelse return null;
+                const wanted = try q.operators.itemAt(vm, d.values, at);
+                defer wanted.deref(vm.gpa);
+                const item = try q.operators.itemAt(vm, column, i);
+                defer item.deref(vm.gpa);
+                if (!try q.operators.matches(vm, item, wanted)) continue :rows;
+            }
+            return i;
+        }
+        return null;
+    }
+    if (key.isList()) return error.length;
+    if (columns.len != 1) return error.type;
+    return vm.keyPosition(columns[0], key);
 }
 
 /// Where `key` sits in a dictionary's keys, if at all. Typed keys only take an atom of
@@ -4522,7 +4988,7 @@ test "review fixes: precedence, k newlines, scans, equality, stubs and long list
     try expectEval(vm, "(1;`a)~(1;`a;2)", "0b");
 
     // Stubs fail with nyi instead of crashing.
-    try testing.expectError(error.nyi, vm.evalSource("flip `a`b!(1 2;3 4)", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("flip 1 2!(3 4;5 6)", .q, "<test>"));
     try testing.expectError(error.nyi, vm.evalSource("1 2 3 like \"a\"", .q, "<test>"));
 
     // A long list literal that fails part way is cleaned up (it used to move the stack).
@@ -5203,7 +5669,9 @@ test "key, value, find, bin and binr follow q" {
     try expectEval(vm, "type (enlist `)!enlist ()!()", "99h");
     try expectEval(vm, "type enlist ()!()", "0h");
     try expectEval(vm, "(()!();()!())", "(()!();()!())");
-    try expectEval(vm, "(`a`b!1 2;`a`b!3 4)", "(`a`b!1 2;`a`b!3 4)");
+    try expectEval(vm, "(`a`b!1 2;`a`b!3 4)", "+`a`b!(1 3;2 4)");
+    try expectEval(vm, "(`a`b!1 2;`b`a!3 4)", "(`a`b!1 2;`b`a!3 4)");
+    try expectEval(vm, "(`a`b!1 2;`a`c!3 4)", "(`a`b!1 2;`a`c!3 4)");
     try expectEval(vm, "value \"\\\\d .h / comment\"", "::");
     try expectEval(vm, "value \"\\\\d\"", "`.h");
     try expectEval(vm, "value \"\\\\d .\"", "::");
@@ -5978,8 +6446,13 @@ test "the internal functions hcount, host, addr, gc, JSON, ts, gzip and ld follo
     try expectEval(vm, "@[-29!;\"1\";{x}]", "\"expected char or byte vector, but got type -10\"");
     try expectEval(vm, "@[-29!;1;{x}]", "\"expected char or byte vector, but got type -7\"");
     try expectEval(vm, "@[-29!;`a;{x}]", "\"expected char or byte vector, but got type -11\"");
-    // q makes tables of like objects and of a nested object; without tables they stay lists.
     try expectEval(vm, "-29!\"[{\\\"a\\\":1},{\\\"b\\\":2}]\"", "((,`a)!,1f;(,`b)!,2f)");
+    try expectEval(vm, "-29!\"[{\\\"a\\\":1},{\\\"a\\\":2}]\"", "+(,`a)!,1 2f");
+    try expectEval(vm, "-29!\"{\\\"a\\\":{\\\"b\\\":1}}\"", "(,`a)!+(,`b)!,,1f");
+    try expectEval(vm, "-29!\"{\\\"a\\\":[{\\\"b\\\":1}]}\"", "(,`a)!,+(,`b)!,,1f");
+    try expectEval(vm, "-29!\"{\\\"a\\\":{\\\"b\\\":1},\\\"c\\\":2}\"", "`a`c!((,`b)!,1f;2f)");
+    try expectEval(vm, "-29!\"[{},{}]\"", "((`symbol$())!();(`symbol$())!())");
+    try expectEval(vm, "-31!(([]a:1 2;b:`x`y);(0#`)!())", "\"[{\\\"a\\\":1,\\\"b\\\":\\\"x\\\"},{\\\"a\\\":2,\\\"b\\\":\\\"y\\\"}]\"");
 
     // JSON out.
     try expectEval(vm, "o9:(0#`)!()", "::");
@@ -6385,4 +6858,306 @@ test "audit of q.k's definitions: what calling them uncovered" {
     try testing.expectError(error.type, vm.evalSource("2 xexp `a", .q, "<test>"));
     try expectEval(vm, "-35!(::)", "1b");
     try expectEval(vm, "(-35!)[]", "1b");
+}
+
+test "tables follow q: literals, flips, indexing, rows, columns and keyed tables" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "t:([]a:1 2;b:`x`y)", "::");
+    try expectEval(vm, "t", "+`a`b!(1 2;`x`y)");
+    try expectEval(vm, "-3!t", "\"+`a`b!(1 2;`x`y)\"");
+    try expectEval(vm, "type t", "98h");
+    try expectEval(vm, "count t", "2");
+    try expectEval(vm, "parse \"([]a:1 2;b:3 4)\"", "(+:;(!;,`a`b;(enlist;1 2;3 4)))");
+    try expectEval(vm, "parse \"([]a:1 2)\"", "(+:;(!;,,`a;(enlist;1 2)))");
+    try expectEval(vm, "parse \"([k:1 2]a:3 4)\"", "(!;(+:;(!;,,`k;(enlist;1 2)));(+:;(!;,,`a;(enlist;3 4))))");
+    try expectEval(vm, "parse \"([]a;b)\"", "(+:;(!;,`a`b;(enlist;`a;`b)))");
+    try expectEval(vm, "([]a:())", "+(,`a)!,()");
+    try expectEval(vm, "type ([]a:())", "98h");
+    try expectEval(vm, "count ([]a:())", "0");
+    try expectEval(vm, "a1:1 2;b1:3 4;([]a1;b1)", "+`a1`b1!(1 2;3 4)");
+    try expectEval(vm, "([]a:1 2;b:3)", "+`a`b!(1 2;3 3)");
+    try expectEval(vm, "([]1 2;3 4)", "+`x`x1!(1 2;3 4)");
+
+    // Rows and columns.
+    try expectEval(vm, "t 0", "`a`b!(1;`x)");
+    try expectEval(vm, "t 1", "`a`b!(2;`y)");
+    try expectEval(vm, "t 5", "`a`b!(0N;`)");
+    try expectEval(vm, "t 0N", "`a`b!(0N;`)");
+    try expectEval(vm, "t[-1]", "`a`b!(0N;`)");
+    try expectEval(vm, "t`a", "1 2");
+    try expectEval(vm, "t[`a`b]", "(1 2;`x`y)");
+    try expectEval(vm, "t[`z]", "`long$()");
+    try expectEval(vm, "t[0 1]", "+`a`b!(1 2;`x`y)");
+    try expectEval(vm, "t[1 0]", "+`a`b!(2 1;`y`x)");
+    try expectEval(vm, "t[0 0 1]", "+`a`b!(1 1 2;`x`x`y)");
+    try expectEval(vm, "t[enlist 0]", "+`a`b!(,1;,`x)");
+    try expectEval(vm, "t[`long$()]", "+`a`b!(`long$();`symbol$())");
+    try expectEval(vm, "t[()]", "()");
+    try expectEval(vm, "t[;`a]", "1 2");
+    try expectEval(vm, "t[::;`a]", "1 2");
+    try expectEval(vm, "t[0;`a]", "1");
+    try expectEval(vm, "t[0 1;`a]", "1 2");
+    try expectEval(vm, "t[0;`a`b]", "(1;`x)");
+    try expectEval(vm, "t[0 1;`a`b]", "((1;`x);(2;`y))");
+    try expectEval(vm, "t . (0;`a)", "1");
+    try expectEval(vm, "t @ 0", "`a`b!(1;`x)");
+    try expectEval(vm, "t[0][`a]", "1");
+    try expectEval(vm, "(t 0)`b", "`x");
+    try expectEval(vm, "count t 0", "2");
+    try expectEval(vm, "key t 0", "`a`b");
+    try expectEval(vm, "type t 0", "99h");
+    try expectEval(vm, "t[0]~`a`b!(1;`x)", "1b");
+    try expectEval(vm, "sum t[`a]", "3");
+    try expectEval(vm, "t[`a]+1", "2 3");
+    try testing.expectError(error.type, vm.evalSource("t[;0]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("t[`a;0]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key t", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("value t", .q, "<test>"));
+
+    // Flips and rows as dictionaries.
+    try expectEval(vm, "flip t", "`a`b!(1 2;`x`y)");
+    try expectEval(vm, "type flip t", "99h");
+    try expectEval(vm, "flip `a`b!(1 2;`x`y)", "+`a`b!(1 2;`x`y)");
+    try expectEval(vm, "flip `a`b!(1 2;3)", "+`a`b!(1 2;3 3)");
+    try expectEval(vm, "flip (enlist `a)!enlist 1 2", "+(,`a)!,1 2");
+    try expectEval(vm, "t~flip `a`b!(1 2;`x`y)", "1b");
+    try expectEval(vm, "enlist `a`b!1 2", "+`a`b!(,1;,2)");
+    try expectEval(vm, "enlist `a`b!(1 2;3)", "+`a`b!(,1 2;,3)");
+    try expectEval(vm, "enlist 1 2!3 4", ",1 2!3 4");
+    try expectEval(vm, "(`a`b!(1 2;3);`a`b!(4;5))", "+`a`b!((1 2;4);3 5)");
+    try expectEval(vm, "type (`a`b!1 2;`a`b!3 4)", "98h");
+    try testing.expectError(error.nyi, vm.evalSource("flip 1 2!(3 4;5 6)", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("flip `a`b!(1 2;3 4 5)", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip `a`b!1 2", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip `a`b!(1;2)", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("flip (`symbol$())!()", .q, "<test>"));
+
+    // Joins, takes, drops and the rest of the list primitives.
+    try expectEval(vm, "t,t", "+`a`b!(1 2 1 2;`x`y`x`y)");
+    try expectEval(vm, "t,'t", "+`a`b!(1 2;`x`y)");
+    try expectEval(vm, "t,'([]c:5 6)", "+`a`b`c!(1 2;`x`y;5 6)");
+    try expectEval(vm, "t,'([]a:5 6)", "+`a`b!(5 6;`x`y)");
+    try expectEval(vm, "(2#t),t", "+`a`b!(1 2 1 2;`x`y`x`y)");
+    try expectEval(vm, "@[,[t];([]c:1 2);{x}]", "\"mismatch\"");
+    try expectEval(vm, "1#t", "+`a`b!(,1;,`x)");
+    try expectEval(vm, "-1#t", "+`a`b!(,2;,`y)");
+    try expectEval(vm, "1_t", "+`a`b!(,2;,`y)");
+    try expectEval(vm, "`a`b#t", "+`a`b!(1 2;`x`y)");
+    try expectEval(vm, "(enlist `b)#t", "+(,`b)!,`x`y");
+    try expectEval(vm, "`a _ t", "+(,`b)!,`x`y");
+    try expectEval(vm, "first t", "`a`b!(1;`x)");
+    try expectEval(vm, "last t", "`a`b!(2;`y)");
+    try expectEval(vm, "reverse t", "+`a`b!(2 1;`y`x)");
+    try expectEval(vm, "t~t", "1b");
+    try expectEval(vm, "string t", "+`a`b!((,\"1\";,\"2\");(,\"x\";,\"y\"))");
+    try testing.expectError(error.type, vm.evalSource("`a#t", .q, "<test>"));
+
+    // Each, arithmetic and aggregates over tables and dictionaries.
+    try expectEval(vm, "count each t", "2 2");
+    try expectEval(vm, "{x} each t", "+`a`b!(1 2;`x`y)");
+    try expectEval(vm, "{x`a} each t", "1 2");
+    try expectEval(vm, "first each t", "1 2");
+    try expectEval(vm, "{x+1} each ([]a:1 2)", "+(,`a)!,2 3");
+    try expectEval(vm, "{x} each `a`b!1 2", "`a`b!1 2");
+    try expectEval(vm, "{x*2} each `a`b!1 2", "`a`b!2 4");
+    try expectEval(vm, "{x+y}'[`a`b!1 2;10]", "`a`b!11 12");
+    try expectEval(vm, "{x+y}'[`a`b!1 2;`a`b!10 20]", "`a`b!11 22");
+    try expectEval(vm, "{x+y}'[`a`b!1 2;`b`a!10 20]", "`a`b!21 12");
+    // `x@'!x` pairs the dictionary's values with its keys (`1@`a` is `type`); `(x@)'`
+    // applies the projection to each key.
+    try testing.expectError(error.type, vm.evalSource("x:`a`b!1 2;x@'!x", .k, "<test>"));
+    try expectEvalMode(vm, .k, "x:`a`b!1 2;(x@)'!x", "1 2");
+    try expectEval(vm, "sum ([]a:1 2;b:3 4)", "`a`b!3 7");
+    try expectEval(vm, "max ([]a:1 2;b:3 4)", "`a`b!2 4");
+    try expectEval(vm, "([]a:1 2)+1", "+(,`a)!,2 3");
+    try expectEval(vm, "neg ([]a:1 2)", "+(,`a)!,-1 -2");
+    try expectEval(vm, "t=t", "+`a`b!(11b;11b)");
+    try expectEval(vm, "2*([]a:1 2)", "+(,`a)!,2 4");
+    try expectEval(vm, "([]a:1 2)+([]a:3 4)", "+(,`a)!,4 6");
+    try expectEval(vm, "(`a`b!1 2)+`a`b!10 20", "`a`b!11 22");
+    try expectEval(vm, "(`a`b!1 2)+`b`c!10 20", "`a`b`c!1 12 20");
+    try expectEval(vm, "(`a`b!1 2)+10", "`a`b!11 12");
+    try expectEval(vm, "(`a`b!1 2)=`a`b!1 3", "`a`b!10b");
+    try expectEval(vm, "(`a`b!1 2)|`a`b!0 3", "`a`b!1 3");
+    try expectEval(vm, "sum `a`b!1 2", "3");
+    try expectEval(vm, "neg `a`b!1 2", "`a`b!-1 -2");
+    try testing.expectError(error.type, vm.evalSource("sum each t", .q, "<test>"));
+
+    // Amending columns and cells.
+    try expectEval(vm, "t[`a]:10 20", "::");
+    try expectEval(vm, "t", "+`a`b!(10 20;`x`y)");
+    try expectEval(vm, "@[t;`a;:;5 6]", "+`a`b!(5 6;`x`y)");
+    try expectEval(vm, ".[t;(0;`a);:;9]", "+`a`b!(9 20;`x`y)");
+    try expectEval(vm, "t[`c]:1 2", "::");
+    try expectEval(vm, "t", "+`a`b`c!(10 20;`x`y;1 2)");
+    try expectEval(vm, "t[`a]:`s#1 2;attr t`a", "`s");
+    try expectEval(vm, "attr t", "`");
+
+    // Keyed tables.
+    try expectEval(vm, "kt:([k:1 2]a:3 4)", "::");
+    try expectEval(vm, "kt", "(+(,`k)!,1 2)!+(,`a)!,3 4");
+    try expectEval(vm, "type kt", "99h");
+    try expectEval(vm, "count kt", "2");
+    try expectEval(vm, "key kt", "+(,`k)!,1 2");
+    try expectEval(vm, "value kt", "+(,`a)!,3 4");
+    try expectEval(vm, "0!kt", "+`k`a!(1 2;3 4)");
+    try expectEval(vm, "(0!kt)[0]", "`k`a!1 3");
+    try expectEval(vm, "1!([]a:1 2;b:`x`y)", "(+(,`a)!,1 2)!+(,`b)!,`x`y");
+    try expectEval(vm, "2!([]a:1 2;b:3 4;c:5 6)", "(+`a`b!(1 2;3 4))!+(,`c)!,5 6");
+    try expectEval(vm, "0!2!([]a:1 2;b:3 4;c:5 6)", "+`a`b`c!(1 2;3 4;5 6)");
+    try expectEval(vm, "0!([k:1 2]a:3 4;b:5 6)", "+`k`a`b!(1 2;3 4;5 6)");
+    try expectEval(vm, "kt 1", "(,`a)!,3");
+    try expectEval(vm, "kt[1]", "(,`a)!,3");
+    try expectEval(vm, "kt 3", "(,`a)!,0N");
+    try expectEval(vm, "kt ([]k:1 2)", "+(,`a)!,3 4");
+    try expectEval(vm, "kt[`k`a!(2;4)]", "(,`a)!,4");
+    try expectEval(vm, "t2:([]a:1 2;b:`x`y);t2~0!1!t2", "1b");
+    try expectEval(vm, "(1!t2)[`a`b!(2;`y)]", "(,`b)!,`y");
+    try testing.expectError(error.length, vm.evalSource("kt[1 2]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("kt[`k]", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("flip kt", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("key 0!kt", .q, "<test>"));
+}
+
+test "qSQL follows q: parse trees, select, exec, update, delete and the functional forms" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "t:([]a:1 2 3;b:`x`y`x;c:10 20 30)", "::");
+
+    // The parse trees, with the where clause and sort quoted and columns named as q names them.
+    try expectEval(vm, "parse \"select a,c:1+a by b from t where a>1\"", "(?;`t;,,(>;`a;1);(,`b)!,`b;`a`c!(`a;(+;1;`a)))");
+    try expectEval(vm, "parse \"select[2;>a] from t\"", "(?;`t;();0b;();2;,(>:;`a))");
+    try expectEval(vm, "parse \"select[>a] from t\"", "(?;`t;();0b;();0W;,(>:;`a))");
+    try expectEval(vm, "parse \"select distinct b,a:1 from t\"", "(?;`t;();1b;`b`a!(`b;1))");
+    try expectEval(vm, "parse \"select count i by b from t\"", "(?;`t;();(,`b)!,`b;(,`x)!,(#:;`i))");
+    try expectEval(vm, "parse \"delete from t where a>1\"", "(!;`t;,,(>;`a;1);0b;`symbol$())");
+    try expectEval(vm, "parse \"delete b from t\"", "(!;`t;();0b;,,`b)");
+    try expectEval(vm, "parse \"exec a by b from t\"", "(?;`t;();,`b;,`a)");
+    try expectEval(vm, "parse \"exec a,b from t\"", "(?;`t;();();`a`b!`a`b)");
+    try expectEval(vm, "parse \"update a:a*2 from t where b=`x\"", "(!;`t;,,(=;`b;,`x);0b;(,`a)!,(*;`a;2))");
+    try expectEval(vm, "parse \"a<=1\"", "((';~:;>);`a;1)");
+    // A one-item list quotes its item.
+    try expectEval(vm, "eval enlist (1;`a)", "(1;`a)");
+    try expectEval(vm, "eval enlist `a", "`a");
+    try expectEval(vm, "eval `symbol$()", "`symbol$()");
+    try testing.expectError(error.type, vm.evalSource("eval `a`b", .q, "<test>"));
+
+    // select: naming, aggregates (one row when the first column aggregates), by, distinct.
+    try expectEval(vm, "select a+1 from t", "+(,`a)!,2 3 4");
+    try expectEval(vm, "select 1+a from t", "+(,`x)!,2 3 4");
+    try expectEval(vm, "select count i from t", "+(,`x)!,,3");
+    try expectEval(vm, "select sum a from t", "+(,`a)!,,6");
+    try expectEval(vm, "select neg a from t", "+(,`a)!,-1 -2 -3");
+    try expectEval(vm, "select a,a from t", "+`a`a1!(1 2 3;1 2 3)");
+    try expectEval(vm, "select b,a from t", "+`b`a!(`x`y`x;1 2 3)");
+    try expectEval(vm, "select a,sum a from t", "+`a`a1!(1 2 3;6 6 6)");
+    try expectEval(vm, "select sum a,a from t", "+`a`a1!(,6;,1 2 3)");
+    try testing.expectError(error.rank, vm.evalSource("select a:10 from t", .q, "<test>"));
+    try expectEval(vm, "select by b from t", "(`s#+(,`b)!,`s#`x`y)!+`a`c!(3 2;30 20)");
+    try expectEval(vm, "select a by b from t", "(`s#+(,`b)!,`s#`x`y)!+(,`a)!,(1 3;,2)");
+    try expectEval(vm, "select max a by b from t", "(`s#+(,`b)!,`s#`x`y)!+(,`a)!,3 2");
+    try expectEval(vm, "select count i by b from t", "(`s#+(,`b)!,`s#`x`y)!+(,`x)!,2 1");
+    try expectEval(vm, "select sum c,cnt:count i by b from t", "(`s#+(,`b)!,`s#`x`y)!+`c`cnt!(40 20;2 1)");
+    try expectEval(vm, "select count i by b,c from t", "(`s#+`b`c!(`p#`x`x`y;10 30 20))!+(,`x)!,1 1 1");
+    try expectEval(vm, "select distinct b from t", "+(,`b)!,`x`y");
+    try expectEval(vm, "select distinct b,a:1 from t", "+`b`a!(`x`y;1 1)");
+    // where: constraints narrow in turn, `i` is the original row number, atoms keep all or none.
+    try expectEval(vm, "select from t where b=`x,a>1", "+`a`b`c!(,3;,`x;,30)");
+    try expectEval(vm, "select from t where a>1,i=1", "+`a`b`c!(,2;,`y;,20)");
+    try expectEval(vm, "select a from t where a in 1 2", "+(,`a)!,1 2");
+    try expectEval(vm, "select from t where a<>1", "+`a`b`c!(2 3;`y`x;20 30)");
+    try expectEval(vm, "select from t where a>=2", "+`a`b`c!(2 3;`y`x;20 30)");
+    try expectEval(vm, "select from t where a<=2", "+`a`b`c!(1 2;`x`y;10 20)");
+    try expectEval(vm, "select from t where 1b", "+`a`b`c!(1 2 3;`x`y`x;10 20 30)");
+    try expectEval(vm, "select from t where 0b", "+`a`b`c!(`long$();`symbol$();`long$())");
+    try expectEval(vm, "select b from t where a>5", "+(,`b)!,`symbol$()");
+    try expectEval(vm, "select sum a from t where a>5", "+(,`a)!,,0");
+    try testing.expectError(error.length, vm.evalSource("select from t where 11b", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("select from t where a", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("select from t where a=`x", .q, "<test>"));
+    // Limits and sorts.
+    try expectEval(vm, "select[1] from t where a>1", "+`a`b`c!(,2;,`y;,20)");
+    try expectEval(vm, "select[2;>a] from t", "+`a`b`c!(3 2;`x`y;30 20)");
+    try expectEval(vm, "select[-2] from t", "+`a`b`c!(2 3;`y`x;20 30)");
+    try expectEval(vm, "select[1 2] from t", "+`a`b`c!(2 3;`y`x;20 30)");
+    try expectEval(vm, "select[>a] from t where a>1", "+`a`b`c!(3 2;`x`y;30 20)");
+    try testing.expectError(error.length, vm.evalSource("select[>a;<b] from t", .q, "<test>"));
+    // exec.
+    try expectEval(vm, "exec a from t", "1 2 3");
+    try expectEval(vm, "exec i from t", "0 1 2");
+    try expectEval(vm, "exec distinct b from t", "`x`y");
+    try expectEval(vm, "exec a,b from t where a>1", "`a`b!(2 3;`y`x)");
+    try expectEval(vm, "exec sum a by b from t", "`s#`x`y!4 2");
+    try expectEval(vm, "exec c by b from t", "`s#`x`y!(10 30;,20)");
+    try expectEval(vm, "exec sum a by b from t where a>1", "`s#`x`y!3 2");
+    // update and delete.
+    try expectEval(vm, "update a:a*2 from t", "+`a`b`c!(2 4 6;`x`y`x;10 20 30)");
+    try expectEval(vm, "update b:`z from t where a=1", "+`a`b`c!(1 2 3;`z`y`x;10 20 30)");
+    try expectEval(vm, "update a+1 from t", "+`a`b`c!(2 3 4;`x`y`x;10 20 30)");
+    try expectEval(vm, "update d:1 from t", "+`a`b`c`d!(1 2 3;`x`y`x;10 20 30;1 1 1)");
+    try expectEval(vm, "update z:a+c from t where a>1", "+`a`b`c`z!(1 2 3;`x`y`x;10 20 30;0N 22 33)");
+    try expectEval(vm, "update a:sum a from t where a>1", "+`a`b`c!(1 5 5;`x`y`x;10 20 30)");
+    try expectEval(vm, "update d:sum a by b from t", "+`a`b`c`d!(1 2 3;`x`y`x;10 20 30;4 2 4)");
+    try testing.expectError(error.length, vm.evalSource("update a:1 2 from t", .q, "<test>"));
+    try expectEval(vm, "delete from t where a>1", "+`a`b`c!(,1;,`x;,10)");
+    try expectEval(vm, "delete from t where a>5", "+`a`b`c!(1 2 3;`x`y`x;10 20 30)");
+    try expectEval(vm, "delete b from t", "+`a`c!(1 2 3;10 20 30)");
+    try expectEval(vm, "delete from t", "+`a`b`c!(`long$();`symbol$();`long$())");
+    // A symbol names a global to update in place.
+    try expectEval(vm, "![`t;();0b;(enlist `d)!enlist 1]", "`t");
+    try expectEval(vm, "t", "+`a`b`c`d!(1 2 3;`x`y`x;10 20 30;1 1 1)");
+
+    // The functional forms.
+    try expectEval(vm, "u:([]a:1 2 3;b:`x`y`x;c:10 20 30)", "::");
+    try expectEval(vm, "?[u;enlist (>;`a;1);0b;()]", "+`a`b`c!(2 3;`y`x;20 30)");
+    try expectEval(vm, "?[u;();();`a]", "1 2 3");
+    try expectEval(vm, "?[u;();();()]", "`a`b`c!(3;`x;30)");
+    try expectEval(vm, "?[u;();`b;`a]", "`s#`x`y!(1 3;,2)");
+    try expectEval(vm, "?[u;();(enlist `b)!enlist `b;`a]", "(`s#+(,`b)!,`s#`x`y)!(1 3;,2)");
+    try expectEval(vm, "?[u;();`b`c!`b`c;(enlist `a)!enlist `a]", "(`s#+`b`c!(`p#`x`x`y;10 30 20))!+(,`a)!,(,1;,3;,2)");
+    try expectEval(vm, "?[u;();0b;();0W;(>:;`a)]", "+`a`b`c!(3 2 1;`x`y`x;30 20 10)");
+    try expectEval(vm, "?[u;();0b;();0W;(::;`a)]", "+`a`b`c!(2 3 0N;`y`x`;20 30 0N)");
+    try expectEval(vm, "?[u;enlist (>;`a;5);`b;(sum;`a)]", "(`s#`symbol$())!`long$()");
+    try expectEval(vm, "?[u;enlist (>;`a;5);(enlist `b)!enlist `b;(enlist `a)!enlist (sum;`a)]", "(`s#+(,`b)!,`symbol$())!+(,`a)!,`long$()");
+    try testing.expectError(error.type, vm.evalSource("?[u;();0b;();2i]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[u;();0b;`a]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("?[u;();0b;();0W;(>:;`a);7]", .q, "<test>"));
+    try expectEval(vm, "![u;();0b;`a`z]", "+`b`c!(`x`y`x;10 20 30)");
+    try testing.expectError(error.nyi, vm.evalSource("![u;enlist (>;`a;1);0b;`a`b]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("![u;();0b;()]", .q, "<test>"));
+
+    // A keyed table is queried unkeyed; selecting all columns, updating and deleting keep the keys.
+    try expectEval(vm, "kt:1!u", "::");
+    try expectEval(vm, "select from kt", "(+(,`a)!,1 2 3)!+`b`c!(`x`y`x;10 20 30)");
+    try expectEval(vm, "select b from kt", "+(,`b)!,`x`y`x");
+    try expectEval(vm, "select from kt where a>1", "(+(,`a)!,2 3)!+`b`c!(`y`x;20 30)");
+    try expectEval(vm, "update c:0 from kt", "(+(,`a)!,1 2 3)!+`b`c!(`x`y`x;0 0 0)");
+    try expectEval(vm, "delete from kt where a>1", "(+(,`a)!,,1)!+`b`c!(,`x;,10)");
+    try expectEval(vm, "delete b from kt", "(+(,`a)!,1 2 3)!+(,`c)!,10 20 30");
+    try expectEval(vm, "exec b from kt", "`x`y`x");
+
+    // Inside a lambda the query sees its parameters and locals; only the source is a global.
+    try expectEval(vm, "f:{select from u where a>x};f 1", "+`a`b`c!(2 3;`y`x;20 30)");
+    try expectEval(vm, "{select z:a+x from u} 10", "+(,`z)!,11 12 13");
+    try expectEval(vm, "{v:2;select from u where a>v} 0", "+`a`b`c!(,3;,`x;,30)");
+    try expectEval(vm, "(value f) 3", "``u");
+
+    // `iasc` marks a list it finds ascending as sorted in place, so `select[<a]` marks the column.
+    try expectEval(vm, "x:1 2 3;iasc x;x", "`s#1 2 3");
+    try expectEval(vm, "x:3 1 2;iasc x;x", "3 1 2");
+    try expectEval(vm, "select[<a] from u;u", "+`a`b`c!(`s#1 2 3;`x`y`x;10 20 30)");
+
+    // `<=`, `>=` and `<>` are compositions of `not` with `>`, `<` and `=`.
+    try expectEval(vm, "`a<>`b", "1b");
+    try expectEval(vm, "1 2<=0N", "00b");
+    try expectEval(vm, "-3!(<=)", "\"~>\"");
+    try expectEval(vm, "value (<=)", "(~:;>)");
+    try expectEval(vm, "type (<=)", "105h");
+    try expectEval(vm, "(<=)[;2]", "~>[;2]");
+    try expectEval(vm, "{x>=y}[2 3;2]", "11b");
 }

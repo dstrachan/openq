@@ -19,7 +19,9 @@ pub fn identity(_: *Vm, x: *Value) !*Value {
 /// to a table, which is not done yet.
 pub fn flip(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
-        .dict => return error.nyi,
+        // A column dictionary flips to a table and a table back to its dictionary.
+        .dict => |d| return q.operators.makeTable(vm, d.keys, d.values),
+        .table => |t| return vm.createValue(.dict, .{ .keys = t.keys.ref(), .values = t.values.ref() }),
         .list => |items| {
             if (items.len == 0) return x.ref();
             var width: ?usize = null;
@@ -52,7 +54,7 @@ pub fn flip(vm: *Vm, x: *Value) Vm.RunError!*Value {
     }
 }
 
-pub fn neg(vm: *Vm, x: *Value) !*Value {
+pub fn neg(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .list => |val| {
             const v = try vm.allocValue(.list, val.len);
@@ -120,7 +122,8 @@ pub fn neg(vm: *Vm, x: *Value) !*Value {
         .char_list => return error.nyi,
         .symbol => return error.type,
         .symbol_list => return error.type,
-        .dict => return error.nyi,
+        .dict => return mapValues(vm, x, neg),
+        .table => return q.operators.mapColumns(vm, x, neg),
         .lambda => return error.type,
         .unary_primitive => return error.type,
         .operator => return error.type,
@@ -195,10 +198,16 @@ pub fn first(vm: *Vm, x: *Value) !*Value {
         .time_list => |val| return vm.createValue(.time, val[0]),
         .symbol_list => |val| return vm.createValue(.symbol, val[0]),
         .dict => |val| return first(vm, val.values),
+        // The first row of a table, a row of nulls when it has none.
+        .table => return q.operators.rowAt(vm, x, 0),
     }
 }
 
 pub fn list(vm: *Vm, x: *Value) !*Value {
+    return enlist(vm, x);
+}
+
+fn enlistValue(vm: *Vm, x: *Value) Vm.RunError!*Value {
     return enlist(vm, x);
 }
 
@@ -348,10 +357,32 @@ pub fn enlist(vm: *Vm, x: *Value) !*Value {
             @field(v.as, @tagName(list_tag))[0] = val;
             return v;
         },
-        // Enlisting a dictionary with symbol keys makes a table, which is not done yet;
-        // any other dictionary becomes a one-item general list.
+        // Enlisting a dictionary with symbol keys makes a one-row table; any other
+        // dictionary becomes a one-item general list.
         .dict => |d| {
-            if (d.keys.as == .symbol_list) return error.nyi;
+            if (d.keys.as == .symbol_list) {
+                const n = d.values.count();
+                const cells = try vm.gpa.alloc(*Value, n);
+                defer vm.gpa.free(cells);
+                var made: usize = 0;
+                defer for (cells[0..made]) |c| c.deref(vm.gpa);
+                for (0..n) |i| {
+                    const item = try q.operators.itemAt(vm, d.values, i);
+                    defer item.deref(vm.gpa);
+                    cells[made] = try enlist(vm, item);
+                    made += 1;
+                }
+                const columns = try vm.allocValue(.list, n);
+                for (columns.as.list, cells) |*slot, c| slot.* = c.ref();
+                defer columns.deref(vm.gpa);
+                return q.operators.makeTable(vm, d.keys, columns);
+            }
+            const v = try vm.allocValue(.list, 1);
+            errdefer comptime unreachable;
+            v.as.list[0] = x.ref();
+            return v;
+        },
+        .table => {
             const v = try vm.allocValue(.list, 1);
             errdefer comptime unreachable;
             v.as.list[0] = x.ref();
@@ -471,7 +502,17 @@ fn aggregate(vm: *Vm, x: *Value, comptime fold: Fold) Vm.RunError!*Value {
         .second_list,
         .time_list,
         => |items, tag| return foldTyped(vm, items, tag, fold),
-        .dict => return error.nyi,
+        .dict => |d| return aggregate(vm, d.values, fold),
+        .table => |t| {
+            const values = try mapItems(vm, t.values.as.list, switch (fold) {
+                .sum => sum,
+                .prd => prd,
+                .min => min,
+                .max => max,
+            });
+            errdefer values.deref(vm.gpa);
+            return vm.createValue(.dict, .{ .keys = t.keys.ref(), .values = values });
+        },
         else => return if (Vm.isFunction(x)) error.type else x.ref(),
     }
 }
@@ -611,6 +652,8 @@ pub fn avg(vm: *Vm, x: *Value) Vm.RunError!*Value {
 
 /// `last x`: the last item, the null of the type for an empty list, an atom itself.
 pub fn last(vm: *Vm, x: *Value) Vm.RunError!*Value {
+    if (x.as == .table) return q.operators.rowAt(vm, x, if (x.count() == 0) std.math.maxInt(usize) else x.count() - 1);
+    if (x.as == .dict) return last(vm, x.as.dict.values);
     if (!x.isList()) return x.ref();
     const n = x.count();
     if (n == 0) return q.operators.nullLike(vm, x);
@@ -723,6 +766,7 @@ pub fn string(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .list => |items| return mapItems(vm, items, string),
         .dict => return mapValues(vm, x, string),
+        .table => return q.operators.mapColumns(vm, x, string),
         .boolean_list,
         .byte_list,
         .short_list,
@@ -819,6 +863,7 @@ pub fn not(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .list => |items| return mapItems(vm, items, not),
         .dict => return mapValues(vm, x, not),
+        .table => return q.operators.mapColumns(vm, x, not),
         // A symbol atom is `nyi` in q, a symbol list a type error.
         .symbol => return error.nyi,
         inline .boolean,
@@ -871,6 +916,7 @@ pub fn @"null"(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .list => |items| return mapItems(vm, items, @"null"),
         .dict => return mapValues(vm, x, @"null"),
+        .table => return q.operators.mapColumns(vm, x, @"null"),
         inline .boolean,
         .byte,
         .short,
@@ -980,6 +1026,7 @@ pub fn where(vm: *Vm, x: *Value) Vm.RunError!*Value {
 /// itself.
 pub fn reverse(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
+        .table => return q.operators.mapColumns(vm, x, reverse),
         .dict => |d| {
             const keys = try reverse(vm, d.keys);
             errdefer keys.deref(vm.gpa);
@@ -1129,6 +1176,24 @@ pub fn desc(vm: *Vm, x: *Value) Vm.RunError!*Value {
 }
 
 fn grade(vm: *Vm, x: *Value, comptime descending: bool) Vm.RunError!*Value {
+    // A table grades by its rows, each row's values compared column by column.
+    if (x.as == .table) {
+        const n = x.count();
+        const rows = try vm.gpa.alloc(*Value, n);
+        defer vm.gpa.free(rows);
+        var made: usize = 0;
+        defer for (rows[0..made]) |r| r.deref(vm.gpa);
+        for (0..n) |i| {
+            const row = try q.operators.rowAt(vm, x, i);
+            defer row.deref(vm.gpa);
+            rows[made] = row.as.dict.values.ref();
+            made += 1;
+        }
+        const row_list = try vm.allocValue(.list, n);
+        for (row_list.as.list, rows) |*slot, r| slot.* = r.ref();
+        defer row_list.deref(vm.gpa);
+        return grade(vm, row_list, descending);
+    }
     if (x.as == .dict) {
         const positions = try grade(vm, x.as.dict.values, descending);
         defer positions.deref(vm.gpa);
@@ -1149,6 +1214,14 @@ fn grade(vm: *Vm, x: *Value, comptime descending: bool) Vm.RunError!*Value {
         }
     };
     std.sort.block(i64, result.as.long_list, Context{ .vm = vm, .x = x }, Context.lessThan);
+    // Grading a list found already ascending marks it sorted in place, as q does: after
+    // `iasc x` (and so `asc x`, `med x` or `select[<a]`) `x` itself shows `s#`.
+    if (!descending and n > 0) {
+        const in_order = for (result.as.long_list, 0..) |r, i| {
+            if (r != i) break false;
+        } else true;
+        if (in_order) x.attr = .s;
+    }
     return result;
 }
 
@@ -1159,6 +1232,7 @@ pub fn reciprocal(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .list => |items| return mapItems(vm, items, reciprocal),
         .dict => return mapValues(vm, x, reciprocal),
+        .table => return q.operators.mapColumns(vm, x, reciprocal),
         inline .boolean,
         .byte,
         .short,
@@ -1210,6 +1284,7 @@ pub fn reciprocal(vm: *Vm, x: *Value) Vm.RunError!*Value {
 pub fn key(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .dict => |d| return d.keys.ref(),
+        .table => return error.type,
         .boolean => |b| return til(vm, @intFromBool(b)),
         .byte => |b| return til(vm, b),
         inline .short, .int, .long => |v| {
@@ -1282,6 +1357,7 @@ fn keyOfName(vm: *Vm, x: *Value, s: Symbol) Vm.RunError!*Value {
 pub fn value(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .dict => |d| return d.values.ref(),
+        .table => return error.type,
         // A primitive, an operator or an iterator is its number in q's table, which the
         // enums follow: `value (::)` is 0, `value (+)` is 1, `value (enlist)` 41, `value (')` 0.
         .unary_primitive => |p| return vm.createValue(.long, switch (p) {
@@ -1357,6 +1433,14 @@ pub fn value(vm: *Vm, x: *Value) Vm.RunError!*Value {
 
             return list_value;
         },
+        // `value (<=)` is `(~:;>)`: the composed functions.
+        .composition => |c| {
+            const result = try vm.allocValue(.list, 2);
+            errdefer comptime unreachable;
+            result.as.list[0] = c.f.ref();
+            result.as.list[1] = c.g.ref();
+            return result;
+        },
         .projection => |p| {
             const result = try vm.allocValue(.list, 1 + p.args.len);
             errdefer comptime unreachable;
@@ -1378,6 +1462,7 @@ pub fn abs(vm: *Vm, x: *Value) Vm.RunError!*Value {
     switch (x.as) {
         .list => |items| return mapItems(vm, items, abs),
         .dict => return mapValues(vm, x, abs),
+        .table => return q.operators.mapColumns(vm, x, abs),
         .boolean => |b| return vm.createValue(.int, @intFromBool(b)),
         .byte => |b| return vm.createValue(.int, b),
         .char => |c| return vm.createValue(.int, c),
@@ -1429,6 +1514,11 @@ fn floatFunction(vm: *Vm, x: *Value, comptime f: fn (f64) f64) Vm.RunError!*Valu
             const values = try floatFunction(vm, d.values, f);
             errdefer values.deref(vm.gpa);
             return vm.createValue(.dict, .{ .keys = d.keys.ref(), .values = values });
+        },
+        .table => |t| {
+            const values = try floatFunction(vm, t.values, f);
+            defer values.deref(vm.gpa);
+            return q.operators.makeTable(vm, t.keys, values);
         },
         .symbol, .symbol_list => return error.type,
         else => {},

@@ -639,6 +639,16 @@ fn jsonValue(vm: *Vm, w: *Io.Writer, x: *Value) RunError!void {
         .char_list => |s| try jsonString(w, s),
         .symbol => |s| try jsonString(w, vm.internedString(s)),
         .timestamp, .month, .date, .datetime, .timespan, .minute, .second, .time => try jsonTemporal(vm, w, x),
+        .table => {
+            try w.writeByte('[');
+            for (0..x.count()) |i| {
+                if (i > 0) try w.writeByte(',');
+                const row = try q.operators.rowAt(vm, x, i);
+                defer row.deref(vm.gpa);
+                try jsonValue(vm, w, row);
+            }
+            try w.writeByte(']');
+        },
         .dict => |d| {
             try w.writeByte('{');
             const n = d.keys.count();

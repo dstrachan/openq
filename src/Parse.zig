@@ -369,10 +369,13 @@ fn parseNoun(p: *Parse, comptime sql_identifier: ?SqlIdentifier) !Node.OptionalI
         .colon_colon => try p.addNoun(.colon_colon),
         .l_angle_bracket => try p.addNoun(.l_angle_bracket),
         .l_angle_bracket_colon => try p.addNoun(.l_angle_bracket_colon),
+        .l_angle_bracket_equal => try p.addNoun(.l_angle_bracket_equal),
+        .l_angle_bracket_r_angle_bracket => try p.addNoun(.l_angle_bracket_r_angle_bracket),
         .equal => try p.addNoun(.equal),
         .equal_colon => try p.addNoun(.equal_colon),
         .r_angle_bracket => try p.addNoun(.r_angle_bracket),
         .r_angle_bracket_colon => try p.addNoun(.r_angle_bracket_colon),
+        .r_angle_bracket_equal => try p.addNoun(.r_angle_bracket_equal),
         .question_mark => try p.addNoun(.question_mark),
         .question_mark_colon => try p.addNoun(.question_mark_colon),
         .at => try p.addNoun(.at),
@@ -464,10 +467,13 @@ fn parseVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier
         .colon_colon,
         .l_angle_bracket,
         .l_angle_bracket_colon,
+        .l_angle_bracket_equal,
+        .l_angle_bracket_r_angle_bracket,
         .equal,
         .equal_colon,
         .r_angle_bracket,
         .r_angle_bracket_colon,
+        .r_angle_bracket_equal,
         .question_mark,
         .question_mark_colon,
         .at,
@@ -997,6 +1003,23 @@ fn parseSelect(p: *Parse) !Node.Index {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
+    // `select[n]`, `select[n;>a]` or `select[>a]`.
+    const limit_top = p.scratch.items.len;
+    if (try p.eatToken(.l_bracket)) |_| {
+        try p.ends_expression.append(p.gpa, .r_bracket);
+        while (p.tokenTag(p.tok_i) != .r_bracket) {
+            // `>a` and `<a` sort, the monadic glyphs only k applies by juxtaposition.
+            const saved_mode = p.mode;
+            defer p.mode = saved_mode;
+            if (p.tokenTag(p.tok_i) == .r_angle_bracket or p.tokenTag(p.tok_i) == .l_angle_bracket) p.mode = .k;
+            const expr = try p.expectExpr(null);
+            try p.scratch.append(p.gpa, expr);
+            _ = try p.eatToken(.semicolon) orelse break;
+        }
+        _ = try p.expectToken(.r_bracket);
+        _ = p.ends_expression.pop();
+    }
+
     // Select phrase
     const select_top = p.scratch.items.len;
     if (!p.peekIdentifier(.{ .by = true, .from = true })) {
@@ -1031,10 +1054,12 @@ fn parseSelect(p: *Parse) !Node.Index {
         }
     }
 
+    const limits = try p.listToSpan(p.scratch.items[limit_top..select_top]);
     const select = try p.listToSpan(p.scratch.items[select_top..by_top]);
     const by = try p.listToSpan(p.scratch.items[by_top..where_top]);
     const where = try p.listToSpan(p.scratch.items[where_top..]);
     const select_node: Node.Select = .{
+        .limit_start = limits.start,
         .select_start = select.start,
         .by_start = by.start,
         .from = from_expr,

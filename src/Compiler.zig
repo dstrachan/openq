@@ -16,6 +16,7 @@ const Error = Allocator.Error || std.fmt.ParseIntError || Io.Writer.Error || err
     parse,
     nyi,
     assign,
+    length,
 };
 
 vm: *Vm,
@@ -164,6 +165,19 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
         .apostrophe, .apostrophe_colon, .slash, .slash_colon, .backslash, .backslash_colon => {
             if (tree.nodeData(node).opt_node.unwrap()) |function| try c.scan(function);
         },
+        // A query's expressions are evaluated at run time against its columns, then the
+        // lambda's parameters and locals, then globals, so their names are not the
+        // lambda's globals (q lists only `u` for `{select from u where a>x}`); they do
+        // count for the implicit parameters, and the source expression is scanned as usual.
+        .select, .exec, .update, .delete_rows, .delete_cols => {
+            var nodes: std.ArrayList(Node.Index) = .empty;
+            defer nodes.deinit(c.vm.gpa);
+            try c.vm.queryNodes(node, &nodes);
+            const from = c.vm.querySource(node);
+            for (nodes.items) |n| {
+                if (n == from) try c.scan(n) else try c.scanImplicit(n);
+            }
+        },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
@@ -179,6 +193,39 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
             try c.scan(op);
             if (maybe_rhs.unwrap()) |rhs| try c.scan(rhs);
         },
+        else => {},
+    }
+}
+
+/// Notes only the implicit parameters `x`, `y` and `z` an expression uses.
+fn scanImplicit(c: *Compiler, node: Node.Index) Error!void {
+    const tree = c.tree;
+    switch (tree.nodeTag(node)) {
+        .identifier => {
+            const name = tree.tokenSlice(tree.nodeMainToken(node));
+            if (name.len == 1 and (name[0] == 'x' or name[0] == 'y' or name[0] == 'z')) try c.noteName(name, false);
+        },
+        .grouped_expression => try c.scanImplicit(tree.nodeData(node).node_and_token[0]),
+        .list, .call, .expr_block => {
+            for (tree.extraDataSlice(tree.nodeData(node).extra_range, Node.Index)) |n| try c.scanImplicit(n);
+        },
+        .apply_unary => {
+            const lhs, const rhs = tree.nodeData(node).node_and_node;
+            try c.scanImplicit(lhs);
+            try c.scanImplicit(rhs);
+        },
+        .apostrophe, .apostrophe_colon, .slash, .slash_colon, .backslash, .backslash_colon => {
+            if (tree.nodeData(node).opt_node.unwrap()) |function| try c.scanImplicit(function);
+        },
+        .apply_binary => {
+            const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
+            const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
+            // `a:e` names a column; only `e` is an expression.
+            if (!(tree.nodeTag(op) == .colon and tree.nodeTag(lhs) == .identifier)) try c.scanImplicit(lhs);
+            try c.scanImplicit(op);
+            if (maybe_rhs.unwrap()) |rhs| try c.scanImplicit(rhs);
+        },
+        .select, .exec, .update, .delete_rows, .delete_cols => try c.scan(node),
         else => {},
     }
 }
@@ -357,13 +404,16 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             });
         },
 
-        .system,
-        .select,
-        .exec,
-        .update,
-        .delete_rows,
-        .delete_cols,
-        => return error.nyi,
+        .system => return error.nyi,
+
+        // A query is its parse tree evaluated at run time, when the lambda's parameters
+        // and locals are in scope for its expressions.
+        .select, .exec, .update, .delete_rows, .delete_cols => {
+            const query = try vm.queryTree(node);
+            errdefer query.deref(vm.gpa);
+            try c.emitConstant(query);
+            try c.emitCode(.query);
+        },
 
         // A symbol literal is a one-item list in a parse tree, so that evaluating it does
         // not look the name up; as a constant it is the atom itself.
@@ -489,7 +539,7 @@ fn compileFunction(c: *Compiler, node: Node.Index) Error!void {
         .backslash_colon,
         => try c.compileNode(node),
         else => {
-            const value = try c.vm.parseUnaryNode(node);
+            const value = try c.vm.constantOf(node, true);
             errdefer value.deref(c.vm.gpa);
             try c.emitConstant(value);
         },
@@ -506,7 +556,7 @@ fn compileArgs(c: *Compiler, nodes: []const Node.Index) Error!void {
 }
 
 fn compileConstantNode(c: *Compiler, node: Node.Index) Error!void {
-    const value = try c.vm.parseNode(node);
+    const value = try c.vm.constantOf(node, false);
     errdefer value.deref(c.vm.gpa);
     try c.emitConstant(value);
 }
@@ -783,6 +833,9 @@ pub const ByteCode = enum(u8) {
     each_prior = 21,
     each_right = 22,
     each_left = 23,
+    /// Pops a qSQL parse tree and evaluates it with the lambda's parameters and locals in
+    /// scope, pushing the result.
+    query = 24,
 
     // unary primitives
     identity = 32,

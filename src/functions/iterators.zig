@@ -15,6 +15,7 @@ const RunError = Vm.RunError;
 /// `f'[x;y...]`: `f` applied to the items of the arguments in step. An atom argument goes
 /// to every call, lists must agree in length, and atoms alone apply `f` once.
 pub fn each(vm: *Vm, f: *Value, args: []*Value) RunError!*Value {
+    if (try eachOverDicts(vm, f, args)) |result| return result;
     const n = try commonLength(args) orelse return vm.applyImpl(f, args);
     if (n == 0) return vm.allocValue(.list, 0);
     const results = try vm.gpa.alloc(*Value, n);
@@ -37,6 +38,66 @@ pub fn each(vm: *Vm, f: *Value, args: []*Value) RunError!*Value {
 }
 
 /// The length the list arguments share, null when all are atoms, `length` when they differ.
+/// `f'` with a dictionary or a table among the arguments, or null without one: a table
+/// goes row by row (rows that come back as like dictionaries make a table again), and a
+/// dictionary keeps its keys, other dictionaries pairing by key (a missing key giving
+/// the null of the values), lists by position and atoms whole.
+fn eachOverDicts(vm: *Vm, f: *Value, args: []*Value) RunError!?*Value {
+    var first_dict: ?*Value = null;
+    for (args) |a| if (a.as == .table or (a.as == .dict and first_dict == null)) {
+        if (a.as == .table) {
+            // Rows stand in for the table.
+            const n = a.count();
+            const rows = try vm.gpa.alloc(*Value, n);
+            defer vm.gpa.free(rows);
+            var made: usize = 0;
+            defer for (rows[0..made]) |r| r.deref(vm.gpa);
+            for (0..n) |i| {
+                rows[made] = try q.operators.rowAt(vm, a, i);
+                made += 1;
+            }
+            const row_list = if (n == 0) try vm.allocValue(.list, 0) else try vm.allocValue(.list, n);
+            if (n > 0) for (row_list.as.list, rows) |*slot, r| {
+                slot.* = r.ref();
+            };
+            defer row_list.deref(vm.gpa);
+            const replaced = try vm.gpa.dupe(*Value, args);
+            defer vm.gpa.free(replaced);
+            for (replaced) |*r| if (r.* == a) {
+                r.* = row_list;
+            };
+            return try each(vm, f, replaced);
+        }
+        first_dict = a;
+    };
+    const d = (first_dict orelse return null).as.dict;
+    const n = d.keys.count();
+    const results = try vm.gpa.alloc(*Value, n);
+    defer vm.gpa.free(results);
+    var done: usize = 0;
+    defer for (results[0..done]) |r| r.deref(vm.gpa);
+    const call = try vm.gpa.alloc(*Value, args.len);
+    defer vm.gpa.free(call);
+    for (0..n) |i| {
+        const key = try itemAt(vm, d.keys, i);
+        defer key.deref(vm.gpa);
+        var made: usize = 0;
+        defer for (call[0..made]) |c| c.deref(vm.gpa);
+        for (args) |a| {
+            call[made] = switch (a.as) {
+                .dict => |other| if (try vm.keyPosition(other.keys, key)) |j| try itemAt(vm, other.values, j) else try q.operators.nullLike(vm, other.values),
+                else => if (a.isList()) try itemAt(vm, a, i) else a.ref(),
+            };
+            made += 1;
+        }
+        results[done] = try vm.applyImpl(f, call);
+        done += 1;
+    }
+    const values = if (n == 0) try vm.allocValue(.list, 0) else try vm.enlist(results);
+    errdefer values.deref(vm.gpa);
+    return try vm.createValue(.dict, .{ .keys = d.keys.ref(), .values = values });
+}
+
 fn commonLength(args: []*Value) error{length}!?usize {
     var len: ?usize = null;
     for (args) |a| {
