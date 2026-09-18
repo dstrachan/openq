@@ -386,12 +386,21 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             if (args.len > 2) {
                 // `?[c;a;b]` is the vector conditional; the functional qSQL forms of `?` and
                 // `!` with four arguments are not done yet.
-                if (operator == .find) return if (args.len == 3) q.operators.vectorConditional(vm, args[0], args[1], args[2]) else error.nyi;
-                if (operator == .dict) return error.nyi;
+                // Holes project whatever the count (`?[;;;]`, `@[1;;;;]`); the functional
+                // qSQL forms of `?` and `!` on a table are not done, and on anything else
+                // are `type`, while `!` with three or five arguments is `rank`, as in q.
+                for (args) |a| if (a.isEmpty()) return vm.project(func, args);
+                if (operator == .find) {
+                    if (args.len == 3) return q.operators.vectorConditional(vm, args[0], args[1], args[2]);
+                    return if (args[0].as == .dict or args[0].as == .symbol) error.nyi else error.type;
+                }
+                if (operator == .dict) {
+                    if (args.len != 4) return error.rank;
+                    return if (args[0].as == .dict or args[0].as == .symbol) error.nyi else error.type;
+                }
                 // Only `.` and `@` take more: their amend and trap forms.
                 if (operator != .apply and operator != .apply_at) return error.rank;
                 if (args.len > 4) return error.rank;
-                for (args) |a| if (a.isEmpty()) return vm.project(func, args);
                 return vm.applyForm(operator, args);
             }
             if (args.len == 1) {
@@ -461,31 +470,32 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             return vm.applyImpl(c.f, &one);
         },
         .projection => |projection| {
-            const rank = projection.callee.rank();
+            // A projection of `enlist` has as many slots as it was given: `enlist[;5] 1` is
+            // `1 5`, `enlist[;;5][1;2]` is `1 2 5` and `enlist[;5][1;2]` is a rank error.
+            const variadic = projection.callee.as == .unary_primitive and projection.callee.as.unary_primitive == .enlist;
+            const four = projection.callee.as == .operator and switch (projection.callee.as.operator) {
+                .apply, .apply_at, .find, .dict => true,
+                else => false,
+            };
+            const rank: usize = if (variadic) projection.args.len else if (four) 4 else projection.callee.rank();
             const holes = holes: {
                 var n: usize = 0;
                 for (projection.args) |a| n += @intFromBool(a.isEmpty());
                 break :holes n;
             };
-            // Fewer arguments than holes fill the holes left to right and leave the rest:
-            // `{x+y+z}[;;3][1]` is `{x+y+z}[1;;3]`.
-            if (args.len < holes) {
-                const filled = try vm.gpa.alloc(*Value, projection.args.len);
-                errdefer vm.gpa.free(filled);
-                var j: usize = 0;
-                for (filled, projection.args) |*f, a| {
-                    if (a.isEmpty() and j < args.len) {
-                        f.* = args[j].ref();
-                        j += 1;
-                    } else {
-                        f.* = a.ref();
-                    }
-                }
-                const callee = projection.callee.ref();
-                errdefer callee.deref(vm.gpa);
-                return vm.createValue(.projection, .{ .callee = callee, .args = filled });
-            }
+            // Fewer arguments than holes, or arguments with holes of their own, make a
+            // projection of the projection, as q does: `{x+y+z}[;;3][1]` stays
+            // `{x+y+z}[;;3][1]` and applies its holes left to right when called again.
+            // `.`, `@`, `?` and `!` apply with two arguments and take three or four for
+            // their amend, trap, conditional and functional forms.
+            const flexible = projection.callee.as == .operator and switch (projection.callee.as.operator) {
+                .apply, .apply_at, .find, .dict => true,
+                else => false,
+            };
+            const min_rank: usize = if (flexible) 2 else rank;
             const args_len = projection.args.len - holes + args.len;
+            if (args.len < holes or args_len < min_rank) return vm.project(func, args);
+            for (args) |a| if (a.isEmpty()) return vm.project(func, args);
             if (args_len > rank) return error.rank;
 
             var new_args: std.ArrayList(*Value) = try .initCapacity(vm.gpa, args_len);
@@ -892,8 +902,10 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 if (indexed or (target.as == .symbol and !plain)) return vm.evalAmend(target, operator, value[2]);
             };
 
-            if (value[0].as == .operator and value[0].as.operator == .assign) {
-                if (value.len != 3 or value[2].isEmpty()) return error.rank;
+            // `x:v` assigns; `:` on anything else is the operator, which projects on one
+            // argument (`:[1]`) and returns its right argument on two (`:[;2][1]` is 2).
+            if (value[0].as == .operator and value[0].as.operator == .assign and value.len == 3 and value[1].as == .symbol) {
+                if (value[2].isEmpty()) return error.rank;
 
                 const v = try vm.eval(value[2]);
                 errdefer v.deref(vm.gpa);
@@ -1947,6 +1959,10 @@ pub fn amendValue(vm: *Vm, old: *Value, index: *Value, function: *Value, value: 
 /// `f[x;y]` or `f[x]` for an amend; `:` puts `y` in place.
 fn applyAmend(vm: *Vm, function: *Value, x: *Value, y: ?*Value) RunError!*Value {
     if (function.as == .operator and function.as.operator == .assign) return (y orelse x).ref();
+    // An atom in the function's place is `domain`, or `length` with a fourth argument, as
+    // q reports `@[1 2 3;0;3]`; a list or a dictionary indexes and a symbol applies as
+    // the global it names (`@[1 2 3;0;1 2]` is `2 2 3`).
+    if (!isFunction(function) and function.as != .symbol and !function.isList() and function.as != .dict) return if (y == null) error.domain else error.length;
     if (y) |v| {
         var operands = [_]*Value{ x, v };
         return vm.applyImpl(function, &operands);
@@ -3791,7 +3807,40 @@ test "lambdas take q's implicit parameters, locals and projections" {
     try expectEval(vm, "{x+y+z}[;2][1;3]", "6");
     try expectEval(vm, "{x+y+z}[1;;3][2]", "6");
     try expectEval(vm, "{x+y+z}[1][2][3]", "6");
-    try expectEval(vm, "{x+y+z}[;;3][1]", "{x+y+z}[1;;3]");
+    try expectEval(vm, "{x+y+z}[;;3][1]", "{x+y+z}[;;3][1]");
+    try expectEval(vm, "{x+y+z}[;;3][1;2]", "6");
+    try expectEval(vm, "{x+y+z}[1][2]", "{x+y+z}[1][2]");
+    try expectEval(vm, "{x+y+z}[1][2][3]", "6");
+    try expectEval(vm, "{x+y+z}[1;2][3]", "6");
+    try expectEval(vm, "{x+y}[;][1]", "{x+y}[;][1]");
+    try expectEval(vm, "{x+y}[;][1][2]", "3");
+    try expectEval(vm, "{x+y}[1][2]", "3");
+    try expectEval(vm, "{x+y+z}[;2][1]", "{x+y+z}[;2][1]");
+    try expectEval(vm, "{x+y+z}[;2][1][3]", "6");
+    try expectEval(vm, "{x+y+z}[;2][;3]", "{x+y+z}[;2][;3]");
+    try expectEval(vm, "{x+y+z}[;2][;3][1]", "6");
+    try expectEval(vm, "value {x+y+z}[;;3][1]", "({x+y+z}[;;3];1)");
+    try expectEval(vm, "value {x+y+z}[;2][;3]", "({x+y+z}[;2];::;3)");
+    try expectEval(vm, "-3!{x+y+z}[;;3][1]", "\"{x+y+z}[;;3][1]\"");
+    try expectEval(vm, "enlist[;;5][1]", "enlist[;;5][1]");
+    try expectEval(vm, "enlist[;;5][1][2]", "1 2 5");
+    try expectEval(vm, "+[;3][1]", "4");
+    try expectEval(vm, "+[1][2]", "3");
+    try expectEval(vm, "{x+y+z}[;;3][1]~{x+y+z}[1;;3]", "0b");
+    try expectEval(vm, "{x+y+z}[;;3][1;]", "{x+y+z}[;;3][1;]");
+    try expectEval(vm, "{x+y+z}[;;3][;1]", "{x+y+z}[;;3][;1]");
+    try expectEval(vm, "{x+y+z}[;;3][;1][2]", "6");
+    try expectEval(vm, "type {x+y+z}[;;3][1]", "104h");
+    try expectEval(vm, "{x+y+z}[;;3][]", "{x+y+z}[;;3][::]");
+    try expectEval(vm, "{x+y+z}[;;3][;]", "{x+y+z}[;;3][;]");
+    try expectEval(vm, "{[a;b;c;d]a+b+c+d}[;;3][1][2]", "{[a;b;c;d]a+b+c+d}[;;3][1][2]");
+    try expectEval(vm, "{[a;b;c;d]a+b+c+d}[;;3][1][2][4]", "10");
+    try expectEval(vm, "{[a;b;c;d]a+b+c+d}[;;3][1][;4]", "{[a;b;c;d]a+b+c+d}[;;3][1][;4]");
+    try expectEval(vm, "{[a;b;c;d]a+b+c+d}[;;3][1][;4][2]", "10");
+    try expectEval(vm, "@[;1][2 3]", "3");
+    try expectEval(vm, ".[;1 2][{x+y}]", "3");
+    try testing.expectError(error.type, vm.evalSource("{x+y+z}[;;3][::;1]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("{x+y+z}[;;3][1;::]", .q, "<test>"));
     try expectEval(vm, "{x+y+z}[;;3][1][2]", "6");
     try expectEval(vm, "f:{x+y+z};g:f[1];h:g[2];h 3", "6");
     try expectEval(vm, "hn:{(x;y)}[;0];hy:hn 1;hy", "1 0");
@@ -5765,4 +5814,315 @@ test "attributes, the vector conditional, roll and deal, internals and dictionar
     try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;`a;:;`x]", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;`c;:;`x]", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("@[`a`b!1 2;`c;:;1.5]", .q, "<test>"));
+}
+
+test "the internal functions hcount, host, addr, gc, JSON, ts, gzip and ld follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Files, hosts and gc. The file comes from the test itself, through the shell.
+    try expectEval(vm, "value \"\\\\sh -c 'printf hello\\\\\\\\nworld\\\\\\\\n >/tmp/openq_hc_test.txt'\"", "()");
+    try expectEval(vm, "-7!`:/tmp/openq_hc_test.txt", "12");
+    try expectEval(vm, "hcount `:/tmp/openq_hc_test.txt", "12");
+    try expectEval(vm, "@[-7!;`:/tmp/openq_nope_test.txt;{x}]", "\"/tmp/openq_nope_test.txt. OS reports: No such file or directory\"");
+    try expectEval(vm, "@[-7!;`:/tmp;{x}]", "\"/tmp. OS reports: Is a directory\"");
+    try testing.expectError(error.type, vm.evalSource("-7!\"/tmp\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-7!1", .q, "<test>"));
+    try expectEval(vm, "-12!2130706433i", "`localhost");
+    try expectEval(vm, "-12!16777343i", "`1.0.0.127");
+    try expectEval(vm, "-12!0i", "`0.0.0.0");
+    try expectEval(vm, "-13!`localhost", "2130706433i");
+    try expectEval(vm, "-13!`LOCALHOST", "2130706433i");
+    try expectEval(vm, "-13!`", "2130706433i");
+    try expectEval(vm, "-13!`127.0.0.1", "2130706433i");
+    try expectEval(vm, "-13!`nope.invalid", "-1i");
+    try expectEval(vm, "type -13!`localhost", "-6h");
+    try testing.expectError(error.type, vm.evalSource("-12!2130706433", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-12!`localhost", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-13!\"localhost\"", .q, "<test>"));
+    try expectEval(vm, "-20!0", "0");
+    try expectEval(vm, "-20!1", "0");
+    try testing.expectError(error.nyi, vm.evalSource("-100!\"a:1\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-101!\"a:1\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-104!(1;2;3)", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("-37!{x}", .q, "<test>"));
+
+    // JSON in.
+    try expectEval(vm, "-29!\"{\\\"a\\\":1,\\\"b\\\":[1,2.5,\\\"x\\\",true,null],\\\"c\\\":{\\\"d\\\":\\\"e\\\"}}\"", "`a`b`c!(1f;(1f;2.5;,\"x\";1b;0n);(,`d)!,,\"e\")");
+    try expectEval(vm, "-29!\"[1,2,3]\"", "1 2 3f");
+    try expectEval(vm, "-29!\"[1,2.5]\"", "1 2.5");
+    try expectEval(vm, "-29!\"1.5\"", "1.5");
+    try expectEval(vm, "-29!\"\\\"abc\\\"\"", "\"abc\"");
+    try expectEval(vm, "-29!\"true\"", "1b");
+    try expectEval(vm, "-29!\"null\"", "0n");
+    try expectEval(vm, "-29!\"[]\"", "()");
+    try expectEval(vm, "-29!\"{}\"", "(`symbol$())!()");
+    try expectEval(vm, "-29!\"[\\\"a\\\",\\\"b\\\"]\"", "(,\"a\";,\"b\")");
+    try expectEval(vm, "-29!\"[\\\"ab\\\",\\\"cd\\\"]\"", "(\"ab\";\"cd\")");
+    try expectEval(vm, "-29!\"[true,false]\"", "10b");
+    try expectEval(vm, "-29!\"[null,1]\"", "0n 1");
+    try expectEval(vm, "-29!\"[1,\\\"a\\\"]\"", "(1f;,\"a\")");
+    try expectEval(vm, "-29!\"1e3\"", "1000f");
+    try expectEval(vm, "-29!\"-0.5\"", "-0.5");
+    try expectEval(vm, "-29!\"[-1,-2]\"", "-1 -2f");
+    try expectEval(vm, "-29!\"\\\"a\\\\nb\\\"\"", "\"a\\nb\"");
+    try expectEval(vm, "-29!\"\\\"a\\\\tb\\\"\"", "\"a\\tb\"");
+    try expectEval(vm, "-29!\"\\\"\\\\u0041\\\"\"", ",\"A\"");
+    try expectEval(vm, "-29!\"\\\"\\\\u00e9\\\"\"", "\"\\303\\251\"");
+    try expectEval(vm, "-29!\"\\\"\\\\/\\\"\"", ",\"/\"");
+    try expectEval(vm, "-29!\"\\\"\\\\b\\\\f\\\"\"", "\"\\010\\014\"");
+    try expectEval(vm, "-29!\" [1 , 2] \"", "1 2f");
+    try expectEval(vm, "-29!\"[[1,2],[3]]\"", "(1 2f;,3f)");
+    try expectEval(vm, "-29!\"[[1,2],[3,4]]\"", "(1 2f;3 4f)");
+    try expectEval(vm, "-29!\"[[],{}]\"", "(();(`symbol$())!())");
+    try expectEval(vm, "-29!\"[1,[2]]\"", "(1f;,2f)");
+    try expectEval(vm, "-29!\"[1.0,2.0]\"", "1 2f");
+    try expectEval(vm, "-29!\"{\\\"b\\\":1,\\\"a\\\":2}\"", "`b`a!1 2f");
+    try expectEval(vm, "-29!\"{\\\"a\\\":1,\\\"a\\\":2}\"", "`a`a!1 2f");
+    try expectEval(vm, "-29!\"{\\\"a\\\":[1,2]}\"", "(,`a)!,1 2f");
+    try expectEval(vm, "-29!\"{\\\"a\\\":null}\"", "(,`a)!,0n");
+    try expectEval(vm, "-29!\"[\\\"a\\\"]\"", ",,\"a\"");
+    try expectEval(vm, "-29!\"[\\\"\\\"]\"", ",\"\"");
+    try expectEval(vm, "-29!\"\\\"\\\"\"", "\"\"");
+    try expectEval(vm, "-29!\"[true,1]\"", "(1b;1f)");
+    try expectEval(vm, "-29!\"[null,null]\"", "0n 0n");
+    try expectEval(vm, "-29!\"12345678901234567890\"", "9.223372e+18");
+    try expectEval(vm, "-29!\"[1,1e400]\"", "1 0w");
+    try expectEval(vm, "-29!0x5b312c325d", "1 2f");
+    try expectEval(vm, "type -29!\"[1,2]\"", "9h");
+    try expectEval(vm, "type -29!\"{}\"", "99h");
+    try expectEval(vm, "@[-29!;\"bad\";{x}]", "\"illegal char b at 0\"");
+    try expectEval(vm, "@[-29!;\"\";{x}]", "\"partial token at 1\"");
+    try expectEval(vm, "@[-29!;\"[1,]\";{x}]", "\"illegal char ] at 3\"");
+    try expectEval(vm, "@[-29!;\"{\\\"a\\\":1\";{x}]", "\"unclosed } at 7\"");
+    try expectEval(vm, "@[-29!;\"[1,2\";{x}]", "\"unclosed ] at 5\"");
+    try expectEval(vm, "@[-29!;\"[1 2]\";{x}]", "\"illegal char 2 at 3\"");
+    try expectEval(vm, "@[-29!;\"tru\";{x}]", "\"illegal char   at 3\"");
+    try expectEval(vm, "@[-29!;\"\\\"abc\";{x}]", "\"partial token at 5\"");
+    try expectEval(vm, "@[-29!;\"1 2\";{x}]", "\"illegal char 2 at 2\"");
+    try expectEval(vm, "@[-29!;\"[1,2]x\";{x}]", "\"illegal char x at 5\"");
+    try expectEval(vm, "@[-29!;\"{\\\"a\\\":}\";{x}]", "\"illegal char } at 5\"");
+    try expectEval(vm, "@[-29!;\"1e\";{x}]", "\"illegal char   at 2\"");
+    try expectEval(vm, "@[-29!;\"0x10\";{x}]", "\"illegal char x at 1\"");
+    try expectEval(vm, "@[-29!;\"01\";{x}]", "\"illegal char 1 at 1\"");
+    try expectEval(vm, "@[-29!;\"1.\";{x}]", "\"illegal char   at 2\"");
+    try expectEval(vm, "@[-29!;\".5\";{x}]", "\"illegal char . at 0\"");
+    try expectEval(vm, "@[-29!;\"+1\";{x}]", "\"illegal char + at 0\"");
+    try expectEval(vm, "@[-29!;\"1\";{x}]", "\"expected char or byte vector, but got type -10\"");
+    try expectEval(vm, "@[-29!;1;{x}]", "\"expected char or byte vector, but got type -7\"");
+    try expectEval(vm, "@[-29!;`a;{x}]", "\"expected char or byte vector, but got type -11\"");
+    // q makes tables of like objects and of a nested object; without tables they stay lists.
+    try expectEval(vm, "-29!\"[{\\\"a\\\":1},{\\\"b\\\":2}]\"", "((,`a)!,1f;(,`b)!,2f)");
+
+    // JSON out.
+    try expectEval(vm, "o9:(0#`)!()", "(`symbol$())!()");
+    try expectEval(vm, "-31!(1;o9)", ",\"1\"");
+    try expectEval(vm, "-31!(1.5;o9)", "\"1.5\"");
+    try expectEval(vm, "-31!(1.0;o9)", ",\"1\"");
+    try expectEval(vm, "-31!(0N;o9)", "\"null\"");
+    try expectEval(vm, "-31!(0n;o9)", "\"null\"");
+    try expectEval(vm, "-31!(0Nh;o9)", "\"null\"");
+    try expectEval(vm, "-31!(0w;o9)", "\"inf\"");
+    try expectEval(vm, "-31!(-0w;o9)", "\"-inf\"");
+    try expectEval(vm, "-31!(0W;o9)", "\"9223372036854775807\"");
+    try expectEval(vm, "-31!(0Wh;o9)", "\"32767\"");
+    try expectEval(vm, "-31!(1 2 3;o9)", "\"[1,2,3]\"");
+    try expectEval(vm, "-31!(1 2.5;o9)", "\"[1,2.5]\"");
+    try expectEval(vm, "-31!(1 0N 2;o9)", "\"[1,null,2]\"");
+    try expectEval(vm, "-31!(0.1;o9)", "\"0.1\"");
+    try expectEval(vm, "-31!(1e10;o9)", "\"1e+10\"");
+    try expectEval(vm, "-31!(1e-7;o9)", "\"1e-07\"");
+    try expectEval(vm, "-31!(1e-4;o9)", "\"0.0001\"");
+    try expectEval(vm, "-31!(123456789.123;o9)", "\"1.234568e+08\"");
+    try expectEval(vm, "-31!(1234567.8;o9)", "\"1234568\"");
+    try expectEval(vm, "-31!(0.30000000000000004;o9)", "\"0.3\"");
+    try expectEval(vm, "value \"\\\\P 17\";r9:-31!(0.1;o9);value \"\\\\P 7\";r9", "\"0.10000000000000001\"");
+    try expectEval(vm, "-31!(1h;o9)", ",\"1\"");
+    try expectEval(vm, "-31!(1.5e;o9)", "\"1.5\"");
+    try expectEval(vm, "-31!(\"abc\";o9)", "\"\\\"abc\\\"\"");
+    try expectEval(vm, "-31!(\"a\";o9)", "\"\\\"a\\\"\"");
+    try expectEval(vm, "-31!(\"\";o9)", "\"\\\"\\\"\"");
+    try expectEval(vm, "-31!(`abc;o9)", "\"\\\"abc\\\"\"");
+    try expectEval(vm, "-31!(`;o9)", "\"\\\"\\\"\"");
+    try expectEval(vm, "-31!(`a`b;o9)", "\"[\\\"a\\\",\\\"b\\\"]\"");
+    try expectEval(vm, "-31!(``a;o9)", "\"[\\\"\\\",\\\"a\\\"]\"");
+    try expectEval(vm, "-31!(1b;o9)", "\"true\"");
+    try expectEval(vm, "-31!(101b;o9)", "\"[true,false,true]\"");
+    try expectEval(vm, "-31!(`a`b!1 2;o9)", "\"{\\\"a\\\":1,\\\"b\\\":2}\"");
+    try expectEval(vm, "-31!(1 2!3 4;o9)", "\"{\\\"1\\\":3,\\\"2\\\":4}\"");
+    try expectEval(vm, "-31!(`a`b!(1 2;\"x\");o9)", "\"{\\\"a\\\":[1,2],\\\"b\\\":\\\"x\\\"}\"");
+    try expectEval(vm, "-31!((1;`a;\"b\";2.5);o9)", "\"[1,\\\"a\\\",\\\"b\\\",2.5]\"");
+    try expectEval(vm, "-31!((`a`b!1 2;3);o9)", "\"[{\\\"a\\\":1,\\\"b\\\":2},3]\"");
+    try expectEval(vm, "-31!(();o9)", "\"[]\"");
+    try expectEval(vm, "-31!(`long$();o9)", "\"[]\"");
+    try expectEval(vm, "-31!((`symbol$())!();o9)", "\"{}\"");
+    try expectEval(vm, "-31!(2023.01.01;o9)", "\"\\\"2023-01-01\\\"\"");
+    try expectEval(vm, "-31!(2023.01.01 2023.01.02;o9)", "\"[\\\"2023-01-01\\\",\\\"2023-01-02\\\"]\"");
+    try expectEval(vm, "-31!(2023.01m;o9)", "\"\\\"2023-01\\\"\"");
+    try expectEval(vm, "-31!(12:00;o9)", "\"\\\"12:00\\\"\"");
+    try expectEval(vm, "-31!(12:00:00;o9)", "\"\\\"12:00:00\\\"\"");
+    try expectEval(vm, "-31!(12:00:00.123;o9)", "\"\\\"12:00:00.123\\\"\"");
+    try expectEval(vm, "-31!(2023.01.01T12;o9)", "\"\\\"2023-01-01T12:00:00.000\\\"\"");
+    try expectEval(vm, "-31!(2023.01.01D12:34:56.123456789;o9)", "\"\\\"2023-01-01T12:34:56.123456789\\\"\"");
+    try expectEval(vm, "-31!(0D12:34:56.123456789;o9)", "\"\\\"0D12:34:56.123456789\\\"\"");
+    try expectEval(vm, "-31!(-0D01;o9)", "\"\\\"-0D01:00:00.000000000\\\"\"");
+    try expectEval(vm, "-31!(0Nd;o9)", "\"\\\"\\\"\"");
+    try expectEval(vm, "-31!(0Np;o9)", "\"\\\"\\\"\"");
+    try expectEval(vm, "-31!(0Nt;o9)", "\"\\\"\\\"\"");
+    try expectEval(vm, "-31!(0Wd;o9)", "\"\\\"0000-00-00\\\"\"");
+    try expectEval(vm, "-31!(0x0102;o9)", "\"[\\\"01\\\",\\\"02\\\"]\"");
+    try expectEval(vm, "-31!(0x00;o9)", "\"\\\"00\\\"\"");
+    try expectEval(vm, "-31!(\"a\\\"b\\\\c\\nd\";o9)", "\"\\\"a\\\\\\\"b\\\\\\\\c\\\\nd\\\"\"");
+    try expectEval(vm, "-31!(\"\\t\\r\";o9)", "\"\\\"\\\\t\\\\r\\\"\"");
+    try expectEval(vm, "-31!(\"\\000\\037\";o9)", "\"\\\"\\\\u0000\\\\u001f\\\"\"");
+    try expectEval(vm, "-31!(\"\\177\";o9)", "\"\\\"\\177\\\"\"");
+    try expectEval(vm, "-31!(`$\"a\\\"b\";o9)", "\"\\\"a\\\\\\\"b\\\"\"");
+    try expectEval(vm, "-31!((::);o9)", "\"null\"");
+    try expectEval(vm, "-31!({x};o9)", "\"\\\"{x}\\\"\"");
+    try expectEval(vm, "-31!(+;o9)", "\"\\\"+\\\"\"");
+    try expectEval(vm, "-31!((+;1);o9)", "\"[\\\"+\\\",1]\"");
+    try expectEval(vm, "-31!((1 2;3 4);o9)", "\"[[1,2],[3,4]]\"");
+    try testing.expectError(error.type, vm.evalSource("-31!(1;())", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-31!(1;`a`b!1 2)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-31!1", .q, "<test>"));
+    // A projection of enlist keeps only the slots it was given.
+    try expectEval(vm, "enlist[;5] 1", "1 5");
+    try expectEval(vm, "enlist[;5] 1 2", "(1 2;5)");
+    try expectEval(vm, "enlist[;;5][1;2]", "1 2 5");
+    try expectEval(vm, "enlist[1;2;3;4;5;6;7;8;9]", "1 2 3 4 5 6 7 8 9");
+    try testing.expectError(error.rank, vm.evalSource("enlist[;5][1;2]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("enlist[;;5][1;2;3]", .q, "<test>"));
+    // JSON round trips through the seeded keywords q.k defines on these internals.
+    try expectEvalMode(vm, .k, "j9:-31!(;(0#`)!())@;k9:-29!;k9 j9 `a`b!(1 2;\"x\")", "`a`b!(1 2f;,\"x\")");
+
+    // ts.
+    try expectEval(vm, "last -34!({x+y};(1;2))", "3");
+    try expectEval(vm, "count first -34!({x+y};(1;2))", "2");
+    try expectEval(vm, "type first -34!({x+y};(1;2))", "7h");
+    try expectEval(vm, "-1<first first -34!({x};enlist 1)", "1b");
+    try testing.expectError(error.type, vm.evalSource("-34!({x};1)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-34!(1;2)", .q, "<test>"));
+
+    // gzip: q's header and trailer exactly, and zlib's deflate bytes for these inputs.
+    try expectEval(vm, "-35!(6;0x616263)", "0x1f8b08000000000000134b4c4a0600c241243503000000");
+    try expectEval(vm, "-35!(-1;0x616263)", "0x1f8b08000000000000134b4c4a0600c241243503000000");
+    try expectEval(vm, "-35!(0;0x616263)", "0x1f8b0800000000000413010300fcff616263c241243503000000");
+    try expectEval(vm, "-35!(1;0x616263)", "0x1f8b08000000000004134b4c4a0600c241243503000000");
+    try expectEval(vm, "-35!(9;0x616263)", "0x1f8b08000000000002134b4c4a0600c241243503000000");
+    try expectEval(vm, "-35!(6;0x)", "0x1f8b080000000000001303000000000000000000");
+    try expectEval(vm, "type -35!(6;0x616263)", "4h");
+    try expectEval(vm, "-35!(6;\"abc\")", "\"\\037\\213\\010\\000\\000\\000\\000\\000\\000\\023KLJ\\006\\000\\302A$5\\003\\000\\000\\000\"");
+    try expectEval(vm, "-35!-35!(6;0x616263)", "0x616263");
+    try expectEval(vm, "-35!-35!(6;\"abc\")", "\"abc\"");
+    try expectEval(vm, "-35!0x1f8b08000000000000134b4c4a0600c241243503000000", "0x616263");
+    try expectEval(vm, "(200#0x61)~-35!-35!(6;200#0x61)", "1b");
+    try expectEval(vm, "(200#0x61)~-35!-35!(0;200#0x61)", "1b");
+    try expectEval(vm, "(200#0x61)~-35!-35!(9;200#0x61)", "1b");
+    try testing.expectError(error.domain, vm.evalSource("-35!(10;0x616263)", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("-35!(-2;0x616263)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-35!(6h;0x616263)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-35!(6;`long$())", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-35!(6;0x616263;1)", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("-35!0x616263", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("-35!\"abc\"", .q, "<test>"));
+
+    // ld.
+    try expectEval(vm, "-39!(\"a:1\";\" +2\";\"b:2\")", "(1 3;(\"a:1\\n +2\";\"b:2\"))");
+    try expectEval(vm, "-39!(\"a:1\";\"b:2\")", "(1 2;(\"a:1\";\"b:2\"))");
+    try expectEval(vm, "-39!(\"a:1\";\"\";\"b:2\")", "(1 2 3;(\"a:1\";\"\";\"b:2\"))");
+    try expectEval(vm, "-39!(\"a:1\";\"b:2 / c\";\"c:3\")", "(1 2 3;(\"a:1\";\"b:2 / c\";\"c:3\"))");
+    try expectEval(vm, "-39!(\"a:{\";\" x\";\" }\")", "(,1;,\"a:{\\n x\\n }\")");
+    try expectEval(vm, "-39!(\"a:1\";\"\\tb\")", "(,1;,\"a:1\\n b\")");
+    try expectEval(vm, "-39!enlist \"\"", "(,1;,\"\")");
+    try expectEval(vm, "-39!(\"\";\"\")", "(1 2;(\"\";\"\"))");
+    try expectEval(vm, "-39!(\"\";\" x\")", "(`long$();())");
+    try expectEval(vm, "-39!()", "(`long$();())");
+    try expectEval(vm, "type -39!(\"a:1\";\"b:2\")", "0h");
+    try testing.expectError(error.type, vm.evalSource("-39!\"a:1\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-39!(\"a:1\";\" b\";\"c\")", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-39!1", .q, "<test>"));
+}
+
+test "every operator projects on one argument as q does" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    for ([_][:0]const u8{ "+", "-", "*", "%", "&", "|", "^", "=", "<", ">", "$", ",", "#", "_", "~", "!", "?", "@", ".", "0:", "1:", "2:", "in", "bin", "like", "ss", "within", "cov", "setenv", "xexp", "div" }) |op| {
+        const source = try std.fmt.allocPrintSentinel(testing.allocator, "{s}[1]", .{op}, 0);
+        defer testing.allocator.free(source);
+        try expectEval(vm, source, source);
+        const typed = try std.fmt.allocPrintSentinel(testing.allocator, "type {s}[1]", .{op}, 0);
+        defer testing.allocator.free(typed);
+        try expectEval(vm, typed, "104h");
+    }
+    try expectEval(vm, ":[1]", ":[1]");
+    try expectEval(vm, "type :[1]", "104h");
+    try expectEval(vm, ":[1][2]", "2");
+    try expectEval(vm, ":[;2]", ":[;2]");
+    try expectEval(vm, ":[;2][1]", "2");
+    try expectEval(vm, "value :[1]", "(:;1)");
+    try expectEval(vm, "-3!(:[;1])", "\":[;1]\"");
+    try expectEval(vm, "mmu[1]", "$[1]");
+    try expectEval(vm, "and[1]", "&[1]");
+    try expectEval(vm, "each[1]", "k){x'y}[1]");
+    try expectEval(vm, "enlist[1]", ",1");
+    try expectEval(vm, "type enlist[1]", "7h");
+    try expectEval(vm, "+[]", "+[::]");
+    try expectEval(vm, "(+)[]", "+[::]");
+    try expectEval(vm, "type +[]", "104h");
+    try expectEval(vm, "$[]", "$[::]");
+    try expectEval(vm, "@[]", "@[::]");
+    try expectEval(vm, "{x+y}[]", "{x+y}[::]");
+    try expectEval(vm, "{x}[]", "::");
+    try testing.expectError(error.type, vm.evalSource("neg[]", .q, "<test>"));
+    // Projections of the overloaded operators apply as their two-argument forms.
+    try expectEval(vm, "$[`long][1.5]", "2");
+    try expectEval(vm, "![-3][1 2]", "\"1 2\"");
+    try expectEval(vm, "![`a`b][1 2]", "`a`b!1 2");
+    try expectEval(vm, "@[{x}][5]", "5");
+    try expectEval(vm, ".[{x+y}][1 2]", "3");
+    try expectEval(vm, "?[1 2 3][2]", "1");
+    try expectEval(vm, "@[1 2 3][0]", "1");
+    try expectEval(vm, "^[0][1 0N]", "1 0");
+    try expectEval(vm, "#[2][1 2 3]", "1 2");
+    try expectEval(vm, "_[2][1 2 3]", ",3");
+    try expectEval(vm, "+[;2][1]", "3");
+    try expectEval(vm, "$[;2]", "$[;2]");
+    try expectEval(vm, "$[1;]", "$[1;]");
+    try testing.expectError(error.type, vm.evalSource("$[1;2]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("$[1][2]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("$[;2][1]", .q, "<test>"));
+    // `$` with three or more arguments is cond.
+    try expectEval(vm, "$[1;2;3]", "2");
+    try expectEval(vm, "$[1;;3]", "::");
+    try expectEval(vm, "$[1;;]", "::");
+    try expectEval(vm, "$[1;2;3;4]", "2");
+    try testing.expectError(error.type, vm.evalSource("$[;;3]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("$[;;;;]", .q, "<test>"));
+    // Holes project at any count; the functional forms are `type` off a table.
+    try expectEval(vm, "?[;;3]", "?[;;3]");
+    try expectEval(vm, "?[;;;]", "?[;;;]");
+    try expectEval(vm, "?[1;;]", "?[1;;]");
+    try expectEval(vm, "![;;;4]", "![;;;4]");
+    try expectEval(vm, "![;;;;]", "![;;;;]");
+    try expectEval(vm, "![1;;]", "![1;;]");
+    try expectEval(vm, "@[;;;4]", "@[;;;4]");
+    try expectEval(vm, "@[1;;;;]", "@[1;;;;]");
+    try expectEval(vm, ".[;;;;;]", ".[;;;;;]");
+    try expectEval(vm, "@[;;3]", "@[;;3]");
+    try testing.expectError(error.type, vm.evalSource("?[;;;][1;2;3;4]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[1;2;3;4]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("?[1;2;3;4;5]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("![1;2;3;4]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("![1;2;3]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("![1;2;3;4;5]", .q, "<test>"));
+    try testing.expectError(error.rank, vm.evalSource("@[1;2;3;4;5]", .q, "<test>"));
+    // A value where amend wants a function.
+    try testing.expectError(error.domain, vm.evalSource("@[1 2 3;0;3]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("@[1 2 3;0;3;4]", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource("@[1 2 3;0;`a;4]", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("@[;;3][1 2 3;0]", .q, "<test>"));
+    try expectEval(vm, "@[1 2 3;0;1 2]", "2 2 3");
 }

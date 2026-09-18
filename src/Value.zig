@@ -563,7 +563,10 @@ pub fn rank(value: *Value) usize {
         .projection => |projection| rank: {
             var filled: usize = 0;
             for (projection.args) |a| filled += @intFromBool(!a.isEmpty());
-            break :rank projection.callee.rank() -| filled;
+            // A projection of `enlist` has as many slots as it was given, so it still
+            // needs its holes; anything else needs what its callee has left.
+            const variadic = projection.callee.as == .unary_primitive and projection.callee.as.unary_primitive == .enlist;
+            break :rank if (variadic) projection.args.len - filled else projection.callee.rank() -| filled;
         },
         // Each takes what its function takes. A fold takes a seed and one list per remaining
         // parameter, so as many arguments as its function, and at least two for a monadic
