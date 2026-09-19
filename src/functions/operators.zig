@@ -1680,7 +1680,8 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
                 // ordinary argument is a type error, as in q.
                 -101, -102, -103, -104 => return error.type,
                 -105 => return trap(vm, y),
-                else => return error.nyi,
+                // A count that is not one of the internals: `0!1` and `1!1 2` are `type`.
+                else => return if (val >= 0) error.type else error.nyi,
             },
         },
         .float => return error.nyi,
@@ -1758,18 +1759,189 @@ pub fn within(vm: *Vm, x: *Value, y: *Value) !*Value {
     return error.nyi;
 }
 
-pub fn like(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// A `like` or `ss` pattern: `?` matches one character, `*` any run (only in `like`,
+/// and only one, or one at each end, as in q), `[abc]`, `[a-c]` and `[^x]` a class in
+/// which a leading `]` and a trailing `-` are literal, and anything else itself (`\`
+/// escapes nothing, `$` is a dollar sign). An unterminated or empty class is an error.
+const Pattern = struct {
+    tokens: []Token,
+
+    const Token = union(enum) {
+        char: u8,
+        any,
+        star,
+        class: Class,
+    };
+
+    const Class = struct {
+        negated: bool,
+        set: [256]bool,
+
+        fn has(self: Class, c: u8) bool {
+            return self.set[c] != self.negated;
+        }
+    };
+
+    const Problem = error{ UnterminatedClass, DoubleStar };
+
+    fn parse(gpa: Allocator, text: []const u8) (Allocator.Error || Problem)!Pattern {
+        var tokens: std.ArrayList(Token) = .empty;
+        errdefer tokens.deinit(gpa);
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            switch (text[i]) {
+                '?' => try tokens.append(gpa, .any),
+                '*' => try tokens.append(gpa, .star),
+                '[' => {
+                    var class: Class = .{ .negated = false, .set = @splat(false) };
+                    i += 1;
+                    if (i < text.len and text[i] == '^') {
+                        class.negated = true;
+                        i += 1;
+                    }
+                    // The first character is a member even when it is `]`.
+                    var first = true;
+                    while (i < text.len) : (i += 1) {
+                        const c = text[i];
+                        if (c == ']' and !first) break;
+                        first = false;
+                        if (i + 2 < text.len and text[i + 1] == '-' and text[i + 2] != ']') {
+                            const lo = @min(c, text[i + 2]);
+                            const hi = @max(c, text[i + 2]);
+                            for (lo..hi + 1) |m| class.set[m] = true;
+                            i += 2;
+                        } else class.set[c] = true;
+                    }
+                    if (i >= text.len) return error.UnterminatedClass;
+                    try tokens.append(gpa, .{ .class = class });
+                },
+                else => |c| try tokens.append(gpa, .{ .char = c }),
+            }
+        }
+        // q takes one star anywhere, or two as the first and last characters (`*b*`);
+        // any other arrangement is `nyi` there.
+        var stars: usize = 0;
+        for (tokens.items) |t| stars += @intFromBool(t == .star);
+        const ends = tokens.items.len > 2 and tokens.items[0] == .star and tokens.items[tokens.items.len - 1] == .star;
+        if (stars > 1 and !(stars == 2 and ends)) return error.DoubleStar;
+        return .{ .tokens = try tokens.toOwnedSlice(gpa) };
+    }
+
+    fn deinit(self: Pattern, gpa: Allocator) void {
+        gpa.free(self.tokens);
+    }
+
+    /// Whether the whole of `text` matches, backtracking over the stars.
+    fn matches(self: Pattern, text: []const u8) bool {
+        return matchFrom(self.tokens, text);
+    }
+
+    fn matchFrom(tokens: []const Token, text: []const u8) bool {
+        if (tokens.len == 0) return text.len == 0;
+        switch (tokens[0]) {
+            .star => {
+                var skip: usize = 0;
+                while (skip <= text.len) : (skip += 1) {
+                    if (matchFrom(tokens[1..], text[skip..])) return true;
+                }
+                return false;
+            },
+            else => {
+                if (text.len == 0 or !matchOne(tokens[0], text[0])) return false;
+                return matchFrom(tokens[1..], text[1..]);
+            },
+        }
+    }
+
+    fn matchOne(token: Token, c: u8) bool {
+        return switch (token) {
+            .char => |p| p == c,
+            .any => true,
+            .class => |class| class.has(c),
+            .star => unreachable,
+        };
+    }
+
+    /// Whether `text` matches at `at` a pattern without stars, whose width is its count.
+    fn matchesAt(self: Pattern, text: []const u8, at: usize) bool {
+        if (at + self.tokens.len > text.len) return false;
+        for (self.tokens, text[at .. at + self.tokens.len]) |token, c| {
+            if (!matchOne(token, c)) return false;
+        }
+        return true;
+    }
+};
+
+/// `x like p`: whether a string, or the name of a symbol, matches the pattern, over a
+/// list of strings or symbols one by one. An atom on either side is `type`.
+pub fn like(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (y.as != .char_list) return error.type;
+    const pattern = Pattern.parse(vm.gpa, y.as.char_list) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnterminatedClass => return vm.failWith("["),
+        error.DoubleStar => return error.nyi,
+    };
+    defer pattern.deinit(vm.gpa);
+    switch (x.as) {
+        .char_list => |text| return vm.createValue(.boolean, pattern.matches(text)),
+        .symbol => |s| return vm.createValue(.boolean, pattern.matches(vm.internedString(s))),
+        .symbol_list => |names| {
+            const result = try vm.allocValue(.boolean_list, names.len);
+            for (result.as.boolean_list, names) |*r, s| r.* = pattern.matches(vm.internedString(s));
+            return result;
+        },
+        .list => |items| {
+            const result = try vm.allocValue(.boolean_list, items.len);
+            errdefer result.deref(vm.gpa);
+            for (result.as.boolean_list, items) |*r, item| {
+                if (item.as != .char_list) return error.type;
+                r.* = pattern.matches(item.as.char_list);
+            }
+            return result;
+        },
+        else => return error.type,
+    }
 }
 
-pub fn ss(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+/// `x ss p`: where the pattern matches in a string, left to right without overlap, as
+/// a list of positions. A character finds itself; a string is a pattern without `*`,
+/// anything else in it (a star, an unterminated class, nothing at all) being `length`.
+pub fn ss(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
+    if (x.as != .char_list) return error.type;
+    const text = x.as.char_list;
+    const pattern: Pattern = switch (y.as) {
+        .char => |c| blk: {
+            const tokens = try vm.gpa.alloc(Pattern.Token, 1);
+            tokens[0] = .{ .char = c };
+            break :blk .{ .tokens = tokens };
+        },
+        .char_list => |p| blk: {
+            if (p.len == 0) return error.length;
+            const parsed = Pattern.parse(vm.gpa, p) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.length,
+            };
+            for (parsed.tokens) |t| if (t == .star) {
+                parsed.deinit(vm.gpa);
+                return error.length;
+            };
+            break :blk parsed;
+        },
+        else => return error.type,
+    };
+    defer pattern.deinit(vm.gpa);
+    var found: std.ArrayList(i64) = .empty;
+    defer found.deinit(vm.gpa);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (pattern.matchesAt(text, i)) {
+            try found.append(vm.gpa, @intCast(i));
+            i += pattern.tokens.len;
+        } else i += 1;
+    }
+    const result = try vm.allocValue(.long_list, found.items.len);
+    @memcpy(result.as.long_list, found.items);
+    return result;
 }
 
 pub fn insert(vm: *Vm, x: *Value, y: *Value) !*Value {
@@ -2551,8 +2723,11 @@ pub fn sv(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
                     if (names.len == 0) return error.type;
                     var buffer: std.ArrayList(u8) = .empty;
                     defer buffer.deinit(vm.gpa);
+                    // A first symbol starting with `:` is a file path, joined with `/`.
+                    const first = vm.internedString(names[0]);
+                    const joiner: u8 = if (first.len > 0 and first[0] == ':') '/' else '.';
                     for (names, 0..) |name, i| {
-                        if (i > 0) try buffer.append(vm.gpa, '.');
+                        if (i > 0) try buffer.append(vm.gpa, joiner);
                         try buffer.appendSlice(vm.gpa, vm.internedString(name));
                     }
                     return vm.createValue(.symbol, try vm.intern(buffer.items));
@@ -2694,7 +2869,23 @@ pub fn vs(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
             if (s != .empty) return error.nyi;
             switch (y.as) {
                 .symbol => |name| {
-                    const text = vm.internedString(name);
+                    // Interning a piece may move the string bytes, so the text is copied.
+                    const text = try vm.gpa.dupe(u8, vm.internedString(name));
+                    defer vm.gpa.free(text);
+                    // A file path splits into its directory and name at the last `/`, the
+                    // directory of a bare name being `:.` and of `:/a` just `:`.
+                    if (text.len > 0 and text[0] == ':') {
+                        const result = try vm.allocValue(.symbol_list, 2);
+                        errdefer result.deref(vm.gpa);
+                        if (std.mem.lastIndexOfScalar(u8, text, '/')) |slash| {
+                            result.as.symbol_list[0] = try vm.intern(if (slash == 1) ":" else text[0..slash]);
+                            result.as.symbol_list[1] = try vm.intern(text[slash + 1 ..]);
+                        } else {
+                            result.as.symbol_list[0] = try vm.intern(":.");
+                            result.as.symbol_list[1] = try vm.intern(text[1..]);
+                        }
+                        return result;
+                    }
                     var count: usize = 1;
                     for (text) |c| count += @intFromBool(c == '.');
                     const result = try vm.allocValue(.symbol_list, count);
@@ -2998,10 +3189,17 @@ pub fn vectorConditional(vm: *Vm, c: *Value, a: *Value, b: *Value) Vm.RunError!*
 /// integer `x` is a permutation of `til x`. The generator is seeded by `\\S` but is not
 /// q's, so the values differ from q's for the same seed.
 fn roll(vm: *Vm, n_value: *Value, x: *Value) Vm.RunError!*Value {
+    // The count is any integer-like atom (`2000.01.01?1` is `0?1`); a character is
+    // `domain`, as `"x"?"["` is in q, and a float `type`.
     const n_raw: ?i64 = switch (n_value.as) {
+        .boolean => |b| @intFromBool(b),
+        .byte => |b| b,
         .short => |v| if (v == @backingInt(Value.Short.null)) null else v,
         .int => |v| if (v == @backingInt(Value.Int.null)) null else v,
         .long => |v| if (v == @backingInt(Value.Long.null)) null else v,
+        .date, .minute, .second, .time, .month => |v| v,
+        .timestamp, .timespan => |v| v,
+        .char => return error.domain,
         else => return error.type,
     };
     const random = vm.random.random();

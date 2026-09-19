@@ -4989,7 +4989,7 @@ test "review fixes: precedence, k newlines, scans, equality, stubs and long list
 
     // Stubs fail with nyi instead of crashing.
     try testing.expectError(error.nyi, vm.evalSource("flip 1 2!(3 4;5 6)", .q, "<test>"));
-    try testing.expectError(error.nyi, vm.evalSource("1 2 3 like \"a\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("1 2 3 like \"a\"", .q, "<test>"));
 
     // A long list literal that fails part way is cleaned up (it used to move the stack).
     try testing.expectError(error.type, vm.evalSource("(\"a\";\"b\";\"c\";\"d\";\"e\";\"f\";\"g\";\"h\";\"i\";\"j\";\"k\";\"l\";\"m\";\"n\";\"o\";\"p\";\"q\";\"r\";\"s\";\"t\";\"u\";\"v\" \"w\";\"x\")", .q, "<test>"));
@@ -7160,4 +7160,68 @@ test "qSQL follows q: parse trees, select, exec, update, delete and the function
     try expectEval(vm, "type (<=)", "105h");
     try expectEval(vm, "(<=)[;2]", "~>[;2]");
     try expectEval(vm, "{x>=y}[2 3;2]", "11b");
+}
+
+test "like, ss and the symbol path forms follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // `like`: `?`, one `*` (or one at each end), classes with ranges, negation, a
+    // leading `]` and a trailing `-` literal; `\` and `$` are plain characters.
+    try expectEval(vm, "\"abc\" like \"a?c\"", "1b");
+    try expectEval(vm, "\"abc\" like \"a?\"", "0b");
+    try expectEval(vm, "\"abcabc\" like \"*abc\"", "1b");
+    try expectEval(vm, "\"abc\" like \"*b*\"", "1b");
+    try expectEval(vm, "\"abc\" like \"*x*\"", "0b");
+    try expectEval(vm, "\"abc\" like \"abcd\"", "0b");
+    try expectEval(vm, "\"\" like \"\"", "1b");
+    try expectEval(vm, "\"abc\" like \"\"", "0b");
+    try expectEval(vm, "\"1a\" like \"[0-9]*\"", "1b");
+    try expectEval(vm, "\"a1\" like \"[0-9]*\"", "0b");
+    try expectEval(vm, "\"-x\" like \"-[^0-9]*\"", "1b");
+    try expectEval(vm, "\"-1\" like \"-[^0-9]*\"", "0b");
+    try expectEval(vm, "\"a[c\" like \"a[[]c\"", "1b");
+    try expectEval(vm, "\"a]c\" like \"a[]]c\"", "1b");
+    try expectEval(vm, "\"a-c\" like \"a[a-]c\"", "1b");
+    try expectEval(vm, "\"ab]\" like \"a[b]]\"", "1b");
+    try expectEval(vm, "\"a*c\" like \"a\\\\*c\"", "0b");
+    try expectEval(vm, "\"a\\\\c\" like \"a\\\\c\"", "1b");
+    try expectEval(vm, "\"a$\" like \"*$\"", "1b");
+    try expectEval(vm, "\"ABC\" like \"a*\"", "0b");
+    try expectEval(vm, "`abc`x like \"ab*\"", "10b");
+    try expectEval(vm, "(\"abc\";\"abd\";\"xy\") like \"ab?\"", "110b");
+    try testing.expectError(error.type, vm.evalSource("\"abc\" like \"*\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\"a\" like \"a*\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(`abc;\"abd\") like \"a*\"", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("\"abc\" like \"*a*b*\"", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("\"abc\" like \"**\"", .q, "<test>"));
+    try expectSignal(vm, "\"abc\" like \"a[bc\"", "[");
+    try expectSignal(vm, "\"abc\" like \"ab[]\"", "[");
+
+    // `ss`: positions of non-overlapping matches, a character or a pattern without `*`.
+    try expectEval(vm, "\"hello\" ss \"l\"", "2 3");
+    try expectEval(vm, "\"hello\" ss \"ll\"", ",2");
+    try expectEval(vm, "\"hello\" ss \"[lo]\"", "2 3 4");
+    try expectEval(vm, "\"hello\" ss \"?l\"", ",1");
+    try expectEval(vm, "\"aaaa\" ss \"aa\"", "0 2");
+    try expectEval(vm, "\"hello\" ss \"x\"", "`long$()");
+    try expectEval(vm, "\"hello\" ss \"*\"", "`long$()");
+    try expectEval(vm, "\"a[b\" ss \"[[]\"", ",1");
+    try testing.expectError(error.length, vm.evalSource("\"hello\" ss \"l*\"", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("\"hello\" ss \"\"", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("\"hello\" ss \"l[\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`hello ss \"l\"", .q, "<test>"));
+
+    // File paths: `` ` `` joins symbols with `/` after a first one starting with `:`, and
+    // splits such a symbol into its directory and name.
+    try expectEvalMode(vm, .k, "`/:`:/a`b`c", "`:/a/b/c");
+    try expectEvalMode(vm, .k, "`/:`:`a", "`:/a");
+    try expectEvalMode(vm, .k, "`/:`:/a/`b", "`:/a//b");
+    try expectEvalMode(vm, .k, "`/:``a", "`.a");
+    try expectEvalMode(vm, .k, "`\\:`:/a/b/c.txt", "`:/a/b`c.txt");
+    try expectEvalMode(vm, .k, "`\\:`:a", "`:.`a");
+    try expectEvalMode(vm, .k, "`\\:`:/a", "`:`a");
+    try expectEvalMode(vm, .k, "`\\:`:/", "`:`");
+    try expectEvalMode(vm, .k, "`\\:`a.b.c", "`a`b`c");
 }

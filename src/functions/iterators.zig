@@ -149,6 +149,11 @@ fn fold(vm: *Vm, f: *Value, args: []*Value, comptime keep: bool) RunError!*Value
 
     if (args.len == 1) {
         const x = args[0];
+        // A dictionary folds over its values (`,/[()!()]` is `()`).
+        if (x.as == .dict) {
+            var values = [_]*Value{x.as.dict.values};
+            return fold(vm, f, &values, keep);
+        }
         if (!x.isList()) return x.ref();
         const n = x.count();
         if (n == 0) return if (keep) x.ref() else emptyFold(vm, f, x);
@@ -187,6 +192,8 @@ fn fold(vm: *Vm, f: *Value, args: []*Value, comptime keep: bool) RunError!*Value
         acc = next;
         if (keep) try results.append(vm.gpa, acc.ref());
     }
+    // Joining nothing onto a seed still joins: `0,/()` is `,0`, as in q.
+    if (n == 0 and !keep and lists.len == 1 and f.as == .operator and f.as.operator == .join) return q.operators.join(vm, acc, lists[0]);
     if (!keep) return acc.ref();
     return if (results.items.len == 0) vm.allocValue(.list, 0) else vm.enlist(results.items);
 }
