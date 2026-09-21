@@ -19,7 +19,7 @@ fn textValue(vm: *Vm, bytes: []const u8) Allocator.Error!*Value {
 }
 
 /// The path a file symbol names, without its leading colon.
-fn pathOf(vm: *Vm, y: *Value) error{type}![]const u8 {
+pub fn pathOf(vm: *Vm, y: *Value) error{type}![]const u8 {
     if (y.as != .symbol) return error.type;
     const text = vm.internedString(y.as.symbol);
     return if (text.len > 0 and text[0] == ':') text[1..] else text;
@@ -36,7 +36,7 @@ fn osMessage(err: anyerror) []const u8 {
 }
 
 /// A failure the way q reports one about a file: `'path. OS reports: message`.
-fn failOs(vm: *Vm, path: []const u8, err: anyerror) RunError {
+pub fn failOs(vm: *Vm, path: []const u8, err: anyerror) RunError {
     const message = try std.fmt.allocPrint(vm.gpa, "{s}. OS reports: {s}", .{ path, osMessage(err) });
     defer vm.gpa.free(message);
     return vm.failWith(message);

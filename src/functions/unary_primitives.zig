@@ -284,15 +284,11 @@ pub fn @"type"(vm: *Vm, x: *Value) !*Value {
 }
 
 pub fn read_text(vm: *Vm, x: *Value) !*Value {
-    _ = x; // autofix
-    _ = vm; // autofix
-    return error.nyi;
+    return q.files.read0(vm, x);
 }
 
 pub fn read_binary(vm: *Vm, x: *Value) !*Value {
-    _ = x; // autofix
-    _ = vm; // autofix
-    return error.nyi;
+    return q.files.read1(vm, x);
 }
 
 pub fn enlist(vm: *Vm, x: *Value) !*Value {
@@ -422,9 +418,7 @@ pub fn getenv(vm: *Vm, x: *Value) Vm.RunError!*Value {
 }
 
 pub fn hopen(vm: *Vm, x: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    return error.nyi;
+    return q.files.hopen(vm, x);
 }
 
 // last is defined with the aggregates below.
@@ -864,8 +858,8 @@ pub fn not(vm: *Vm, x: *Value) Vm.RunError!*Value {
         .list => |items| return mapItems(vm, items, not),
         .dict => return mapValues(vm, x, not),
         .table => return q.operators.mapColumns(vm, x, not),
-        // A symbol atom is `nyi` in q, a symbol list a type error.
-        .symbol => return error.nyi,
+        // A symbol atom is `nyi` in q, unless it names a file, which `hdel` (`~:`) removes.
+        .symbol => return if (q.files.isFileSymbol(vm, x)) q.files.delete(vm, x) else error.nyi,
         inline .boolean,
         .byte,
         .short,
@@ -1200,6 +1194,8 @@ fn grade(vm: *Vm, x: *Value, comptime descending: bool) Vm.RunError!*Value {
         var args = [_]*Value{positions};
         return vm.applyImpl(x.as.dict.keys, &args);
     }
+    // `>:` on a handle is `hclose`, as q.k defines it.
+    if (descending and (x.as == .int or x.as == .long)) return q.files.hclose(vm, x);
     if (!x.isList()) return error.type;
     const n = x.count();
     const result = try vm.allocValue(.long_list, n);
@@ -1328,6 +1324,8 @@ fn til(vm: *Vm, n: usize) Allocator.Error!*Value {
 fn keyOfName(vm: *Vm, x: *Value, s: Symbol) Vm.RunError!*Value {
     if (s == .empty) return vm.state.as.dict.keys.ref();
     const name = vm.internedString(s);
+    // A file symbol lists a directory.
+    if (name[0] == ':') return q.files.list(vm, x);
     if (name[0] == '.') {
         const namespace = (try vm.namespaceAt(name, false)) orelse return vm.allocValue(.list, 0);
         const keys = namespace.as.dict.keys;
@@ -1392,7 +1390,8 @@ pub fn value(vm: *Vm, x: *Value) Vm.RunError!*Value {
             defer vm.gpa.free(slice);
             return vm.evalSource(slice, .q, "<value>");
         },
-        .symbol => |identifier| return vm.readGlobal(identifier),
+        // A file symbol reads the q data file it names.
+        .symbol => |identifier| return if (q.files.isFileSymbol(vm, x)) q.files.get(vm, x) else vm.readGlobal(identifier),
         .lambda => |lambda| {
             const bytecode = try vm.allocValue(.long_list, lambda.bytecode.len);
             errdefer bytecode.deref(vm.gpa);

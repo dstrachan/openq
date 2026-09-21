@@ -1660,10 +1660,27 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
             else => switch (val) {
                 -1 => return hsym(vm, y),
                 -2 => return vm.createValue(.symbol, if (y.attr == .none) .empty else try vm.intern(@tagName(y.attr))),
-                -3 => return vm.createCharList("{f}", .{y.fmt(vm)}),
+                // `-3!` shows one less than the console width, ending in `..` when cut.
+                -3 => {
+                    const text = try vm.createCharList("{f}", .{y.fmt(vm)});
+                    const width: usize = @intCast(vm.console[1] - 1);
+                    if (text.as.char_list.len <= width) return text;
+                    defer text.deref(vm.gpa);
+                    const shortened = try vm.allocValue(.char_list, width);
+                    @memcpy(shortened.as.char_list[0 .. width - 2], text.as.char_list[0 .. width - 2]);
+                    @memcpy(shortened.as.char_list[width - 2 ..], "..");
+                    return shortened;
+                },
                 -5 => return vm.parse(y),
                 -6 => return vm.eval(y),
                 -7 => return q.internal.hcount(vm, y),
+                -8 => return q.files.serialize(vm, y),
+                -9 => return q.files.deserialize(vm, y),
+                // `-19!(x;path;lbs;alg;lvl)` writes compressed in q; here plainly.
+                -19 => {
+                    if (y.as != .list or y.as.list.len != 5) return error.type;
+                    return q.files.set(vm, y.as.list[1], y.as.list[0]);
+                },
                 -12 => return q.internal.host(vm, y),
                 -13 => return q.internal.addr(vm, y),
                 -15 => return digest(vm, std.crypto.hash.Md5, y),
@@ -1730,17 +1747,11 @@ pub fn apply(vm: *Vm, x: *Value, y: *Value) !*Value {
 }
 
 pub fn file_text(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+    return q.files.writeText(vm, x, y);
 }
 
 pub fn file_binary(vm: *Vm, x: *Value, y: *Value) !*Value {
-    _ = vm; // autofix
-    _ = x; // autofix
-    _ = y; // autofix
-    return error.nyi;
+    return q.files.writeBytes(vm, x, y);
 }
 
 pub fn dynamic_load(vm: *Vm, x: *Value, y: *Value) !*Value {
@@ -2977,7 +2988,7 @@ fn splitText(vm: *Vm, text: []const u8, separator: []const u8) Vm.RunError!*Valu
 }
 
 /// The value of an integer atom for a radix, null for a null.
-fn integerOf(y: *Value) error{type}!?i64 {
+pub fn integerOf(y: *Value) error{type}!?i64 {
     return switch (y.as) {
         .boolean => |b| @intFromBool(b),
         .short => |v| if (v == @backingInt(Value.Short.null)) null else v,

@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         preopens = try .init(arena);
     }
 
-    if (args.len <= 1) return cmdRepl(gpa, io, &environ_map);
+    if (args.len <= 1) return cmdRepl(gpa, io, &environ_map, null, &.{}, false);
     return mainArgs(gpa, arena, io, args, &environ_map);
 }
 
@@ -124,12 +124,16 @@ fn mainArgs(
     args: []const [:0]const u8,
     environ_map: *std.process.Environ.Map,
 ) !void {
-    _ = gpa; // autofix
     _ = arena; // autofix
-    _ = environ_map; // autofix
     const cmd = args[1];
-    const cmd_args = args[2..];
-    _ = cmd_args; // autofix
+    // `openq script.q args` runs the script, then reads the console; `-q` is quiet.
+    const quiet = std.mem.eql(u8, cmd, "-q");
+    const script_at: usize = if (quiet) 2 else 1;
+    if (quiet or std.mem.endsWith(u8, cmd, ".q") or std.mem.endsWith(u8, cmd, ".k")) {
+        const script: ?[]const u8 = if (args.len > script_at) args[script_at] else null;
+        const rest = if (args.len > script_at + 1) args[script_at + 1 ..] else &.{};
+        return cmdRepl(gpa, io, environ_map, script, rest, quiet);
+    }
     switch (std.meta.stringToEnum(Cmd, cmd) orelse {
         std.debug.print("{s}\n", .{usage});
         std.process.fatal("unknown command: {s}", .{cmd});
@@ -146,7 +150,7 @@ fn mainArgs(
 const banner = "OpenQ " ++ build_options.version ++ " " ++
     @tagName(builtin.mode) ++ " " ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag) ++ "\n";
 
-fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void {
+fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map, script: ?[]const u8, script_args: []const [:0]const u8, quiet: bool) !void {
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
@@ -155,12 +159,33 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
     const vm: *Vm = try .init(io, gpa, stdout);
     defer vm.deinit();
     try vm.environ.putAll(environ_map);
+    vm.quiet = quiet;
+
+    // `.z.f` names the script and `.z.x` lists the arguments after it.
+    if (script) |path| {
+        vm.script = try vm.intern(path);
+        const arguments = try vm.allocValue(.list, script_args.len);
+        vm.arguments = arguments;
+        for (arguments.as.list, script_args) |*slot, arg| slot.* = try vm.createValue(.char_list, try gpa.dupe(u8, arg));
+        const value = vm.loadScript(path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.signal, error.identifier => {
+                std.debug.print("'{s}\n", .{vm.signal_message orelse @errorName(err)});
+                std.process.exit(1);
+            },
+            else => {
+                std.debug.print("'{t}\n", .{err});
+                std.process.exit(1);
+            },
+        };
+        value.deref(gpa);
+    }
 
     var buffer: Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();
 
     if (try Io.File.stdin().isTty(io)) {
-        std.debug.print("{s}\n", .{banner});
+        if (!quiet) std.debug.print("{s}\n", .{banner});
 
         var mode: Ast.Mode = .q;
         while (true) {
@@ -194,8 +219,8 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map) !void 
             const value = vm.evalSource(source, mode, "<stdin>") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidCharacter => return error.InvalidCharacter,
-                error.signal => {
-                    std.debug.print("'{s}\n", .{vm.signal_message orelse ""});
+                error.signal, error.identifier => {
+                    std.debug.print("'{s}\n", .{vm.signal_message orelse @errorName(err)});
                     continue;
                 },
                 else => {

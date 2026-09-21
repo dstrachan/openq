@@ -73,6 +73,24 @@ scope: ?Scope = null,
 /// The environment `getenv` reads and `setenv` writes: the process's own, copied in by
 /// `main`, and empty in tests.
 environ: std.process.Environ.Map,
+/// The console size `\c` (rows, columns) and the web console size `\C`.
+console: [2]i32 = .{ 25, 80 },
+console_web: [2]i32 = .{ 36, 2000 },
+/// The settings `\e`, `\g`, `\o`, `\t`, `\T`, `\W` and `\z` hold, as q shows them.
+error_trap: i32 = 0,
+gc_mode: i32 = 0,
+utc_offset: i32 = @backingInt(Value.Int.null),
+timer: i32 = 0,
+timeout: i32 = 0,
+week_offset: i32 = 2,
+date_format: i32 = 0,
+/// Open file handles by their number, which `hopen` gives out and `hclose` takes back.
+handles: std.AutoArrayHashMapUnmanaged(i32, Io.File) = .empty,
+/// The script `.z.f` names and the arguments `.z.x` lists, set by `main`; `.z.q` is the
+/// quiet flag.
+script: Symbol = .empty,
+arguments: ?*Value = null,
+quiet: bool = false,
 
 pub const Scope = struct {
     lambda: *const Value.Lambda,
@@ -296,6 +314,9 @@ pub fn qEntry(vm: *Vm, name: []const u8) ?*Value {
 pub fn deinit(vm: *Vm) void {
     if (vm.signal_message) |message| vm.gpa.free(message);
     vm.environ.deinit();
+    for (vm.handles.values()) |file| file.close(vm.io);
+    vm.handles.deinit(vm.gpa);
+    if (vm.arguments) |a| a.deref(vm.gpa);
     vm.local_zone.deinit();
     vm.string_table.deinit(vm.gpa);
     vm.string_bytes.deinit(vm.gpa);
@@ -343,11 +364,11 @@ fn push(vm: *Vm, value: *Value) void {
 pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     assert(args.len > 0);
     switch (func.as) {
+        // An int is a handle: `1 "text"` prints, `h "text"` appends to a file.
+        .int, .long => return if (args.len == 1) q.files.write(vm, func, args[0]) else error.type,
         .boolean,
         .byte,
         .short,
-        .int,
-        .long,
         .real,
         .float,
         .char,
@@ -602,6 +623,8 @@ fn applyForm(vm: *Vm, operator: Operator, args: []*Value) RunError!*Value {
     if (x.as != .symbol) return vm.amendValue(x, index, function, value);
 
     const plain = function.as == .operator and function.as.operator == .assign and index.count() == 0 and value != null;
+    // `.[`:path;();:;v]` is how q.k's `set` writes a file; other amends of a file are `type`.
+    if (q.files.isFileSymbol(vm, x)) return if (plain) q.files.set(vm, x, value.?) else error.type;
     const new_value = if (plain) value.?.ref() else amended: {
         const old = try vm.readGlobal(x.as.symbol);
         defer old.deref(vm.gpa);
@@ -615,7 +638,7 @@ fn applyForm(vm: *Vm, operator: Operator, args: []*Value) RunError!*Value {
 /// The text a trap handler receives: the signalled message, or the error's name, which
 /// matches q's for `rank`, `type`, `length` and `domain`.
 pub fn errorText(vm: *Vm, err: RunError) Allocator.Error!*Value {
-    const text = if (err == error.signal) (vm.signal_message orelse "") else @errorName(err);
+    const text = if (err == error.signal or err == error.identifier) (vm.signal_message orelse @errorName(err)) else @errorName(err);
     const value = try vm.allocValue(.char_list, text.len);
     @memcpy(value.as.char_list, text);
     return value;
@@ -1355,8 +1378,8 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
         .symbol => |name| {
             if (vm.columns) |columns| if (try vm.keyPosition(columns.as.dict.keys, x)) |i| return q.operators.itemAt(vm, columns.as.dict.values, i);
             if (vm.scope) |scope| {
-                if (std.mem.findScalar(Symbol, scope.lambda.params, name)) |i| return (scope.slots[i] orelse return error.identifier).ref();
-                if (std.mem.findScalar(Symbol, scope.lambda.locals, name)) |i| return (scope.slots[scope.lambda.params.len + i] orelse return error.identifier).ref();
+                if (std.mem.findScalar(Symbol, scope.lambda.params, name)) |i| return (scope.slots[i] orelse return vm.undefinedName(name)).ref();
+                if (std.mem.findScalar(Symbol, scope.lambda.locals, name)) |i| return (scope.slots[scope.lambda.params.len + i] orelse return vm.undefinedName(name)).ref();
                 return vm.readGlobalIn(name, scope.lambda.namespace);
             }
             return q.unary_primitives.value(vm, x);
@@ -1937,26 +1960,221 @@ pub fn system(vm: *Vm, command: []const u8) !*Value {
     // the rest of the line as q does; the shell gets the whole line.
     const rest = std.mem.trim(u8, command[name_end..], " \t");
     const args = rest[0 .. std.mem.findAny(u8, rest, " \t") orelse rest.len];
+    const Command = enum { a, b, c, C, cd, d, e, f, g, l, o, p, P, r, s, S, t, T, u, v, w, W, x, z, @"_", @"1", @"2", ts };
+    if (command.len == 0) return vm.getUnaryPrimitive(.identity);
+    // `\t:n expr` and `\ts:n expr` time `n` repetitions.
+    if (std.mem.startsWith(u8, name, "t:") or std.mem.startsWith(u8, name, "ts:")) {
+        const colon = std.mem.findScalar(u8, name, ':').?;
+        const repeats = std.fmt.parseInt(usize, name[colon + 1 ..], 10) catch return vm.shell(command);
+        return vm.timeExpression(rest, name[1] == 's', repeats);
+    }
+    const which = std.meta.stringToEnum(Command, name) orelse return vm.shell(command);
+    switch (which) {
+        .d => {
+            if (args.len == 0) return vm.createValue(.symbol, vm.namespace);
+            if (args[0] != '.') return error.domain;
+            vm.namespace = try vm.intern(args);
+            return vm.getUnaryPrimitive(.identity);
+        },
+        .P => {
+            if (args.len == 0) return vm.createValue(.int, vm.precision);
+            const precision = std.fmt.parseInt(u8, args, 10) catch return error.domain;
+            vm.precision = @min(precision, q.decimal.max_precision);
+            return vm.getUnaryPrimitive(.identity);
+        },
+        .S => {
+            if (args.len == 0) return vm.createValue(.int, vm.seed);
+            const seed = std.fmt.parseInt(i32, args, 10) catch return error.domain;
+            if (seed == 0) return error.domain;
+            vm.seed = seed;
+            vm.random = .init(@bitCast(@as(i64, vm.seed)));
+            return vm.getUnaryPrimitive(.identity);
+        },
+        // The console sizes: two numbers set them (kept within 10 and 2000), anything
+        // else shows them, three numbers are `domain`.
+        .c, .C => {
+            const size = if (which == .c) &vm.console else &vm.console_web;
+            var numbers: [3]i32 = undefined;
+            var count: usize = 0;
+            var it = std.mem.tokenizeAny(u8, rest, " \t");
+            while (it.next()) |word| {
+                const n = std.fmt.parseInt(i32, word, 10) catch break;
+                if (count == 3) return error.domain;
+                numbers[count] = n;
+                count += 1;
+            }
+            if (count == 3) return error.domain;
+            if (count == 2) {
+                size[0] = @min(@max(numbers[0], 10), 2000);
+                size[1] = @min(@max(numbers[1], 10), 2000);
+                return vm.getUnaryPrimitive(.identity);
+            }
+            const result = try vm.allocValue(.int_list, 2);
+            result.as.int_list[0] = size[0];
+            result.as.int_list[1] = size[1];
+            return result;
+        },
+        // Settings that are an int: shown bare, set with a number.
+        .e, .g, .o, .t, .T, .W, .z => {
+            const slot: *i32 = switch (which) {
+                .e => &vm.error_trap,
+                .g => &vm.gc_mode,
+                .o => &vm.utc_offset,
+                .t => &vm.timer,
+                .T => &vm.timeout,
+                .W => &vm.week_offset,
+                .z => &vm.date_format,
+                else => unreachable,
+            };
+            if (rest.len == 0) return vm.createValue(.int, slot.*);
+            if (std.fmt.parseInt(i32, args, 10)) |n| {
+                slot.* = n;
+                return vm.getUnaryPrimitive(.identity);
+            } else |_| {}
+            if (which == .o and std.mem.eql(u8, args, "0N")) {
+                slot.* = @backingInt(Value.Int.null);
+                return vm.getUnaryPrimitive(.identity);
+            }
+            // `\t expr` times an expression in milliseconds.
+            if (which == .t) return vm.timeExpression(rest, false, 1);
+            return error.domain;
+        },
+        .ts => return vm.timeExpression(rest, true, 1),
+        .s => {
+            if (rest.len == 0) return vm.createValue(.int, 0);
+            if (std.mem.eql(u8, args, "0")) return vm.getUnaryPrimitive(.identity);
+            return vm.failWith("enable secondary threads via cmd line -s only");
+        },
+        .p => if (rest.len == 0) return vm.createValue(.int, 0) else return error.nyi,
+        .@"_" => return vm.createValue(.boolean, false),
+        .w => {
+            const result = try vm.allocValue(.long_list, if (rest.len == 0) 6 else 2);
+            @memset(result.as.long_list, 0);
+            return result;
+        },
+        .cd => {
+            if (rest.len == 0) {
+                var buffer: [std.fs.max_path_bytes]u8 = undefined;
+                const len = Io.Dir.cwd().realPathFile(vm.io, ".", &buffer) catch return error.os;
+                return vm.createCharList("{s}", .{buffer[0..len]});
+            }
+            Io.Threaded.chdir(rest) catch |err| return q.internal.failOs(vm, rest, err);
+            return vm.getUnaryPrimitive(.identity);
+        },
+        .l => {
+            if (rest.len == 0 or rest.len != args.len) return error.nyi;
+            return vm.loadScript(rest);
+        },
+        .x => {
+            // Expunging a handler resets it; there is nothing to reset here.
+            return vm.getUnaryPrimitive(.identity);
+        },
+        .a, .b, .f, .v => return vm.namespaceListing(which, rest),
+        .r, .u, .@"1", .@"2" => return error.nyi,
+    }
+}
 
-    if (std.mem.eql(u8, name, "d")) {
-        if (args.len == 0) return vm.createValue(.symbol, vm.namespace);
-        if (args[0] != '.') return error.domain;
-        vm.namespace = try vm.intern(args);
-        return vm.getUnaryPrimitive(.identity);
+/// `\a`, `\b`, `\f` and `\v`: the tables, views, functions and variables of a namespace
+/// (the current one, or the one named) as a sorted symbol list.
+fn namespaceListing(vm: *Vm, which: anytype, path: []const u8) !*Value {
+    const name = if (path.len == 0) vm.internedString(vm.namespace) else path;
+    if (name.len == 0 or name[0] != '.') return vm.failWith(name);
+    const namespace = (try vm.namespaceAt(name, false)) orelse return vm.failWith(name);
+    const d = namespace.as.dict;
+    var names: std.ArrayList(Symbol) = .empty;
+    defer names.deinit(vm.gpa);
+    for (d.keys.as.symbol_list, d.values.as.list) |key, value| {
+        if (key == .empty) continue;
+        if (value.as == .dict and value.as.dict.keys.as == .symbol_list and value.as.dict.keys.as.symbol_list.len > 0 and value.as.dict.keys.as.symbol_list[0] == .empty) continue;
+        const wanted = switch (which) {
+            .a => value.as == .table,
+            .b => false,
+            .f => isFunction(value),
+            .v => !isFunction(value),
+            else => unreachable,
+        };
+        if (wanted) try names.append(vm.gpa, key);
     }
-    if (std.mem.eql(u8, name, "P")) {
-        if (args.len == 0) return vm.createValue(.int, vm.precision);
-        const precision = std.fmt.parseInt(u8, args, 10) catch return error.domain;
-        vm.precision = @min(precision, q.decimal.max_precision);
-        return vm.getUnaryPrimitive(.identity);
+    const Context = struct {
+        vm: *Vm,
+        fn lessThan(ctx: @This(), a: Symbol, b: Symbol) bool {
+            return std.mem.order(u8, ctx.vm.internedString(a), ctx.vm.internedString(b)) == .lt;
+        }
+    };
+    std.sort.block(Symbol, names.items, Context{ .vm = vm }, Context.lessThan);
+    const result = try vm.allocValue(.symbol_list, names.items.len);
+    @memcpy(result.as.symbol_list, names.items);
+    return result;
+}
+
+/// `\t expr` and `\ts expr`: the milliseconds an expression takes, with `ts` the bytes
+/// it used as well (none counted here).
+fn timeExpression(vm: *Vm, text: []const u8, with_space: bool, repeats: usize) !*Value {
+    const source = try vm.gpa.dupeSentinel(u8, text, 0);
+    defer vm.gpa.free(source);
+    const started = q.clock.now(vm.io);
+    for (0..repeats) |_| {
+        const value = try vm.evalSource(source, .q, "<timed>");
+        value.deref(vm.gpa);
     }
-    if (std.mem.eql(u8, name, "S")) {
-        if (args.len == 0) return vm.createValue(.int, vm.seed);
-        vm.seed = std.fmt.parseInt(i32, args, 10) catch return error.domain;
-        vm.random = .init(@bitCast(@as(i64, vm.seed)));
-        return vm.getUnaryPrimitive(.identity);
+    const elapsed: i64 = @divFloor(q.clock.now(vm.io) - started, 1_000_000);
+    if (!with_space) return vm.createValue(.long, elapsed);
+    const result = try vm.allocValue(.long_list, 2);
+    result.as.long_list[0] = elapsed;
+    result.as.long_list[1] = 0;
+    return result;
+}
+
+/// `\l path`: runs a script, `.k` files in k mode and others in q mode, statement by
+/// statement (a line and the indented lines after it), showing the value of every
+/// expression that is not an assignment as the console would. A line holding only `/`
+/// starts a block comment that a line holding only `\` ends, and such a `\` outside a
+/// block ends the script. The namespace `\d` had is restored afterwards.
+pub fn loadScript(vm: *Vm, path: []const u8) RunError!*Value {
+    const source = Io.Dir.cwd().readFileAlloc(vm.io, path, vm.gpa, .unlimited) catch |err| return q.internal.failOs(vm, path, err);
+    defer vm.gpa.free(source);
+    const mode: Ast.Mode = if (std.mem.endsWith(u8, path, ".k")) .k else .q;
+    const saved = vm.namespace;
+    defer vm.namespace = saved;
+
+    var statement: std.ArrayList(u8) = .empty;
+    defer statement.deinit(vm.gpa);
+    var in_comment = false;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var pending: ?[]const u8 = null;
+    while (true) {
+        const line = pending orelse lines.next();
+        pending = null;
+        const continues = line != null and line.?.len > 0 and (line.?[0] == ' ' or line.?[0] == '\t');
+        if (continues and statement.items.len > 0) {
+            try statement.append(vm.gpa, '\n');
+            try statement.appendSlice(vm.gpa, line.?);
+            continue;
+        }
+        // The statement gathered so far is complete.
+        if (statement.items.len > 0) {
+            const trimmed = std.mem.trim(u8, statement.items, " \t\r");
+            if (std.mem.eql(u8, trimmed, "/")) {
+                in_comment = true;
+            } else if (std.mem.eql(u8, trimmed, "\\")) {
+                if (!in_comment) break;
+                in_comment = false;
+            } else if (!in_comment and trimmed.len > 0 and trimmed[0] != '/') {
+                const text = try vm.gpa.dupeSentinel(u8, trimmed, 0);
+                defer vm.gpa.free(text);
+                const value = try vm.evalSource(text, mode, path);
+                defer value.deref(vm.gpa);
+                if (value.as != .unary_primitive or value.as.unary_primitive != .identity) {
+                    try vm.stdout.print("{f}\n", .{value.fmt(vm)});
+                    try vm.stdout.flush();
+                }
+            }
+            statement.clearRetainingCapacity();
+        }
+        const next = line orelse break;
+        try statement.appendSlice(vm.gpa, std.mem.trimEnd(u8, next, "\r"));
     }
-    return vm.shell(command);
+    return vm.getUnaryPrimitive(.identity);
 }
 
 /// Runs `command` the way q does: as `sh -c "<command> ><file>"` with a temporary file, so
@@ -2027,7 +2245,8 @@ pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
     assert(string.len > 0);
 
     if (string[0] != '.') {
-        assert(std.mem.findScalar(u8, string, '.') == null);
+        // A name with a dot inside it, such as a file symbol `:/a/b.txt`, is no global.
+        if (std.mem.findScalar(u8, string, '.') != null) return null;
         const namespace = (try vm.namespaceAt(vm.internedString(vm.namespace), create)) orelse return null;
         return .{ .namespace = namespace, .name = identifier };
     }
@@ -2052,10 +2271,25 @@ pub fn readGlobalIn(vm: *Vm, identifier: Symbol, scope: Symbol) RunError!*Value 
     const saved = vm.namespace;
     vm.namespace = scope;
     defer vm.namespace = saved;
-    const home = (try vm.identifierHome(identifier, false)) orelse return error.identifier;
+    const home = (try vm.identifierHome(identifier, false)) orelse return vm.undefinedName(identifier);
     const dict = home.namespace.as.dict;
-    const index = std.mem.findScalar(Symbol, dict.keys.as.symbol_list, home.name) orelse return error.identifier;
+    const index = std.mem.findScalar(Symbol, dict.keys.as.symbol_list, home.name) orelse return vm.undefinedName(identifier);
     return dict.values.as.list[index].ref();
+}
+
+/// An undefined name is the error `identifier`, reported as q reports it: by the name
+/// (`'oops`), which the signal message carries.
+pub fn undefinedName(vm: *Vm, identifier: Symbol) RunError {
+    const message = try vm.gpa.dupe(u8, vm.internedString(identifier));
+    if (vm.signal_message) |old| vm.gpa.free(old);
+    vm.signal_message = message;
+    return error.identifier;
+}
+
+/// Reading a parameter or local that has no value yet is `identifier`, named as q names it.
+fn unsetLocal(vm: *Vm, lambda: Value.Lambda, slot: usize) RunError {
+    const name = if (slot < lambda.params.len) lambda.params[slot] else lambda.locals[slot - lambda.params.len];
+    return vm.undefinedName(name);
 }
 
 /// Runs a lambda: too many arguments are a rank error and too few or a hole make a
@@ -2150,7 +2384,7 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                     const old = if (is_global)
                         try vm.readGlobalIn(lambda.globals[target - @backingInt(Compiler.ByteCode.global)], lambda.namespace)
                     else
-                        (slots[slotIndex(lambda, target)] orelse return error.identifier).ref();
+                        (slots[slotIndex(lambda, target)] orelse return vm.unsetLocal(lambda, slotIndex(lambda, target))).ref();
                     defer old.deref(vm.gpa);
                     const function = vm.getOperator(operator);
                     defer function.deref(vm.gpa);
@@ -2221,19 +2455,19 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
             },
             .param_1, .param_2, .param_3, .param_4, .param_5, .param_6, .param_7, .param_8 => {
                 const slot = byte - @backingInt(Compiler.ByteCode.param_1);
-                try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
+                try stack.append(vm.gpa, (slots[slot] orelse return vm.unsetLocal(lambda, slot)).ref());
             },
             .local_wide => {
                 const slot = slotIndex(lambda, code[pc]);
                 pc += 1;
-                try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
+                try stack.append(vm.gpa, (slots[slot] orelse return vm.unsetLocal(lambda, slot)).ref());
             },
             .comma => unreachable,
             inline else => |t| {
                 const name = @tagName(t);
                 if (comptime std.mem.startsWith(u8, name, "local_")) {
                     const slot = lambda.params.len + (byte - @backingInt(Compiler.ByteCode.local_1));
-                    try stack.append(vm.gpa, (slots[slot] orelse return error.identifier).ref());
+                    try stack.append(vm.gpa, (slots[slot] orelse return vm.unsetLocal(lambda, slot)).ref());
                 } else if (@hasField(Iterator, name)) {
                     // An iterator instruction turns the function on top of the stack into
                     // the derived function, as q compiles `x+/y` to push `+` then `over`.
@@ -2832,7 +3066,7 @@ pub fn indexList(vm: *Vm, list: *Value, args: []*Value) RunError!*Value {
 }
 
 /// A projection of `func` on `args`, which may hold `.empty` holes.
-fn project(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
+pub fn project(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     const copies = try vm.gpa.alloc(*Value, args.len);
     errdefer vm.gpa.free(copies);
     for (copies, args) |*copy, a| copy.* = a.ref();
@@ -2847,9 +3081,10 @@ fn project(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
 /// for any other identifier.
 pub fn clockVariable(vm: *Vm, identifier: Symbol) !?*Value {
     const string = vm.internedString(identifier);
-    if (string.len != 4 or !std.mem.startsWith(u8, string, ".z.")) return null;
+    if (!std.mem.startsWith(u8, string, ".z.")) return null;
+    if (string.len != 4) return vm.systemVariable(string[3..]);
     const letter = string[3];
-    if (std.mem.findScalar(u8, "DdPpTtNnZz", letter) == null) return null;
+    if (std.mem.findScalar(u8, "DdPpTtNnZz", letter) == null) return vm.systemVariable(string[3..]);
 
     const utc = q.clock.now(vm.io);
     const nanos = if (std.ascii.isUpper(letter)) local: {
@@ -2867,6 +3102,43 @@ pub fn clockVariable(vm: *Vm, identifier: Symbol) !?*Value {
         'z' => try vm.createValue(.datetime, @as(f64, @floatFromInt(nanos)) / @as(f64, @floatFromInt(q.literal.ns_per_day))),
         else => unreachable,
     };
+}
+
+/// The `.z` variables besides the clock: `.z.q` quiet, `.z.f` script, `.z.x` arguments,
+/// `.z.X` command line, `.z.e` and `.z.b` empty dictionaries, `.z.o` platform, `.z.K`
+/// and `.z.k` the q.k version and date, `.z.i` pid, `.z.h` host, `.z.u` user, `.z.c`
+/// cores, `.z.a` address, `.z.w` handle. `.z.s` outside a lambda is `nyi`; the handlers
+/// (`.z.pi`, `.z.ex`...) are ordinary globals, undefined until assigned.
+fn systemVariable(vm: *Vm, name: []const u8) !?*Value {
+    if (name.len != 1) return null;
+    switch (name[0]) {
+        'q' => return try vm.createValue(.boolean, vm.quiet),
+        'f' => return try vm.createValue(.symbol, vm.script),
+        'x' => return if (vm.arguments) |a| a.ref() else try vm.allocValue(.list, 0),
+        'X' => return if (vm.arguments) |a| a.ref() else try vm.allocValue(.list, 0),
+        'e', 'b' => {
+            const keys = try vm.allocValue(.symbol_list, 0);
+            errdefer keys.deref(vm.gpa);
+            const values = try vm.allocValue(.list, 0);
+            errdefer values.deref(vm.gpa);
+            return try vm.createValue(.dict, .{ .keys = keys, .values = values });
+        },
+        'o' => return try vm.createValue(.symbol, try vm.intern(if (@import("builtin").os.tag == .macos) "m64" else "l64")),
+        'K' => return try vm.createValue(.float, 4.0),
+        'k' => return try vm.createValue(.date, @intCast(q.literal.daysFromCivil(2023, 4, 17) - q.literal.epoch_days)),
+        'w' => return try vm.createValue(.int, 0),
+        'a' => return try vm.createValue(.int, 2130706433),
+        'c' => return try vm.createValue(.int, @intCast(std.Thread.getCpuCount() catch 1)),
+        'i' => return try vm.createValue(.int, @intCast(std.c.getpid())),
+        'h' => {
+            var buffer: [std.posix.HOST_NAME_MAX]u8 = undefined;
+            const host = std.posix.gethostname(&buffer) catch "";
+            return try vm.createValue(.symbol, try vm.intern(host));
+        },
+        'u' => return try vm.createValue(.symbol, try vm.intern(vm.environ.get("USER") orelse "")),
+        's' => return error.nyi,
+        else => return null,
+    }
 }
 
 /// The namespace dictionary at a dotted path, or null when it does not exist. `.` is the
@@ -5828,7 +6100,7 @@ test "sv and vs through data on the left of /: and \\:, getenv and setenv" {
     try testing.expectError(error.type, vm.evalSource("setenv[`ZZQ;1]", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("setenv[\"ZZQ\";\"ab\"]", .q, "<test>"));
     // q.k's last line: a missing q.q is a caught error, not a crash.
-    try expectEvalMode(vm, .k, "{@[.:;\"\\\\l \",$[#e:getenv`QINIT;e;\"q.q\"];::]}[]", "\"os\"");
+    try expectEvalMode(vm, .k, "{@[.:;\"\\\\l \",$[#e:getenv`QINIT;e;\"q.q\"];::]}[]", "\"q.q. OS reports: No such file or directory\"");
 }
 
 test "flip transposes a list of lists as q does" {
@@ -7224,4 +7496,147 @@ test "like, ss and the symbol path forms follow q" {
     try expectEvalMode(vm, .k, "`\\:`:/a", "`:`a");
     try expectEvalMode(vm, .k, "`\\:`:/", "`:`");
     try expectEvalMode(vm, .k, "`\\:`a.b.c", "`a`b`c");
+}
+
+test "files, handles, system commands, .z and serialisation follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // Text files: `0:` writes lines, `read0` reads them, a final newline adds no line.
+    try expectEval(vm, "`:/tmp/openq_test.txt 0: (\"ab\";\"cd\";\"\")", "`:/tmp/openq_test.txt");
+    try expectEval(vm, "read0 `:/tmp/openq_test.txt", "(\"ab\";\"cd\";\"\")");
+    try expectEval(vm, "read1 `:/tmp/openq_test.txt", "0x61620a63640a0a");
+    try expectEval(vm, "read1 (`:/tmp/openq_test.txt;1;3)", "0x620a63");
+    try expectEval(vm, "-7!`:/tmp/openq_test.txt", "7");
+    try testing.expectError(error.type, vm.evalSource("`:/tmp/openq_test.txt 0: (\"ab\";\"c\")", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("`:/tmp/openq_test.txt 0: 0x6162", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("\"/tmp/openq_test.txt\" 0: (\"x\";\"y\")", .q, "<test>"));
+    try expectEval(vm, "`:/tmp/openq_test.txt 1: 0x0102", "`:/tmp/openq_test.txt");
+    try expectEval(vm, "read1 `:/tmp/openq_test.txt", "0x0102");
+    try expectEval(vm, "`:/tmp/openq_test.txt 0: ()", "`:/tmp/openq_test.txt");
+    try expectEval(vm, "read0 `:/tmp/openq_test.txt", "()");
+    try expectSignal(vm, "read0 `:/tmp/openq_nofile", "/tmp/openq_nofile. OS reports: No such file or directory");
+    try expectSignal(vm, "-7!`:/tmp", "/tmp. OS reports: Is a directory");
+
+    // Handles append; a negative handle adds a newline; `0` evaluates; `1` and `2` print.
+    try expectEval(vm, "h:hopen `:/tmp/openq_test.txt;type h", "-6h");
+    try expectEval(vm, "h \"xy\";h `sym;h 0x00;h enlist \"z\";neg[h] \"!\";read1 `:/tmp/openq_test.txt", "0x787973796d007a210a");
+    try expectEval(vm, ">:[h]", "::");
+    try expectSignal(vm, ">:[h]", "close. OS reports: Bad file descriptor");
+    try testing.expectError(error.domain, vm.evalSource(">:[1i]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("hopen `a", .q, "<test>"));
+    try testing.expectError(error.domain, vm.evalSource("hopen 12345678", .q, "<test>"));
+    try expectSignal(vm, "hopen `:/tmp", ":/tmp. OS reports: Is a directory");
+    try expectEval(vm, "0 \"1+1\"", "2");
+    try expectEval(vm, "-1 \"text\"", "-1");
+    try expectEval(vm, "1 \"text\"", "1");
+    try expectEval(vm, "2 \"err\"", "2");
+    try expectEval(vm, "-1 ()", "-1");
+    try testing.expectError(error.type, vm.evalSource("1 (1;2)", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("-1 `a", .q, "<test>"));
+
+    // `key` lists a directory (sorted), names a file, and gives `()` for nothing.
+    try expectEval(vm, "d:hopen `:/tmp/openq_dir/a.txt;d \"x\";>:[d];`:/tmp/openq_dir/b.txt 0: (\"y1\";\"y2\");key `:/tmp/openq_dir", "`s#`a.txt`b.txt");
+    try expectEval(vm, "key `:/tmp/openq_dir/a.txt", "`:/tmp/openq_dir/a.txt");
+    try expectEval(vm, "key `:/tmp/openq_dir/nofile", "()");
+    // `hdel` (`~:` on a file symbol) removes files and empty directories.
+    try expectEval(vm, "~:[`:/tmp/openq_dir/a.txt];~:[`:/tmp/openq_dir/b.txt];~:[`:/tmp/openq_dir]", "`:/tmp/openq_dir");
+    try expectSignal(vm, "~:[`:/tmp/openq_dir]", "/tmp/openq_dir. OS reports: No such file or directory");
+
+    // `set` and `get` through `.[`:path;();:;v]` and `value`, in q's file format.
+    try expectEval(vm, ".[`:/tmp/openq_test.txt;();:;1 2 3]", "`:/tmp/openq_test.txt");
+    try expectEval(vm, "read1 `:/tmp/openq_test.txt", "0xfe200700000000000000000000000000010000000000000002000000000000000300000000000000");
+    try expectEval(vm, "value `:/tmp/openq_test.txt", "1 2 3");
+    try expectEval(vm, ".[`:/tmp/openq_test.txt;();:;5];read1 `:/tmp/openq_test.txt", "0xff01f90500000000000000");
+    try expectEval(vm, "value `:/tmp/openq_test.txt", "5");
+    try expectEval(vm, ".[`:/tmp/openq_test.txt;();:;(1;`a;\"bc\";`b`c!3 4;([]a:1 2);{x+1})];value `:/tmp/openq_test.txt", "(1;`a;\"bc\";`b`c!3 4;+(,`a)!,1 2;{x+1})");
+    try expectEval(vm, ".[`:/tmp/openq_test.txt;();:;`s#1 2 3];value `:/tmp/openq_test.txt", "`s#1 2 3");
+    try testing.expectError(error.type, vm.evalSource(".[`:/tmp/openq_test.txt;();,;1]", .q, "<test>"));
+    try expectEval(vm, "`:/tmp/openq_test.txt 0: enlist \"z:42\"", "`:/tmp/openq_test.txt");
+    try expectSignal(vm, "value `:/tmp/openq_test.txt", "/tmp/openq_test.txt");
+
+    // `-8!` and `-9!`: q's IPC bytes.
+    try expectEval(vm, "-8!1 2", "0x010000001e00000007000200000001000000000000000200000000000000");
+    try expectEval(vm, "-8!`a", "0x010000000b000000f56100");
+    try expectEval(vm, "-8!()", "0x010000000e000000000000000000");
+    try expectEval(vm, "-8!`a`b!1 2", "0x0100000029000000630b00020000006100620007000200000001000000000000000200000000000000");
+    try expectEval(vm, "-9!-8!(1;`a;\"bc\";([]a:1 2);{x+1};+;-:;+[1];(<=);+/;`s#1 2;2000.01.01;1b)", "(1;`a;\"bc\";+(,`a)!,1 2;{x+1};+;-:;+[1];~>;+/;`s#1 2;2000.01.01;1b)");
+    try expectSignal(vm, "-9!0x010000000d0000000000000000000000", "badmsg");
+
+    // Scripts: `\\l` runs a file, `.k` in k mode, restoring `\\d`; an error stops it.
+    try expectEval(vm, "`:/tmp/openq_test.q 0: (\"\\\\d .m\";\"v:1\";\"f:{x+\";\" 1}\";enlist \"/\";\"hidden:1\";enlist \"\\\\\";\"w:f 2\")", "`:/tmp/openq_test.q");
+    try expectEval(vm, "\\l /tmp/openq_test.q", "::");
+    try expectEval(vm, "(.m.v;.m.w;value \"\\\\d\")", "(1;3;`.)");
+    try testing.expectError(error.identifier, vm.evalSource(".m.hidden", .q, "<test>"));
+    try expectEval(vm, "`:/tmp/openq_test.k 0: (\"a:!3\";\"'\\\"oops\\\"\";\"b:1\")", "`:/tmp/openq_test.k");
+    try expectSignal(vm, "\\l /tmp/openq_test.k", "oops");
+    try expectEval(vm, "a", "0 1 2");
+    try testing.expectError(error.identifier, vm.evalSource("b", .q, "<test>"));
+    try expectSignal(vm, "\\l /tmp/openq_nofile.q", "/tmp/openq_nofile.q. OS reports: No such file or directory");
+    try testing.expectError(error.nyi, vm.evalSource("\\l", .q, "<test>"));
+    try expectEval(vm, "~:[`:/tmp/openq_test.q];~:[`:/tmp/openq_test.k];~:[`:/tmp/openq_test.txt]", "`:/tmp/openq_test.txt");
+
+    // System commands hold their settings; `\\c` bounds the console and cuts `-3!`.
+    try expectEval(vm, "\\c", "25 80i");
+    try expectEval(vm, "\\C", "36 2000i");
+    try expectEval(vm, "\\c 5 5", "::");
+    try expectEval(vm, "\\c", "10 10i");
+    try expectEval(vm, "-3!til 100", "\"0 1 2 3..\"");
+    try expectEval(vm, "\\c 3000 3000", "::");
+    try expectEval(vm, "\\c", "2000 2000i");
+    try expectEval(vm, "\\c 1", "2000 2000i");
+    try testing.expectError(error.domain, vm.evalSource("\\c 1 2 3", .q, "<test>"));
+    try expectEval(vm, "\\c 25 80", "::");
+    try expectEval(vm, "\\e 1", "::");
+    try expectEval(vm, "\\e", "1i");
+    try expectEval(vm, "\\o", "0Ni");
+    try expectEval(vm, "\\z 1", "::");
+    try expectEval(vm, "\\z", "1i");
+    try expectEval(vm, "\\W", "2i");
+    try expectEval(vm, "\\s", "0i");
+    try expectSignal(vm, "\\s 4", "enable secondary threads via cmd line -s only");
+    try expectEval(vm, "\\_", "0b");
+    try expectEval(vm, "\\p", "0i");
+    try expectEval(vm, "type value \"\\\\t 1+1\"", "-7h");
+    try expectEval(vm, "count value \"\\\\ts 1+1\"", "2");
+    try expectEval(vm, "count value \"\\\\w\"", "6");
+    try expectEval(vm, "\\x .z.pi", "::");
+    try expectEval(vm, "type value \"\\\\cd\"", "10h");
+    try testing.expectError(error.domain, vm.evalSource("\\S 0", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("\\1", .q, "<test>"));
+    try expectEval(vm, "\\P 20", "::");
+    try expectEval(vm, "\\P", "17i");
+    try expectEval(vm, "\\P 7", "::");
+    // Namespace listings: tables, views, functions and variables, sorted.
+    try expectEval(vm, "\\d .lst", "::");
+    try expectEval(vm, "t1:([]a:1 2)", "::");
+    try expectEval(vm, "v1:1", "::");
+    try expectEval(vm, "f1:{x}", "::");
+    try expectEval(vm, "t0:([]b:1 2)", "::");
+    try expectEval(vm, "\\a", "`t0`t1");
+    try expectEval(vm, "\\v", "`t0`t1`v1");
+    try expectEval(vm, "\\f", ",`f1");
+    try expectEval(vm, "\\b", "`symbol$()");
+    try expectEval(vm, "\\d .", "::");
+    try expectEval(vm, "\\a .lst", "`t0`t1");
+    try expectSignal(vm, "\\a .none", ".none");
+    try expectSignal(vm, "\\v zz", "zz");
+
+    // `.z`: the flags, the script and its arguments, the identity of the process.
+    try expectEval(vm, ".z.q", "0b");
+    try expectEval(vm, ".z.f", "`");
+    try expectEval(vm, ".z.x", "()");
+    try expectEval(vm, ".z.e", "(`symbol$())!()");
+    try expectEval(vm, ".z.K", "4f");
+    try expectEval(vm, ".z.k", "2023.04.17");
+    try expectEval(vm, ".z.w", "0i");
+    try expectEval(vm, "type .z.i", "-6h");
+    try expectEval(vm, "type .z.h", "-11h");
+    try expectEval(vm, "{$[x<2;x;x*.z.s x-1]} 5", "120");
+    try testing.expectError(error.nyi, vm.evalSource(".z.s", .q, "<test>"));
+    try testing.expectError(error.identifier, vm.evalSource(".z.ex", .q, "<test>"));
+    // An undefined name is reported by name, as q reports it.
+    try expectEval(vm, "@[value;\"nosuch\";{x}]", "\"nosuch\"");
+    try expectEval(vm, "@[{nosuch2};1;{x}]", "\"nosuch2\"");
 }
