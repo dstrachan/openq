@@ -156,9 +156,11 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map, script
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    const vm: *Vm = try .init(io, gpa, stdout);
+    const vm: *Vm = Vm.initOptions(io, gpa, stdout, .{ .environ = environ_map }) catch |err| switch (err) {
+        error.QkNotFound => std.process.fatal("q.k not found: set QHOME or run where q.k is", .{}),
+        else => return err,
+    };
     defer vm.deinit();
-    try vm.environ.putAll(environ_map);
     vm.quiet = quiet;
 
     // `.z.f` names the script and `.z.x` lists the arguments after it.

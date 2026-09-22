@@ -1382,10 +1382,16 @@ pub fn value(vm: *Vm, x: *Value) Vm.RunError!*Value {
             }
             return vm.applyImpl(f, items[1..]);
         },
+        // A character is one-character source: `value "1"` is 1, `value ";"` is `::`.
+        .char => |c| {
+            if (c == ';' or c == ' ' or c == '\\') return vm.getUnaryPrimitive(.identity);
+            return vm.evalSource(&[_:0]u8{c}, .q, "<value>");
+        },
         .char_list => |source| {
             // A string starting with a backslash is a system command; anything else is q source.
             if (source.len > 0 and source[0] == '\\') return vm.system(source[1..]);
-            if (std.mem.trim(u8, source, " \t\r\n").len == 0) return vm.getUnaryPrimitive(.identity);
+            // Nothing but separators evaluates to `::` (`value ";"`), though `parse ";"` is `type`.
+            if (std.mem.trim(u8, source, " \t\r\n;").len == 0) return vm.getUnaryPrimitive(.identity);
             const slice = try vm.gpa.dupeSentinel(u8, source, 0);
             defer vm.gpa.free(slice);
             return vm.evalSource(slice, .q, "<value>");

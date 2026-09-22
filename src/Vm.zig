@@ -105,7 +105,26 @@ const Constant = enum(u8) {
     null_symbol,
 };
 
+/// What a new VM loads: q.k found as q finds it (`$QHOME/q.k`, else `q.k` in the
+/// working directory), a given script, or nothing for tools that load it themselves.
+pub const Startup = union(enum) {
+    find,
+    path: []const u8,
+    none,
+};
+
+pub const Options = struct {
+    startup: Startup = .find,
+    /// The environment, for `QHOME` and `getenv`; empty when null.
+    environ: ?*const std.process.Environ.Map = null,
+};
+
+/// A VM with q.k loaded from the working directory, as tests and tools start one.
 pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
+    return initOptions(io, gpa, stdout, .{});
+}
+
+pub fn initOptions(io: Io, gpa: Allocator, stdout: *Io.Writer, options: Options) !*Vm {
     const vm = try gpa.create(Vm);
     errdefer gpa.destroy(vm);
     vm.* = .{
@@ -184,93 +203,33 @@ pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
     };
     errdefer vm.state.deref(gpa);
 
-    try vm.seedKeywords();
     // `.z` exists from the start so that `.z.ph:...` and friends have somewhere to go; the
     // clock variables are computed on every read rather than stored in it.
     _ = try vm.namespaceAt(".z", true);
 
     vm.local_zone = .load(io, gpa);
     errdefer vm.local_zone.deinit();
-    try vm.seedIteratorKeywords();
-    errdefer comptime unreachable;
+    if (options.environ) |environ| try vm.environ.putAll(environ);
+
+    // Nothing of the q language is built in beyond the k primitives: the keywords, `.Q`,
+    // `.h` and `.j` all come from the real q.k, loaded now as q loads it at startup.
+    switch (options.startup) {
+        .none => {},
+        .path => |path| {
+            const loaded = try vm.loadScript(path);
+            loaded.deref(gpa);
+        },
+        .find => {
+            var buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const path = if (vm.environ.get("QHOME")) |home| std.fmt.bufPrint(&buffer, "{s}/q.k", .{home}) catch return error.QkNotFound else "q.k";
+            const loaded = vm.loadScript(path) catch |err| switch (err) {
+                error.signal => return error.QkNotFound,
+                else => return err,
+            };
+            loaded.deref(gpa);
+        },
+    }
     return vm;
-}
-
-/// `each`, `over`, `scan` and `prior` are the k lambdas q.k defines them as.
-fn seedIteratorKeywords(vm: *Vm) !void {
-    // `.Q.a0` and `.Q.a1` are the aggregates qSQL gives one row for; q.k adds `all`,
-    // `any`, `svar`, `sdev`, `scov` and `med` to them when it loads.
-    for ([_][:0]const u8{ ".q.each:{x'y}", ".q.over:{x/y}", ".q.scan:{x\\y}", ".q.prior:{x':y}", ".Q.a0:(#:;*:;last;sum;prd;min;max;?:)", ".Q.a1:(avg;wsum;wavg;var;dev;cov;cor)" }) |source| {
-        const value = vm.evalSource(source, .k, "<init>") catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => unreachable,
-        };
-        value.deref(vm.gpa);
-    }
-}
-
-/// Seeds `.q` with the keywords q.k defines as plain aliases of primitives (`neg:-:`,
-/// `count:#:`, `parse:-5!`...), so they work before q.k itself can be loaded. Loading q.k
-/// simply reassigns them. Names that q.k defines as lambdas are left for q.k.
-fn seedKeywords(vm: *Vm) !void {
-    const namespace = (try vm.namespaceAt(".q", true)).?;
-
-    const unary = .{
-        .{ "neg", UnaryPrimitive.neg },
-        .{ "not", UnaryPrimitive.not },
-        .{ "null", UnaryPrimitive.null },
-        .{ "string", UnaryPrimitive.string },
-        .{ "reciprocal", UnaryPrimitive.reciprocal },
-        .{ "floor", UnaryPrimitive.lower },
-        .{ "lower", UnaryPrimitive.lower },
-        .{ "count", UnaryPrimitive.count },
-        .{ "first", UnaryPrimitive.first },
-        .{ "reverse", UnaryPrimitive.reverse },
-        .{ "distinct", UnaryPrimitive.distinct },
-        .{ "group", UnaryPrimitive.group },
-        .{ "where", UnaryPrimitive.where },
-        .{ "flip", UnaryPrimitive.flip },
-        .{ "type", UnaryPrimitive.type },
-        .{ "key", UnaryPrimitive.key },
-        .{ "til", UnaryPrimitive.key },
-        .{ "inv", UnaryPrimitive.key },
-        .{ "iasc", UnaryPrimitive.asc },
-        .{ "idesc", UnaryPrimitive.desc },
-        .{ "value", UnaryPrimitive.value },
-        .{ "get", UnaryPrimitive.value },
-        .{ "read0", UnaryPrimitive.read_text },
-        .{ "read1", UnaryPrimitive.read_binary },
-    };
-    inline for (unary) |entry| {
-        const value = vm.getUnaryPrimitive(entry[1]);
-        defer value.deref(vm.gpa);
-        try vm.namespaceSet(namespace, try vm.intern(entry[0]), value);
-    }
-
-    const binary = .{
-        .{ "and", Operator.@"and" },
-        .{ "or", Operator.@"or" },
-        .{ "mmu", Operator.cast },
-        .{ "lsq", Operator.dict },
-    };
-    inline for (binary) |entry| {
-        const value = vm.getOperator(entry[1]);
-        defer value.deref(vm.gpa);
-        try vm.namespaceSet(namespace, try vm.intern(entry[0]), value);
-    }
-
-    const internal = .{
-        .{ "parse", -5 },
-        .{ "eval", -6 },
-        .{ "attr", -2 },
-        .{ "hcount", -7 },
-        .{ "md5", -15 },
-    };
-    inline for (internal) |entry| {
-        const value = try vm.internalFunction(entry[1]);
-        defer value.deref(vm.gpa);
-        try vm.namespaceSet(namespace, try vm.intern(entry[0]), value);
-    }
 }
 
 /// The projection `n!`, which is how q.k defines `parse` (`-5!`) and `eval` (`-6!`).
@@ -1302,7 +1261,10 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                     const v = try vm.evalStatement(val);
                     defer v.deref(vm.gpa);
                 }
-                return vm.evalStatement(value[value.len - 1]);
+                // A trailing `;` leaves `::`, as `value "1+1;"` is `::` in q.
+                const last = value[value.len - 1];
+                if (last.as == .unary_primitive and last.as.unary_primitive == .empty) return vm.getUnaryPrimitive(.identity);
+                return vm.evalStatement(last);
             }
 
             // Compound and indexed assignment as q parses them at the top level: `x+:v` is
@@ -7418,6 +7380,12 @@ test "qSQL follows q: parse trees, select, exec, update, delete and the function
     try expectEval(vm, "x:1 2 3;iasc x;x", "`s#1 2 3");
     try expectEval(vm, "x:3 1 2;iasc x;x", "3 1 2");
     try expectEval(vm, "select[<a] from u;u", "+`a`b`c!(`s#1 2 3;`x`y`x;10 20 30)");
+
+    // A trailing `;` leaves `::`, and `value` of separators alone is `::`.
+    try expectEval(vm, "value \"1+1;\"", "::");
+    try expectEval(vm, "(::)~value \";\"", "1b");
+    try expectEval(vm, "value \"1\"", "1");
+    try expectEval(vm, "(::)~value \"\\\\\"", "1b");
 
     // `<=`, `>=` and `<>` are compositions of `not` with `>`, `<` and `=`.
     try expectEval(vm, "`a<>`b", "1b");
