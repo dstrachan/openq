@@ -178,6 +178,12 @@ fn scan(c: *Compiler, node: Node.Index) Error!void {
                 if (n == from) try c.scan(n) else try c.scanImplicit(n);
             }
         },
+        // A table literal's column expressions are evaluated at run time the same way.
+        .table_literal => {
+            const extra_index, _ = tree.nodeData(node).extra_and_token;
+            const spans = tree.extraData(extra_index, Node.Table);
+            for (tree.extraDataSlice(.{ .start = spans.keys_start, .end = spans.columns_end }, Node.Index)) |n| try c.scan(n);
+        },
         .apply_binary => {
             const lhs, const maybe_rhs = tree.nodeData(node).node_and_opt_node;
             const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(node)));
@@ -412,6 +418,14 @@ fn compileNode(c: *Compiler, node: Node.Index) Error!void {
             const query = try vm.queryTree(node);
             errdefer query.deref(vm.gpa);
             try c.emitConstant(query);
+            try c.emitCode(.query);
+        },
+        // A table literal is its tree `(+:;(!;names;(enlist;e1;...)))` evaluated at run
+        // time too, so `([]a:x)` sees the parameter `x`.
+        .table_literal => {
+            const table = try vm.parseNode(node);
+            errdefer table.deref(vm.gpa);
+            try c.emitConstant(table);
             try c.emitCode(.query);
         },
 

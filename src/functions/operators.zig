@@ -999,6 +999,28 @@ pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
         // A long pads a string, as `5$"ab"`, and a short casts by type number, as `5h$1.5`.
         .long => |n| return pad(vm, n, y),
         .short => |n| return castByTypeNumber(vm, n, y),
+        // A list of longs pads a list of strings pairwise: `5 3$("ab";"cde")`.
+        .long_list, .list => {
+            // A string on the right is `type`, or `length` when the counts differ.
+            if (y.as == .char_list) return if (x.count() == y.count()) error.type else error.length;
+            if (y.as != .list) return error.type;
+            if (x.count() != y.count()) return error.length;
+            const result = try vm.allocValue(.list, y.as.list.len);
+            var filled: usize = 0;
+            errdefer {
+                for (result.as.list[0..filled]) |r| r.deref(vm.gpa);
+                vm.gpa.free(result.as.list);
+                vm.gpa.destroy(result);
+            }
+            for (y.as.list, 0..) |item, i| {
+                const width = try itemAt(vm, x, i);
+                defer width.deref(vm.gpa);
+                if (width.as != .long or item.as != .char_list) return error.type;
+                result.as.list[filled] = try pad(vm, width.as.long, item);
+                filled += 1;
+            }
+            return result;
+        },
         else => return error.type,
     };
     return castTo(vm, target, y);
@@ -1555,6 +1577,11 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
     if (y.as == .table or (y.as == .dict and y.as.dict.keys.as == .table)) {
         if (x.as == .long and x.as.long >= 0) return keyTable(vm, x.as.long, y);
         if (x.as == .table and y.as == .table) {
+            if (x.count() != y.count()) return error.length;
+            return vm.createValue(.dict, .{ .keys = x.ref(), .values = y.ref() });
+        }
+        // Any other list keys the table's rows as a dictionary would: `(,`a)!+`b`c!(,1;,2)`.
+        if (x.isList() and y.as == .table) {
             if (x.count() != y.count()) return error.length;
             return vm.createValue(.dict, .{ .keys = x.ref(), .values = y.ref() });
         }
@@ -3586,7 +3613,33 @@ fn joinTables(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
         defer row.deref(vm.gpa);
         return joinTables(vm, x, row);
     }
-    return error.type;
+    if (y.as == .table and x.as == .dict) return vm.failWith("mismatch");
+    // Anything else joins with the table's rows as a list: `t,3` is `(row0;row1;3)`.
+    if (x.as == .table) {
+        const rows = try rowList(vm, x);
+        defer rows.deref(vm.gpa);
+        return join(vm, rows, y);
+    }
+    const rows = try rowList(vm, y);
+    defer rows.deref(vm.gpa);
+    return join(vm, x, rows);
+}
+
+/// The rows of a table as a general list of dictionaries.
+fn rowList(vm: *Vm, table: *Value) Vm.RunError!*Value {
+    const n = table.count();
+    const rows = try vm.allocValue(.list, n);
+    var filled: usize = 0;
+    errdefer {
+        for (rows.as.list[0..filled]) |r| r.deref(vm.gpa);
+        vm.gpa.free(rows.as.list);
+        vm.gpa.destroy(rows);
+    }
+    for (0..n) |i| {
+        rows.as.list[filled] = try rowAt(vm, table, i);
+        filled += 1;
+    }
+    return rows;
 }
 
 /// `n#t` takes rows and `` `a`b#t `` takes columns.

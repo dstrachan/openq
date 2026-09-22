@@ -934,9 +934,12 @@ fn columnName(vm: *Vm, expr: *Value) []const u8 {
 /// `a:e` is named `a`, a bare name `a` names itself, and anything else takes the name of
 /// its first operand when that is a name, or `x`.
 fn tableTree(vm: *Vm, nodes: []const Node.Index) Error!*Value {
-    const tree = vm.tree;
     const gpa = vm.gpa;
-    const names = try vm.allocValue(.symbol_list, nodes.len);
+    // The columns are named as a query names them: `a:e` is `a`, a name or an
+    // application of one is that name, anything else `x`, repeats numbered.
+    const named = try vm.namedTrees(nodes);
+    defer named.deref(gpa);
+    const names = named.as.dict.keys.ref();
     errdefer names.deref(gpa);
     const exprs = try vm.allocValue(.list, nodes.len + 1);
     var filled: usize = 1;
@@ -946,31 +949,8 @@ fn tableTree(vm: *Vm, nodes: []const Node.Index) Error!*Value {
         vm.gpa.destroy(exprs);
     }
     exprs.as.list[0] = vm.getUnaryPrimitive(.enlist);
-    var unnamed: usize = 0;
-    var buffer: [16]u8 = undefined;
-    for (nodes, 0..) |column, k| {
-        var expr_node = column;
-        var name: []const u8 = "";
-        switch (tree.nodeTag(column)) {
-            .identifier => name = tree.tokenSlice(tree.nodeMainToken(column)),
-            .apply_binary => {
-                const lhs, const maybe_rhs = tree.nodeData(column).node_and_opt_node;
-                const op: Node.Index = @fromBackingInt(@intCast(tree.nodeMainToken(column)));
-                if (tree.nodeTag(op) == .colon and tree.nodeTag(lhs) == .identifier) {
-                    if (maybe_rhs.unwrap()) |rhs| {
-                        name = tree.tokenSlice(tree.nodeMainToken(lhs));
-                        expr_node = rhs;
-                    }
-                } else if (tree.nodeTag(lhs) == .identifier) name = tree.tokenSlice(tree.nodeMainToken(lhs));
-            },
-            else => {},
-        }
-        if (name.len == 0) {
-            name = if (unnamed == 0) "x" else std.fmt.bufPrint(&buffer, "x{d}", .{unnamed}) catch unreachable;
-            unnamed += 1;
-        }
-        names.as.symbol_list[k] = try vm.intern(name);
-        exprs.as.list[filled] = try vm.parseNode(expr_node);
+    for (0..nodes.len) |k| {
+        exprs.as.list[filled] = try q.operators.itemAt(vm, named.as.dict.values, k);
         filled += 1;
     }
     const flipped = try vm.allocValue(.list, 2);
@@ -1343,6 +1323,16 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 const v = try vm.eval(value[2]);
                 errdefer v.deref(vm.gpa);
 
+                // Inside a lambda's query or table literal, a parameter or local takes it.
+                if (vm.scope) |scope| {
+                    const name = value[1].as.symbol;
+                    const slot: ?usize = if (std.mem.findScalar(Symbol, scope.lambda.params, name)) |i| i else if (std.mem.findScalar(Symbol, scope.lambda.locals, name)) |i| scope.lambda.params.len + i else null;
+                    if (slot) |i| {
+                        if (scope.slots[i]) |old| old.deref(vm.gpa);
+                        scope.slots[i] = v.ref();
+                        return v;
+                    }
+                }
                 return q.operators.assignGlobal(vm, value[1], v);
             }
 
@@ -2134,6 +2124,11 @@ pub fn loadScript(vm: *Vm, path: []const u8) RunError!*Value {
     const source = Io.Dir.cwd().readFileAlloc(vm.io, path, vm.gpa, .unlimited) catch |err| return q.internal.failOs(vm, path, err);
     defer vm.gpa.free(source);
     const mode: Ast.Mode = if (std.mem.endsWith(u8, path, ".k")) .k else .q;
+    return vm.runScript(source, mode, path);
+}
+
+/// Runs script text (a file's, or standard input's when it is not a terminal).
+pub fn runScript(vm: *Vm, source: []const u8, mode: Ast.Mode, path: []const u8) RunError!*Value {
     const saved = vm.namespace;
     defer vm.namespace = saved;
 
@@ -7639,4 +7634,31 @@ test "files, handles, system commands, .z and serialisation follow q" {
     // An undefined name is reported by name, as q reports it.
     try expectEval(vm, "@[value;\"nosuch\";{x}]", "\"nosuch\"");
     try expectEval(vm, "@[{nosuch2};1;{x}]", "\"nosuch2\"");
+}
+
+test "table literals name columns like queries, run inside lambdas, and join by rows" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    try expectEval(vm, "a:1 2;b:3 4", "::");
+    try expectEval(vm, "([]1 2;x:3 4)", "+`x`x1!(1 2;3 4)");
+    try expectEval(vm, "([]neg a;neg a)", "+`a`a1!(-1 -2;-1 -2)");
+    try expectEval(vm, "([]1+a;b)", "+`x`b!(2 3;3 4)");
+    try expectEval(vm, "([]a[0 1];b)", "+`x`b!(1 2;3 4)");
+    try expectEval(vm, "([x:1 2]3 4)", "(+(,`x)!,1 2)!+(,`x)!,3 4");
+    // Inside a lambda the columns see parameters and locals, and assignments in the
+    // columns (evaluated right to left) set locals, as q.k's `meta` relies on.
+    try expectEval(vm, "{([]c:x)} 5 6", "+(,`c)!,5 6");
+    try expectEval(vm, "{([k:t]v:2*t:x)} 1 2", "(+(,`k)!,1 2)!+(,`v)!,2 4");
+    try expectEval(vm, "{v:x;([]v)} 7 8", "+(,`v)!,7 8");
+    // A table joined with anything but a table or dictionary is its rows as a list.
+    try expectEval(vm, "(enlist `a`b!1 2),3", "(`a`b!1 2;3)");
+    try expectEval(vm, "3,([]a:1 2)", "(3;(,`a)!,1;(,`a)!,2)");
+    try expectSignal(vm, "([]a:1 2),`b`c!3 4", "mismatch");
+    try expectEval(vm, "(enlist `a)!enlist `b`c!1 2", "(,`a)!+`b`c!(,1;,2)");
+    // A list of longs pads strings pairwise.
+    try expectEval(vm, "5 3$(\"ab\";\"cde\")", "(\"ab   \";\"cde\")");
+    try testing.expectError(error.length, vm.evalSource("1 2$\"abc\"", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("2 3$\"ab\"", .q, "<test>"));
 }

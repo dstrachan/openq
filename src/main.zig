@@ -238,10 +238,20 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map, script
 
         const source = buffer.written()[0..len :0];
 
-        const value = try vm.evalSource(source, .q, "<stdin>");
-        defer value.deref(gpa);
-
-        try printResult(stdout, vm, value);
+        // Piped input is a script: statement by statement, values shown as they come.
+        const value = vm.runScript(source, .q, "<stdin>") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.signal, error.identifier => {
+                std.debug.print("'{s}\n", .{vm.signal_message orelse @errorName(err)});
+                std.process.exit(1);
+            },
+            else => {
+                std.debug.print("'{t}\n", .{err});
+                std.process.exit(1);
+            },
+        };
+        value.deref(gpa);
+        try stdout.flush();
     }
 }
 
