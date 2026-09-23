@@ -91,6 +91,7 @@ handles: std.AutoArrayHashMapUnmanaged(i32, Io.File) = .empty,
 /// quiet flag.
 script: Symbol = .empty,
 arguments: ?*Value = null,
+command_line: ?*Value = null,
 quiet: bool = false,
 
 pub const Scope = struct {
@@ -118,11 +119,22 @@ pub const Options = struct {
     startup: Startup = .find,
     /// The environment, for `QHOME` and `getenv`; empty when null.
     environ: ?*const std.process.Environ.Map = null,
+    /// The command line (`.z.X`), the arguments left for the script (`.z.x`), the
+    /// script (`.z.f`), the `-q` flag and q's option settings (`c 10 20`), all in place
+    /// before q.k loads, since q.k may load a q.q that reads them.
+    command_line: []const [:0]const u8 = &.{},
+    arguments: []const [:0]const u8 = &.{},
+    script: ?[]const u8 = null,
+    quiet: bool = false,
+    settings: []const []const u8 = &.{},
+    /// A value for `QINIT`, the file q.k loads after itself (q.q by default).
+    qinit: ?[]const u8 = null,
 };
 
-/// A VM with q.k loaded from the working directory, as tests and tools start one.
+/// A VM with q.k loaded from the working directory, as tests and tools start one: with
+/// `QINIT` pointing at `/dev/null` so that no q.q in that directory runs.
 pub fn init(io: Io, gpa: Allocator, stdout: *Io.Writer) !*Vm {
-    return initOptions(io, gpa, stdout, .{});
+    return initOptions(io, gpa, stdout, .{ .qinit = "/dev/null" });
 }
 
 pub fn initOptions(io: Io, gpa: Allocator, stdout: *Io.Writer, options: Options) !*Vm {
@@ -211,6 +223,19 @@ pub fn initOptions(io: Io, gpa: Allocator, stdout: *Io.Writer, options: Options)
     vm.local_zone = .load(io, gpa);
     errdefer vm.local_zone.deinit();
     if (options.environ) |environ| try vm.environ.putAll(environ);
+    if (options.qinit) |path| try vm.environ.put("QINIT", path);
+    vm.quiet = options.quiet;
+    if (options.script) |path| vm.script = try vm.intern(path);
+    const command_line = try vm.allocValue(.list, options.command_line.len);
+    vm.command_line = command_line;
+    for (command_line.as.list, options.command_line) |*slot, arg| slot.* = try vm.createValue(.char_list, try gpa.dupe(u8, arg));
+    const arguments = try vm.allocValue(.list, options.arguments.len);
+    vm.arguments = arguments;
+    for (arguments.as.list, options.arguments) |*slot, arg| slot.* = try vm.createValue(.char_list, try gpa.dupe(u8, arg));
+    for (options.settings) |setting| {
+        const applied = vm.system(setting) catch continue;
+        applied.deref(gpa);
+    }
 
     // Nothing of the q language is built in beyond the k primitives: the keywords, `.Q`,
     // `.h` and `.j` all come from the real q.k, loaded now as q loads it at startup.
@@ -277,6 +302,7 @@ pub fn deinit(vm: *Vm) void {
     for (vm.handles.values()) |file| file.close(vm.io);
     vm.handles.deinit(vm.gpa);
     if (vm.arguments) |a| a.deref(vm.gpa);
+    if (vm.command_line) |c| c.deref(vm.gpa);
     vm.local_zone.deinit();
     vm.string_table.deinit(vm.gpa);
     vm.string_bytes.deinit(vm.gpa);
@@ -590,7 +616,7 @@ fn applyForm(vm: *Vm, operator: Operator, args: []*Value) RunError!*Value {
     // `.[`:path;();:;v]` is how q.k's `set` writes a file; other amends of a file are `type`.
     if (q.files.isFileSymbol(vm, x)) return if (plain) q.files.set(vm, x, value.?) else error.type;
     const new_value = if (plain) value.?.ref() else amended: {
-        const old = try vm.readGlobal(x.as.symbol);
+        const old = try vm.oldGlobal(x.as.symbol, vm.namespace);
         defer old.deref(vm.gpa);
         break :amended try vm.amendValue(old, index, function, value);
     };
@@ -1394,7 +1420,7 @@ fn evalAmend(vm: *Vm, target: *Value, operator: Operator, rhs: *Value) RunError!
     defer index.deref(vm.gpa);
     const plain = target.as == .symbol and operator == .assign;
     const new_value = if (plain) v.ref() else amended: {
-        const old = try vm.readGlobal(name.as.symbol);
+        const old = try vm.oldGlobal(name.as.symbol, vm.namespace);
         defer old.deref(vm.gpa);
         const function = vm.getOperator(operator);
         defer function.deref(vm.gpa);
@@ -2170,7 +2196,11 @@ pub fn runScript(vm: *Vm, source: []const u8, mode: Ast.Mode, path: []const u8, 
     while (true) {
         const line = pending orelse lines.next();
         pending = null;
-        const continues = line != null and line.?.len > 0 and (line.?[0] == ' ' or line.?[0] == '\t');
+        // A line starting with whitespace continues the statement, and so does a blank
+        // line (q.q has blank lines inside lambdas); only a line starting in column one
+        // ends it.
+        const blank = line != null and std.mem.trim(u8, line.?, " \t\r").len == 0;
+        const continues = line != null and (blank or line.?[0] == ' ' or line.?[0] == '\t');
         if (continues and statement.items.len > 0) {
             try statement.append(vm.gpa, '\n');
             try statement.appendSlice(vm.gpa, line.?);
@@ -2268,8 +2298,9 @@ pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
     assert(string.len > 0);
 
     if (string[0] != '.') {
-        // A name with a dot inside it, such as a file symbol `:/a/b.txt`, is no global.
-        if (std.mem.findScalar(u8, string, '.') != null) return null;
+        // A file symbol `:/a/b.txt` is no global; a name with a dot inside or at its end
+        // (`a.b`, `u18.`) is a plain name, as `parse "a.b:1"` is `(:;`a.b;1)` in q.
+        if (string[0] == ':') return null;
         const namespace = (try vm.namespaceAt(vm.internedString(vm.namespace), create)) orelse return null;
         return .{ .namespace = namespace, .name = identifier };
     }
@@ -2278,6 +2309,15 @@ pub fn identifierHome(vm: *Vm, identifier: Symbol, create: bool) !?Home {
     if (last_dot == 0) return .{ .namespace = vm.state, .name = try vm.intern(string[1..]) };
     const namespace = (try vm.namespaceAt(string[0..last_dot], create)) orelse return null;
     return .{ .namespace = namespace, .name = try vm.intern(string[last_dot + 1 ..]) };
+}
+
+/// The value a compound assignment starts from: the global, or `()` when there is none
+/// yet, as `u,:`a` makes `u` the list `` ,`a `` in q.
+fn oldGlobal(vm: *Vm, identifier: Symbol, scope: Symbol) RunError!*Value {
+    return vm.readGlobalIn(identifier, scope) catch |err| switch (err) {
+        error.identifier => vm.getConstant(.empty_list),
+        else => err,
+    };
 }
 
 /// The value of a global name: a clock variable, the root for `` ` ``, or the entry found
@@ -2405,7 +2445,7 @@ pub fn callLambda(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
                 const plain = operator == .assign and index.isList() and index.count() == 0;
                 const new_value = if (plain) value.ref() else amended: {
                     const old = if (is_global)
-                        try vm.readGlobalIn(lambda.globals[target - @backingInt(Compiler.ByteCode.global)], lambda.namespace)
+                        try vm.oldGlobal(lambda.globals[target - @backingInt(Compiler.ByteCode.global)], lambda.namespace)
                     else
                         (slots[slotIndex(lambda, target)] orelse return vm.unsetLocal(lambda, slotIndex(lambda, target))).ref();
                     defer old.deref(vm.gpa);
@@ -2567,6 +2607,14 @@ pub fn amendValue(vm: *Vm, old: *Value, index: *Value, function: *Value, value: 
 /// `f[x;y]` or `f[x]` for an amend; `:` puts `y` in place.
 fn applyAmend(vm: *Vm, function: *Value, x: *Value, y: ?*Value) RunError!*Value {
     if (function.as == .operator and function.as.operator == .assign) return (y orelse x).ref();
+    // Amending `()` as a whole with an arithmetic operator gives the value itself (or its
+    // negation or reciprocal), as `.[();();+;1]` is 1 in q though `()+1` is `()`.
+    if (x.as == .list and x.as.list.len == 0 and function.as == .operator and y != null) switch (function.as.operator) {
+        .add, .multiply, .@"and", .@"or", .fill, .drop, .apply => return y.?.ref(),
+        .subtract => return q.unary_primitives.neg(vm, y.?),
+        .divide => return q.unary_primitives.reciprocal(vm, y.?),
+        else => {},
+    };
     // Whatever sits in the function's place is applied as a value: a list or a
     // dictionary indexes (`@[1 2 3;0;1 2]` is `2 2 3`), a symbol is the global it names,
     // an int a handle (`@[1 2 3;0;3]` is `domain`), and any other atom `type`, or
@@ -3138,7 +3186,7 @@ fn systemVariable(vm: *Vm, name: []const u8) !?*Value {
         'q' => return try vm.createValue(.boolean, vm.quiet),
         'f' => return try vm.createValue(.symbol, vm.script),
         'x' => return if (vm.arguments) |a| a.ref() else try vm.allocValue(.list, 0),
-        'X' => return if (vm.arguments) |a| a.ref() else try vm.allocValue(.list, 0),
+        'X' => return if (vm.command_line) |c| c.ref() else try vm.allocValue(.list, 0),
         'e', 'b' => {
             const keys = try vm.allocValue(.symbol_list, 0);
             errdefer keys.deref(vm.gpa);
@@ -6123,7 +6171,9 @@ test "sv and vs through data on the left of /: and \\:, getenv and setenv" {
     try testing.expectError(error.type, vm.evalSource("setenv[`ZZQ;1]", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("setenv[\"ZZQ\";\"ab\"]", .q, "<test>"));
     // q.k's last line: a missing q.q is a caught error, not a crash.
-    try expectEvalMode(vm, .k, "{@[.:;\"\\\\l \",$[#e:getenv`QINIT;e;\"q.q\"];::]}[]", "\"q.q. OS reports: No such file or directory\"");
+    // Test VMs point `QINIT` at `/dev/null`, so q.k's last statement loads nothing.
+    try expectEvalMode(vm, .k, "{@[.:;\"\\\\l \",$[#e:getenv`QINIT;e;\"q.q\"];::]}[]", "::");
+    try expectEvalMode(vm, .k, "@[.:;\"\\\\l /nonexistent/q.q\";::]", "\"/nonexistent/q.q. OS reports: No such file or directory\"");
 }
 
 test "flip transposes a list of lists as q does" {
@@ -7725,4 +7775,40 @@ test "a leading return, the return marker, and values applied as functions follo
     try testing.expectError(error.length, vm.evalSource("3[1;2]", .q, "<test>"));
     try testing.expectError(error.match, vm.evalSource("(::)[1;2]", .q, "<test>"));
     try expectEval(vm, "@[value;\"@[1 2 3;0;`nosuch]\";{x}]", "\"nosuch\"");
+}
+
+test "what loading q.q needed: blank lines in scripts, undefined names in compound assignment, and () with operators" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // A blank line inside a lambda continues the statement; only column one ends it.
+    try expectEval(vm, "`:/tmp/openq_blank.q 0: (\"f:{\";\"  x+\";\"\";\"  1}\";\"\";\"g:{[a]\";\"  / comment inside\";\"  a*2\";\"  }\")", "`:/tmp/openq_blank.q");
+    try expectEval(vm, "\\l /tmp/openq_blank.q", "::");
+    try expectEval(vm, "(f 1;g 3)", "2 6");
+    try expectEval(vm, "~:[`:/tmp/openq_blank.q]", "`:/tmp/openq_blank.q");
+    // A compound assignment to an undefined global starts from `()`.
+    try expectEval(vm, "u1,:`a;u1", ",`a");
+    try expectEval(vm, "u2,:(1;2);u2", "1 2");
+    try expectEval(vm, "u3,:`a`b!1 2;u3", "`a`b!1 2");
+    try expectEval(vm, "u4+:1;u4", "1");
+    try expectEval(vm, "u5-:1;u5", "-1");
+    try expectEval(vm, "u6%:2;u6", "0.5");
+    try expectEval(vm, "u7,:1;u7,:2;u7", "1 2");
+    try expectEval(vm, ".[();();+;1]", "1");
+    try testing.expectError(error.type, vm.evalSource("u8#:2", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("u9!:2", .q, "<test>"));
+    // `()` with the operators, as q has them.
+    try expectEval(vm, "(),`a`b!1 2", "`a`b!1 2");
+    try expectEval(vm, "([]a:1 2),()", "+(,`a)!,1 2");
+    try expectEval(vm, "()$2", "()");
+    try testing.expectError(error.length, vm.evalSource("()$1 2", .q, "<test>"));
+    try expectEval(vm, "1 2!()", "1 2!(();())");
+    try testing.expectError(error.length, vm.evalSource("1 2!3", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("(1 2) . 1", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("{x} . ()", .q, "<test>"));
+    try expectEval(vm, "(1 2;3 4) . 1 0", "3");
+    // Names may carry a dot inside or at the end.
+    try expectEval(vm, "u18.:2;u18.", "2");
+    try expectEval(vm, "parse \"a.b:1\"", "(:;`a.b;1)");
 }

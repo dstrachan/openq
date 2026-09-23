@@ -23,7 +23,7 @@ pub fn assignGlobal(vm: *Vm, x: *Value, y: *Value) !*Value {
     std.log.debug("assign: {f}", .{x.fmt(vm)});
     switch (x.as) {
         .symbol => |identifier| {
-            const home = (try vm.identifierHome(identifier, true)).?;
+            const home = (try vm.identifierHome(identifier, true)) orelse return error.type;
             try vm.namespaceSet(home.namespace, home.name, y);
             return y;
         },
@@ -552,6 +552,9 @@ fn fillAtoms(vm: *Vm, x: *Value, y: *Value) Vm.RunError!*Value {
 /// side to its type (`` `long$(),1.5 `` is `,2`, `` `long$(),`a `` is a type error), as q
 /// does. Two dictionaries merge with the right side's values winning.
 pub fn join(vm: *Vm, x: *Value, y: *Value) !*Value {
+    // `()` joined with a dictionary or a table on either side is that value.
+    if (x.as == .list and x.as.list.len == 0 and (y.as == .dict or y.as == .table)) return y.ref();
+    if (y.as == .list and y.as.list.len == 0 and (x.as == .dict or x.as == .table)) return x.ref();
     if (x.as == .table or y.as == .table) return joinTables(vm, x, y);
     if (x.as == .dict and y.as == .dict) return joinDicts(vm, x, y);
     if (x.as == .dict or y.as == .dict) return error.type;
@@ -999,8 +1002,10 @@ pub fn cast(vm: *Vm, x: *Value, y: *Value) !*Value {
         // A long pads a string, as `5$"ab"`, and a short casts by type number, as `5h$1.5`.
         .long => |n| return pad(vm, n, y),
         .short => |n| return castByTypeNumber(vm, n, y),
-        // A list of longs pads a list of strings pairwise: `5 3$("ab";"cde")`.
+        // A list of longs pads a list of strings pairwise: `5 3$("ab";"cde")`; `()$y` is
+        // `()` for an atom or `()` and `length` for a list, as in q.
         .long_list, .list => {
+            if (x.as == .list and x.as.list.len == 0) return if (!y.isList() or y.count() == 0) vm.getConstant(.empty_list) else error.length;
             // A string on the right is `type`, or `length` when the counts differ.
             if (y.as == .char_list) return if (x.count() == y.count()) error.type else error.length;
             if (y.as != .list) return error.type;
@@ -1629,29 +1634,36 @@ pub fn dict(vm: *Vm, x: *Value, y: *Value) !*Value {
             .dict,
             .table,
             => {
+                // `()` as the values spreads to every key: `1 2!()` is `1 2!(();())`.
+                if (y.as == .list and y.as.list.len == 0 and x.count() > 0) {
+                    const spread = try vm.allocValue(.list, x.count());
+                    for (spread.as.list) |*slot| slot.* = vm.getConstant(.empty_list);
+                    errdefer spread.deref(vm.gpa);
+                    return vm.createValue(.dict, .{ .keys = x.ref(), .values = spread });
+                }
                 if (x.count() != y.count()) return error.length;
                 const value = try vm.createValue(.dict, .{ .keys = undefined, .values = undefined });
                 value.as.dict.keys = x.ref();
                 value.as.dict.values = y.ref();
                 return value;
             },
-            .boolean => return error.nyi,
-            .byte => return error.nyi,
-            .short => return error.nyi,
-            .int => return error.nyi,
-            .real => return error.nyi,
-            .timestamp => return error.nyi,
-            .month => return error.nyi,
-            .date => return error.nyi,
-            .datetime => return error.nyi,
-            .timespan => return error.nyi,
-            .minute => return error.nyi,
-            .second => return error.nyi,
-            .time => return error.nyi,
-            .long => return error.nyi,
-            .float => return error.nyi,
-            .char => return error.nyi,
-            .symbol => return error.nyi,
+            .boolean => return error.length,
+            .byte => return error.length,
+            .short => return error.length,
+            .int => return error.length,
+            .real => return error.length,
+            .timestamp => return error.length,
+            .month => return error.length,
+            .date => return error.length,
+            .datetime => return error.length,
+            .timespan => return error.length,
+            .minute => return error.length,
+            .second => return error.length,
+            .time => return error.length,
+            .long => return error.length,
+            .float => return error.length,
+            .char => return error.length,
+            .symbol => return error.length,
             .lambda => return error.nyi,
             .unary_primitive => return error.nyi,
             .operator => return error.nyi,
@@ -1756,12 +1768,10 @@ pub fn apply_at(vm: *Vm, x: *Value, y: *Value) !*Value {
 
 /// `f . args` applies to the items of a list: `{x+y} . 1 2` is 3, `{x} . enlist 5` is 5.
 pub fn apply(vm: *Vm, x: *Value, y: *Value) !*Value {
-    if (!y.isList()) {
-        var args = [_]*Value{y};
-        return vm.applyImpl(x, &args);
-    }
+    // The right argument is the argument list; an atom or `()` is `type`, as in q.
+    if (!y.isList()) return error.type;
     const len = y.count();
-    if (len == 0) return error.rank;
+    if (len == 0) return error.type;
     const args = try vm.gpa.alloc(*Value, len);
     defer vm.gpa.free(args);
     var done: usize = 0;
