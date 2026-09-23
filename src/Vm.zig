@@ -1998,7 +1998,7 @@ pub fn system(vm: *Vm, command: []const u8) !*Value {
             return vm.failWith("enable secondary threads via cmd line -s only");
         },
         .p => if (rest.len == 0) return vm.createValue(.int, 0) else return error.nyi,
-        .@"_" => return vm.createValue(.boolean, false),
+        ._ => return vm.createValue(.boolean, false),
         .w => {
             const result = try vm.allocValue(.long_list, if (rest.len == 0) 6 else 2);
             @memset(result.as.long_list, 0);
@@ -3144,7 +3144,7 @@ fn systemVariable(vm: *Vm, name: []const u8) !?*Value {
         'w' => return try vm.createValue(.int, 0),
         'a' => return try vm.createValue(.int, 2130706433),
         'c' => return try vm.createValue(.int, @intCast(std.Thread.getCpuCount() catch 1)),
-        'i' => return try vm.createValue(.int, @intCast(std.c.getpid())),
+        'i' => return try vm.createValue(.int, @intCast(std.posix.system.getpid())),
         'h' => {
             var buffer: [std.posix.HOST_NAME_MAX]u8 = undefined;
             const host = std.posix.gethostname(&buffer) catch "";
