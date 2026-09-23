@@ -27,6 +27,7 @@ pub const RunError = Error || std.zig.ErrorBundle.RenderToStderrError || error{
     identifier,
     length,
     limit,
+    match,
     nyi,
     os,
     parse,
@@ -323,8 +324,9 @@ fn push(vm: *Vm, value: *Value) void {
 pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
     assert(args.len > 0);
     switch (func.as) {
-        // An int is a handle: `1 "text"` prints, `h "text"` appends to a file.
-        .int, .long => return if (args.len == 1) q.files.write(vm, func, args[0]) else error.type,
+        // An int is a handle: `1 "text"` prints, `h "text"` appends to a file. Any atom
+        // applied to more than one argument is `length`, as `3.5[1;2]` is in q.
+        .int, .long => return if (args.len == 1) q.files.write(vm, func, args[0]) else error.length,
         .boolean,
         .byte,
         .short,
@@ -339,7 +341,7 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .minute,
         .second,
         .time,
-        => return error.type,
+        => return if (args.len == 1) error.type else error.length,
         // A symbol names a global: `` `a 1 `` indexes `a` and `` `f 2 `` calls `f`.
         .symbol => |name| {
             const target = try vm.readGlobal(name);
@@ -370,7 +372,8 @@ pub fn applyImpl(vm: *Vm, func: *Value, args: []*Value) RunError!*Value {
         .lambda => return vm.callLambda(func, args),
         .unary_primitive => |unary_primitive| {
             if (unary_primitive == .enlist and args.len > 1) return vm.enlist(args);
-            if (args.len > 1) return error.rank;
+            // `(::)[1;2]` is `match` in q, other primitives `rank`.
+            if (args.len > 1) return if (unary_primitive == .identity) error.match else error.rank;
             switch (unary_primitive) {
                 ._unused => unreachable,
                 .empty => return q.unary_primitives.identity(vm, args[0]),
@@ -570,6 +573,8 @@ fn applyForm(vm: *Vm, operator: Operator, args: []*Value) RunError!*Value {
     }
 
     const x = args[0];
+    // The function is applied like any value: a list indexes, an int writes to a handle,
+    // a symbol names a global, so `@[1 2 3;0;1 2]` is `2 2 3` and `@[1 2 3;0;3]` `domain`.
     const function = args[2];
     const value: ?*Value = if (args.len == 4) args[3] else null;
     // `@` indexes one level, so its index is a one-item index list.
@@ -1307,6 +1312,8 @@ pub fn eval(vm: *Vm, x: *Value) RunError!*Value {
                 if (std.mem.eql(u8, name, "while")) return vm.evalWhile(value[1..]);
                 if (std.mem.eql(u8, name, "do")) return vm.evalDo(value[1..]);
             }
+            // A return outside a lambda is `nyi`, as `value ":1"` is in q.
+            if (value[0].as == .char and value[0].as.char == ':' and value.len == 2) return error.nyi;
             if (value[0].as == .char and value[0].as.char == '\'' and value.len == 2) {
                 const v = try vm.eval(value[1]);
                 defer v.deref(vm.gpa);
@@ -1885,7 +1892,8 @@ pub fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
         .comma => vm.getUnaryPrimitive(.list),
         .minus => vm.getUnaryPrimitive(.neg),
         .dot => vm.getUnaryPrimitive(.value),
-        .colon => vm.getUnaryPrimitive(.identity),
+        // A return is the char `:` in a tree, as `parse ":x"` is `(":";`x)` in q.
+        .colon => vm.createValue(.char, ':'),
         // `'x` at the top level parses as the char `'` applied, which `eval` signals; with
         // a function on its left the apostrophe is the each iterator.
         .apostrophe => if (tree.nodeData(node).opt_node == .none) vm.createValue(.char, '\'') else vm.parseNode(node),
@@ -2559,10 +2567,10 @@ pub fn amendValue(vm: *Vm, old: *Value, index: *Value, function: *Value, value: 
 /// `f[x;y]` or `f[x]` for an amend; `:` puts `y` in place.
 fn applyAmend(vm: *Vm, function: *Value, x: *Value, y: ?*Value) RunError!*Value {
     if (function.as == .operator and function.as.operator == .assign) return (y orelse x).ref();
-    // An atom in the function's place is `domain`, or `length` with a fourth argument, as
-    // q reports `@[1 2 3;0;3]`; a list or a dictionary indexes and a symbol applies as
-    // the global it names (`@[1 2 3;0;1 2]` is `2 2 3`).
-    if (!isFunction(function) and function.as != .symbol and !function.isList() and function.as != .dict) return if (y == null) error.domain else error.length;
+    // Whatever sits in the function's place is applied as a value: a list or a
+    // dictionary indexes (`@[1 2 3;0;1 2]` is `2 2 3`), a symbol is the global it names,
+    // an int a handle (`@[1 2 3;0;3]` is `domain`), and any other atom `type`, or
+    // `length` with a fourth argument, as applying an atom to two arguments is.
     if (y) |v| {
         var operands = [_]*Value{ x, v };
         return vm.applyImpl(function, &operands);
@@ -7687,4 +7695,34 @@ test "table literals name columns like queries, run inside lambdas, and join by 
     try expectEval(vm, "5 3$(\"ab\";\"cde\")", "(\"ab   \";\"cde\")");
     try testing.expectError(error.length, vm.evalSource("1 2$\"abc\"", .q, "<test>"));
     try testing.expectError(error.type, vm.evalSource("2 3$\"ab\"", .q, "<test>"));
+}
+
+test "a leading return, the return marker, and values applied as functions follow q" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // `:` returns whatever follows, a verb with brackets included (test.q's `:@[f;p;h]`).
+    try expectEval(vm, "{:+[1;2]}[0]", "3");
+    try expectEval(vm, "{:-1}[0]", "-1");
+    try expectEval(vm, "{:$[x;1;2]}[1]", "1");
+    try expectEval(vm, "{[p]:@[{x};p;{[e;p]:()}[;p]]} \"a/b\"", "\"a/b\"");
+    try expectEval(vm, "{$[x;:1;2];3}[1]", "1");
+    // In a parse tree a return is the char `:`, and returning outside a lambda is `nyi`.
+    try expectEval(vm, "parse \":@[x;1;2]\"", "(\":\";(@;`x;1;2))");
+    try expectEval(vm, "parse \"a:1;:a\"", "(\";\";(:;`a;1);(\":\";`a))");
+    try testing.expectError(error.nyi, vm.evalSource("value \":1\"", .q, "<test>"));
+    try testing.expectError(error.nyi, vm.evalSource("value \"1;:2\"", .q, "<test>"));
+    // The amend function is applied as a value: a list indexes, an int is a handle, any
+    // other atom is `type`, and an atom applied to two arguments is `length`.
+    try expectEval(vm, "@[1 2 3;0;1 2]", "2 2 3");
+    try testing.expectError(error.domain, vm.evalSource("@[1 2 3;0;3]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[1 2 3;0;3.5]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[1 2 3;0;0]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("@[1 2 3;0;3.5;4]", .q, "<test>"));
+    try testing.expectError(error.type, vm.evalSource("@[1 2 3;0;1 2;4]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("3.5[1;4]", .q, "<test>"));
+    try testing.expectError(error.length, vm.evalSource("3[1;2]", .q, "<test>"));
+    try testing.expectError(error.match, vm.evalSource("(::)[1;2]", .q, "<test>"));
+    try expectEval(vm, "@[value;\"@[1 2 3;0;`nosuch]\";{x}]", "\"nosuch\"");
 }

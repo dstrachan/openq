@@ -496,8 +496,9 @@ fn parseVerb(p: *Parse, lhs: Node.Index, comptime sql_identifier: ?SqlIdentifier
             // `x` applied to `+[1;2]`, and `x+/[1 2]` to `+/[1 2]`, as q parses them.
             if (!isVerb(p.nodeTag(lhs)) and p.bracketFollowsVerb()) break :verb try p.parseUnary(lhs, sql_identifier);
             if (!isVerb(p.nodeTag(lhs))) break :verb try p.parseBinary(lhs, sql_identifier);
-            // A verb followed by another verb applies monadically in k; q has no such form.
-            if (p.mode != .k) return p.fail(.expected_infix_expr);
+            // A verb followed by another verb applies monadically in k; q has no such form,
+            // except that a leading `:` returns whatever follows (`:@[x;i;v]`, `:-1`).
+            if (p.mode != .k and p.nodeTag(lhs) != .colon) return p.fail(.expected_infix_expr);
             break :verb try p.parseUnary(lhs, sql_identifier);
         },
 

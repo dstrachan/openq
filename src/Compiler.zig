@@ -475,6 +475,8 @@ fn aliasOf(c: *Compiler, node: Node.Index) ?[]const u8 {
 /// the node is not one (a lambda, a name, an expression) or the primitive has no opcode.
 /// Only the opcodes between `identity` and `self` apply a value this way.
 fn directOpcode(c: *Compiler, node: Node.Index, arity: u8) Error!?ByteCode {
+    // `:x` is the identity (then a return); its tree form is the char `:`.
+    if (arity == 1 and c.tree.nodeTag(node) == .colon) return .identity;
     const tree = c.tree;
     const value: *Value = switch (tree.nodeTag(node)) {
         .keyword => (c.vm.qEntry(tree.tokenSlice(tree.nodeMainToken(node))) orelse return null).ref(),
