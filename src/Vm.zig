@@ -2086,11 +2086,71 @@ pub fn loadScript(vm: *Vm, path: []const u8) RunError!*Value {
     const source = Io.Dir.cwd().readFileAlloc(vm.io, path, vm.gpa, .unlimited) catch |err| return q.internal.failOs(vm, path, err);
     defer vm.gpa.free(source);
     const mode: Ast.Mode = if (std.mem.endsWith(u8, path, ".k")) .k else .q;
-    return vm.runScript(source, mode, path);
+    return vm.runScript(source, mode, path, .script);
 }
 
-/// Runs script text (a file's, or standard input's when it is not a terminal).
-pub fn runScript(vm: *Vm, source: []const u8, mode: Ast.Mode, path: []const u8) RunError!*Value {
+/// How statements run in sequence report their values, as q 4.0 does (checked with
+/// minimal q.k files): a script (`\l`, q.k at startup, `openq file.q`) writes the k
+/// display of every value but `::` and stops at the first error; the console (piped
+/// standard input) shows every value through `.Q.s`, reports an error with the time
+/// and carries on.
+pub const Echo = enum { script, console };
+
+fn runStatement(vm: *Vm, text: [:0]const u8, mode: Ast.Mode, path: []const u8, echo: Echo) RunError!void {
+    const value = vm.evalSource(text, mode, path) catch |err| switch (echo) {
+        .script => return err,
+        .console => return vm.reportError(err, true),
+    };
+    defer value.deref(vm.gpa);
+    switch (echo) {
+        .console => vm.show(value) catch |err| try vm.reportError(err, true),
+        .script => {
+            if (value.as == .unary_primitive and value.as.unary_primitive == .identity) return;
+            try vm.stdout.print("{f}\n", .{value.fmt(vm)});
+            try vm.stdout.flush();
+        },
+    }
+}
+
+/// Reports an error on stderr as the console does: `'name`, or the signal's text, and
+/// when `stamped` (the console reading a pipe) the local time first, as q 4.0 writes
+/// `'2026.09.22T21:43:30.613 nosuch`.
+pub fn reportError(vm: *Vm, err: RunError, stamped: bool) RunError!void {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    const text = if (err == error.signal or err == error.identifier) (vm.signal_message orelse @errorName(err)) else @errorName(err);
+    try vm.stdout.flush();
+    if (stamped) {
+        const now = (try vm.clockVariable(try vm.intern(".z.Z"))).?;
+        defer now.deref(vm.gpa);
+        std.debug.print("'{f} {s}\n", .{ now.fmt(vm), text });
+    } else std.debug.print("'{s}\n", .{text});
+}
+
+/// Shows a value on stdout as the q console does (checked against q 4.0 with minimal
+/// q.k files): every result, `::` included, goes through `.Q.s` when it is defined
+/// and the string it returns is written as it is (q.k's gives `""` for `::`, so an
+/// assignment shows nothing; anything but a string shows nothing); an error from
+/// `.Q.s` is the statement's error. Without `.Q.s` the console writes the k display
+/// and a newline, and nothing for `::`.
+pub fn show(vm: *Vm, value: *Value) RunError!void {
+    defer vm.stdout.flush() catch {};
+    const s = vm.readGlobal(try vm.intern(".Q.s")) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            if (value.as == .unary_primitive and value.as.unary_primitive == .identity) return;
+            return vm.stdout.print("{f}\n", .{value.fmt(vm)});
+        },
+    };
+    defer s.deref(vm.gpa);
+    var args = [_]*Value{value};
+    const shown = try vm.applyImpl(s, &args);
+    defer shown.deref(vm.gpa);
+    if (shown.as != .char_list) return;
+    try vm.stdout.writeAll(shown.as.char_list);
+}
+
+/// Runs script text statement by statement (a line and the indented lines after it).
+pub fn runScript(vm: *Vm, source: []const u8, mode: Ast.Mode, path: []const u8, echo: Echo) RunError!*Value {
     const saved = vm.namespace;
     defer vm.namespace = saved;
 
@@ -2116,15 +2176,13 @@ pub fn runScript(vm: *Vm, source: []const u8, mode: Ast.Mode, path: []const u8) 
             } else if (std.mem.eql(u8, trimmed, "\\")) {
                 if (!in_comment) break;
                 in_comment = false;
+            } else if (echo == .console and std.mem.eql(u8, trimmed, "\\\\")) {
+                // `\\` ends a console session.
+                break;
             } else if (!in_comment and trimmed.len > 0 and trimmed[0] != '/') {
                 const text = try vm.gpa.dupeSentinel(u8, trimmed, 0);
                 defer vm.gpa.free(text);
-                const value = try vm.evalSource(text, mode, path);
-                defer value.deref(vm.gpa);
-                if (value.as != .unary_primitive or value.as.unary_primitive != .identity) {
-                    try vm.stdout.print("{f}\n", .{value.fmt(vm)});
-                    try vm.stdout.flush();
-                }
+                try vm.runStatement(text, mode, path, echo);
             }
             statement.clearRetainingCapacity();
         }

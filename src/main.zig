@@ -218,17 +218,9 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map, script
             }
             if (source.len == 2 and source[0] == '\\' and source[1] == '\\') break;
 
-            const value = vm.evalSource(source, mode, "<stdin>") catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidCharacter => return error.InvalidCharacter,
-                error.signal, error.identifier => {
-                    std.debug.print("'{s}\n", .{vm.signal_message orelse @errorName(err)});
-                    continue;
-                },
-                else => {
-                    std.debug.print("'{t}\n", .{err});
-                    continue;
-                },
+            const value = vm.evalSource(source, mode, "<stdin>") catch |err| {
+                try vm.reportError(err, false);
+                continue;
             };
             defer value.deref(gpa);
 
@@ -240,27 +232,16 @@ fn cmdRepl(gpa: Allocator, io: Io, environ_map: *std.process.Environ.Map, script
 
         const source = buffer.written()[0..len :0];
 
-        // Piped input is a script: statement by statement, values shown as they come.
-        const value = vm.runScript(source, .q, "<stdin>") catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.signal, error.identifier => {
-                std.debug.print("'{s}\n", .{vm.signal_message orelse @errorName(err)});
-                std.process.exit(1);
-            },
-            else => {
-                std.debug.print("'{t}\n", .{err});
-                std.process.exit(1);
-            },
-        };
+        // Piped input is the console: every result shown through `.Q.s`, errors
+        // reported with the time, and the session carrying on past them.
+        const value = try vm.runScript(source, .q, "<stdin>", .console);
         value.deref(gpa);
         try stdout.flush();
     }
 }
 
 fn printResult(stdout: *Io.Writer, vm: *Vm, value: *Value) !void {
-    if (value.as != .unary_primitive or value.as.unary_primitive != .identity) {
-        try stdout.print("{f}\n", .{value.fmt(vm)});
-    }
+    vm.show(value) catch |err| try vm.reportError(err, false);
     try stdout.flush();
 }
 
