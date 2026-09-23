@@ -149,7 +149,7 @@ fn negate(number: anytype) @TypeOf(number) {
 
 pub fn first(vm: *Vm, x: *Value) !*Value {
     switch (x.as) {
-        .list => |val| return val[0].ref(),
+        .list => |val| return if (val.len > 0) val[0].ref() else x.ref(),
         .boolean,
         .byte,
         .short,
@@ -180,23 +180,28 @@ pub fn first(vm: *Vm, x: *Value) !*Value {
         .each_left,
         .composition,
         => return x.ref(),
-        .boolean_list => |val| return vm.createValue(.boolean, val[0]),
-        .byte_list => |val| return vm.createValue(.byte, val[0]),
-        .short_list => |val| return vm.createValue(.short, val[0]),
-        .int_list => |val| return vm.createValue(.int, val[0]),
-        .long_list => |val| return vm.createValue(.long, val[0]),
-        .real_list => |val| return vm.createValue(.real, val[0]),
-        .float_list => |val| return vm.createValue(.float, val[0]),
-        .char_list => |val| return vm.createValue(.char, val[0]),
-        .timestamp_list => |val| return vm.createValue(.timestamp, val[0]),
-        .month_list => |val| return vm.createValue(.month, val[0]),
-        .date_list => |val| return vm.createValue(.date, val[0]),
-        .datetime_list => |val| return vm.createValue(.datetime, val[0]),
-        .timespan_list => |val| return vm.createValue(.timespan, val[0]),
-        .minute_list => |val| return vm.createValue(.minute, val[0]),
-        .second_list => |val| return vm.createValue(.second, val[0]),
-        .time_list => |val| return vm.createValue(.time, val[0]),
-        .symbol_list => |val| return vm.createValue(.symbol, val[0]),
+        .boolean_list => |val| return vm.createValue(.boolean, if (val.len > 0) val[0] else false),
+        .byte_list => |val| return vm.createValue(.byte, if (val.len > 0) val[0] else 0),
+        inline .short_list,
+        .int_list,
+        .long_list,
+        .timestamp_list,
+        .month_list,
+        .date_list,
+        .timespan_list,
+        .minute_list,
+        .second_list,
+        .time_list,
+        => |val, tag| return vm.createValue(
+            q.operators.counterpart(tag),
+            if (val.len > 0) val[0] else @backingInt(Value.Integer(@typeInfo(@TypeOf(val)).pointer.child).null),
+        ),
+        inline .real_list, .float_list, .datetime_list => |val, tag| return vm.createValue(
+            q.operators.counterpart(tag),
+            if (val.len > 0) val[0] else std.math.nan(@typeInfo(@TypeOf(val)).pointer.child),
+        ),
+        .char_list => |val| return vm.createValue(.char, if (val.len > 0) val[0] else ' '),
+        .symbol_list => |val| return vm.createValue(.symbol, if (val.len > 0) val[0] else .empty),
         .dict => |val| return first(vm, val.values),
         // The first row of a table, a row of nulls when it has none.
         .table => return q.operators.rowAt(vm, x, 0),
@@ -896,7 +901,7 @@ pub fn not(vm: *Vm, x: *Value) Vm.RunError!*Value {
         => |items, tag| {
             const result = try vm.allocValue(.boolean_list, items.len);
             errdefer comptime unreachable;
-            for (result.as.boolean_list, items) |*r, v| r.* = isZero(comptime q.operators.counterpart(tag), v);
+            for (result.as.boolean_list, items) |*r, v| r.* = isZero(q.operators.counterpart(tag), v);
             return result;
         },
         else => return error.type,
@@ -949,7 +954,7 @@ pub fn @"null"(vm: *Vm, x: *Value) Vm.RunError!*Value {
         => |items, tag| {
             const result = try vm.allocValue(.boolean_list, items.len);
             errdefer comptime unreachable;
-            for (result.as.boolean_list, items) |*r, v| r.* = isNullScalar(comptime q.operators.counterpart(tag), v);
+            for (result.as.boolean_list, items) |*r, v| r.* = isNullScalar(q.operators.counterpart(tag), v);
             return result;
         },
         .unary_primitive => |p| return vm.createValue(.boolean, p == .identity),
@@ -1265,7 +1270,7 @@ pub fn reciprocal(vm: *Vm, x: *Value) Vm.RunError!*Value {
         => |items, tag| {
             const result = try vm.allocValue(.float_list, items.len);
             errdefer comptime unreachable;
-            for (result.as.float_list, items) |*r, v| r.* = 1.0 / scalarFloat(comptime q.operators.counterpart(tag), v);
+            for (result.as.float_list, items) |*r, v| r.* = 1.0 / scalarFloat(q.operators.counterpart(tag), v);
             return result;
         },
         else => return error.type,

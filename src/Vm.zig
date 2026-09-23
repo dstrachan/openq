@@ -7812,3 +7812,62 @@ test "what loading q.q needed: blank lines in scripts, undefined names in compou
     try expectEval(vm, "u18.:2;u18.", "2");
     try expectEval(vm, "parse \"a.b:1\"", "(:;`a.b;1)");
 }
+
+test "first follows q: typed empties give their null, atoms and functions themselves, dictionaries and tables their first value or row" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // A typed empty list gives the null of its type; `()` and `enlist ()` give `()`.
+    try expectEval(vm, "first `long$()", "0N");
+    try expectEval(vm, "first `int$()", "0Ni");
+    try expectEval(vm, "first `short$()", "0Nh");
+    try expectEval(vm, "first `boolean$()", "0b");
+    try expectEval(vm, "first `byte$()", "0x00");
+    try expectEval(vm, "first `real$()", "0Ne");
+    try expectEval(vm, "first `float$()", "0n");
+    try expectEval(vm, "first \"\"", "\" \"");
+    try expectEval(vm, "first `symbol$()", "`");
+    try expectEval(vm, "first `timestamp$()", "0Np");
+    try expectEval(vm, "first `month$()", "0Nm");
+    try expectEval(vm, "first `date$()", "0Nd");
+    try expectEval(vm, "first `datetime$()", "0Nz");
+    try expectEval(vm, "first `timespan$()", "0Nn");
+    try expectEval(vm, "first `minute$()", "0Nu");
+    try expectEval(vm, "first `second$()", "0Nv");
+    try expectEval(vm, "first `time$()", "0Nt");
+    try expectEval(vm, "type first `long$()", "-7h");
+    try expectEval(vm, "type first \"\"", "-10h");
+    try expectEval(vm, "first ()", "()");
+    try expectEval(vm, "first enlist ()", "()");
+    try expectEval(vm, "type first ()", "0h");
+    // Lists give their first item, whatever it is.
+    try expectEval(vm, "first 1 2 3", "1");
+    try expectEval(vm, "first 1 2h", "1h");
+    try expectEval(vm, "first 1.5 2.5", "1.5");
+    try expectEval(vm, "first \"ab\"", "\"a\"");
+    try expectEval(vm, "first `a`b", "`a");
+    try expectEval(vm, "first 0x0102", "0x01");
+    try expectEval(vm, "first 10b", "1b");
+    try expectEval(vm, "first 2000.01.01 2000.01.02", "2000.01.01");
+    try expectEval(vm, "first (1;`a)", "1");
+    try expectEval(vm, "first (1 2;3 4)", "1 2");
+    try expectEval(vm, "first enlist 1 2", "1 2");
+    // Atoms and functions are themselves.
+    try expectEval(vm, "first 5", "5");
+    try expectEval(vm, "first `a", "`a");
+    try expectEval(vm, "first \"x\"", "\"x\"");
+    try expectEval(vm, "first {x}", "{x}");
+    try expectEval(vm, "first (+)", "+");
+    try expectEval(vm, "first +[1]", "+[1]");
+    try expectEval(vm, "first (+/)", "+/");
+    try expectEval(vm, "first (::)", "::");
+    // A dictionary gives its first value, a table its first row, nulls when empty.
+    try expectEval(vm, "first `a`b!1 2", "1");
+    try expectEval(vm, "first ()!()", "()");
+    try expectEval(vm, "first (`symbol$())!`long$()", "0N");
+    try expectEval(vm, "first ([]a:1 2;b:`x`y)", "`a`b!(1;`x)");
+    try expectEval(vm, "first ([]a:`long$();b:`symbol$())", "`a`b!(0N;`)");
+    try expectEval(vm, "first ([k:1 2]v:3 4)", "(,`v)!,3");
+    try expectEval(vm, "first ([k:`long$()]v:`long$())", "(,`v)!,0N");
+}
