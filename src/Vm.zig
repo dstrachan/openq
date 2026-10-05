@@ -1904,8 +1904,9 @@ pub fn parseNode(vm: *Vm, node: Node.Index) Error!*Value {
     }
 }
 
-pub fn parseUnaryNode(vm: *Vm, node: Node.Index) !*Value {
+pub fn parseUnaryNode(vm: *Vm, grouped: Node.Index) !*Value {
     const tree = vm.tree;
+    const node = tree.ungroup(grouped);
 
     return switch (tree.nodeTag(node)) {
         .bang => vm.getUnaryPrimitive(.key),
@@ -7870,4 +7871,35 @@ test "first follows q: typed empties give their null, atoms and functions themse
     try expectEval(vm, "first ([]a:`long$();b:`symbol$())", "`a`b!(0N;`)");
     try expectEval(vm, "first ([k:1 2]v:3 4)", "(,`v)!,3");
     try expectEval(vm, "first ([k:`long$()]v:`long$())", "(,`v)!,0N");
+}
+
+test "a parenthesised glyph applied by juxtaposition is its monadic form" {
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const vm: *Vm = try .init(testing.io, testing.allocator, &discarding.writer);
+    defer vm.deinit();
+
+    // `(!)10` is `(!:;10)` as q parses it, through any parentheses and in both modes,
+    // while brackets keep the projection: `(!)[10]` is `![10]`.
+    try expectEval(vm, "(!)10", "0 1 2 3 4 5 6 7 8 9");
+    try expectEval(vm, "((!))10", "0 1 2 3 4 5 6 7 8 9");
+    try expectEval(vm, "(!)(10)", "0 1 2 3 4 5 6 7 8 9");
+    try expectEvalMode(vm, .k, "(!)10", "0 1 2 3 4 5 6 7 8 9");
+    try expectEval(vm, "(!)[10]", "![10]");
+    try expectEval(vm, "![10]", "![10]");
+    try expectEval(vm, "(-)5", "-5");
+    try expectEval(vm, "-[5]", "-[5]");
+    try expectEval(vm, "(#)1 2 3", "3");
+    try expectEval(vm, "(#)[1 2 3]", "#[1 2 3]");
+    try expectEval(vm, "-3!(+)(1 2;3 4)", "\"(1 3;2 4)\"");
+    try expectEval(vm, "(%)2", "0.5");
+    try expectEval(vm, "(!)`a`b!1 2", "`a`b");
+    try testing.expectError(error.rank, vm.evalSource("(+)1", .q, "<test>"));
+
+    // Held in a variable the glyph is the operator again, so `f 10` projects.
+    try expectEval(vm, "f:(!);f 10", "![10]");
+
+    // Inside a lambda the same shape compiles to the monadic instruction.
+    try expectEval(vm, "{(!)x} 10", "0 1 2 3 4 5 6 7 8 9");
+    try expectEval(vm, "{(-)x}[5]", "-5");
+    try expectEval(vm, "{(!)[x]} 10", "![10]");
 }

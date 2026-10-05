@@ -474,10 +474,12 @@ fn aliasOf(c: *Compiler, node: Node.Index) ?[]const u8 {
 /// The instruction that applies the primitive or operator a node stands for, or null when
 /// the node is not one (a lambda, a name, an expression) or the primitive has no opcode.
 /// Only the opcodes between `identity` and `self` apply a value this way.
-fn directOpcode(c: *Compiler, node: Node.Index, arity: u8) Error!?ByteCode {
-    // `:x` is the identity (then a return); its tree form is the char `:`.
-    if (arity == 1 and c.tree.nodeTag(node) == .colon) return .identity;
+fn directOpcode(c: *Compiler, grouped: Node.Index, arity: u8) Error!?ByteCode {
     const tree = c.tree;
+    // A parenthesised glyph applied to one argument is its monadic form: `{(!)x}` is `!:`.
+    const node = if (arity == 1) tree.ungroup(grouped) else grouped;
+    // `:x` is the identity (then a return); its tree form is the char `:`.
+    if (arity == 1 and tree.nodeTag(node) == .colon) return .identity;
     const value: *Value = switch (tree.nodeTag(node)) {
         .keyword => (c.vm.qEntry(tree.tokenSlice(tree.nodeMainToken(node))) orelse return null).ref(),
         .identifier,
@@ -534,8 +536,10 @@ fn compileOperand(c: *Compiler, node: Node.Index) Error!void {
     }
 }
 
-/// The function of `f x`: a glyph is its monadic form, as `-:`; anything else compiles.
-fn compileFunction(c: *Compiler, node: Node.Index) Error!void {
+/// The function of `f x`: a glyph is its monadic form, as `-:`, through any parentheses
+/// (`(!)x` is `!:`); anything else compiles.
+fn compileFunction(c: *Compiler, grouped: Node.Index) Error!void {
+    const node = c.tree.ungroup(grouped);
     switch (c.tree.nodeTag(node)) {
         .identifier,
         .keyword,

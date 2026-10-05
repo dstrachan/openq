@@ -95,6 +95,15 @@ pub fn nodeMainToken(tree: *const Ast, node: Node.Index) TokenIndex {
     return tree.nodes.items(.main_token)[@backingInt(node)];
 }
 
+/// The node inside any parentheses: `(!)` and `((!))` are the glyph itself. A glyph
+/// applied by juxtaposition keeps its monadic form through parentheses, so `(!)10` is
+/// `(!:;10)` as q parses it, while `(!)[10]` is the projection `![10]`.
+pub fn ungroup(tree: *const Ast, node: Node.Index) Node.Index {
+    var n = node;
+    while (tree.nodeTag(n) == .grouped_expression) n = tree.nodeData(n).node_and_token[0];
+    return n;
+}
+
 pub fn nodeData(tree: *const Ast, node: Node.Index) Node.Data {
     return tree.nodes.items(.data)[@backingInt(node)];
 }
